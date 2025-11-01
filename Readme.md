@@ -4,7 +4,7 @@
 
 
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-red?logo=apache&logoColor=white)](https://www.apache.org/licenses/LICENSE-2.0)[![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com/download)![C++](https://img.shields.io/badge/Language-C++-brightgreen?logo=c%2B%2B&logoColor=white&labelColor=blue)[![Soft UE Project](https://img.shields.io/badge/Ultra%20Ethernet%20Consortium-UEC-blue?logo=ethernet&logoColor=white)](https://ultraethernet.org/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-red?logo=apache&logoColor=white)](https://www.apache.org/licenses/LICENSE-2.0)[![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com/download)![C++](https://img.shields.io/badge/Language-C++-brightgreen?logo=c%2B%2B&logoColor=white&labelColor=blue)[![Soft UE Project](https://img.shields.io/badge/Ultra%20Ethernet-UE-blue?logo=ethernet&logoColor=white)](https://ultraethernet.org/)
 
 
 - [**Soft**-UE: Software Prototype of Ultra Ethernet](#soft-ue-software-prototype-of-ultra-ethernet)
