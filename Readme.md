@@ -25,7 +25,7 @@
 
 ## Soft-UE Overview
 
-Soft-UE is a software prototype of Ultra Ethernet Specification.  Ultra Ethernet is a specification of new protocols for use over Ethernet networks and optional enhancements to existing Ethernet protocols that improve performance, function, and interoperability of AI and HPC applications. The Ultra Ethernet  specification covers a broad range of software and hardware relevant to AI and HPC workloads: from the API supported by UE-compliant devices to the services offered by the transport, link, and physical layers, as well as management, interoperability, benchmarks, and compliance requirements. This project aims to help open-source community developers better understand the Ultra Ethernet Specification while verifying its correctness and feasibility.
+Soft-UE is a software prototype of [Ultra Ethernet](https://ultraethernet.org/) Specification.  [Ultra Ethernet](https://ultraethernet.org/) is a specification of new protocols for use over Ethernet networks and optional enhancements to existing Ethernet protocols that improve performance, function, and interoperability of AI and HPC applications. The Ultra Ethernet  specification covers a broad range of software and hardware relevant to AI and HPC workloads: from the API supported by UE-compliant devices to the services offered by the transport, link, and physical layers, as well as management, interoperability, benchmarks, and compliance requirements. This project aims to help open-source community developers better understand the Ultra Ethernet Specification while verifying its correctness and feasibility.
 
 **Current Release:** SoftUE v1.0.0
 
@@ -98,7 +98,7 @@ sudo apt install build-essential cmake git software-properties-common
 # 1. clone the repository
 git clone https://github.com/SoftUEGroup/Soft-UE.git
 # 2. navigate to the project directory
-cd UET/src
+cd Soft-UE/UET/src
 ```
 
 ### Test Run
@@ -106,7 +106,13 @@ cd UET/src
 The project supports experimental studies at two levels of granularity: the **SES layer** and the **PDS layer**.
  For single-host evaluations, we recommend using the **software loopback link**, which is internally simulated. An optional **UDP-based network shim** is also available but disabled by default. We encourage the open-source community to build upon this work and extend it for **multi-host testing**.
 
-You can either run the **existing test cases** used during development or **create your own**. All test cases are located in `UET/src/Test`, and switching between them only requires modifying the `TARGET` variable in the **Makefile**.
+You can either run the **existing test cases** used during development or **create your own**. 
+```Bash
+# 1. navigate to the Test directory
+cd Test
+# 2. compile the test cases
+make help
+```
 
 #### PDSTest
 

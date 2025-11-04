@@ -109,7 +109,7 @@ debug: $(TARGET)
 # List all available test files
 list:
 	@echo "Discovered test files:"
-	@for file in $(TEST_FILES); do echo "  - $$file"; done
+# @for file in $(TEST_FILES); do echo "  - $$file"; done
 	@echo ""
 	@echo "Available compilation targets:"
 	@for target in $(TARGETS); do echo "  - $$target"; done
