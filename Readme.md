@@ -114,7 +114,7 @@ sudo apt install build-essential cmake git software-properties-common
 
 ```Bash
 # 1. clone the repository
-git clone https://github.com/SoftUEGroup/Soft-UE.git
+git clone https://github.com/lipu0324/Soft-UE.git
 # 2. navigate to the project directory
 cd Soft-UE/UET/src
 ```
