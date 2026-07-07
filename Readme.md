@@ -27,6 +27,7 @@
 
 - [**Soft**-UE: Software Prototype of Ultra Ethernet](#soft-ue-software-prototype-of-ultra-ethernet)
   - [Soft-UE Overview](#soft-ue-overview)
+  - [RDMA Provider Prototype Branch](#rdma-provider-prototype-branch)
   - [System Architecture](#system-architecture)
     - [Core Components](#core-components)
   - [Repository Structure](#repository-structure)
@@ -46,6 +47,31 @@
 Soft-UE is a software prototype of [Ultra Ethernet Specification](https://ultraethernet.org/) .  Ultra Ethernet is a specification of new protocols for use over Ethernet networks and optional enhancements to existing Ethernet protocols that improve performance, function, and interoperability of AI and HPC applications. The Ultra Ethernet  specification covers a broad range of software and hardware relevant to AI and HPC workloads: from the API supported by UE-compliant devices to the services offered by the transport, link, and physical layers, as well as management, interoperability, benchmarks, and compliance requirements. This project aims to help open-source community developers better understand the Ultra Ethernet Specification while verifying its correctness and feasibility.
 
 **Current Release:** SoftUE v1.0.0
+
+## RDMA Provider Prototype Branch
+
+This branch (`feature/rdma-provider-prototype`) contains an experimental RDMA/libfabric provider prototype and the related UET data-path updates. It is intended for review as a feature branch rather than as the current `main` release.
+
+Main additions in this branch:
+
+- `uet_provider/`: a libfabric provider prototype for UET, built as `libuet-fi.so`.
+- `UET/src/UETCoreSources.mk`: shared source list for tests and provider builds.
+- `UET/src/PayloadHandle.hpp`: payload descriptor/handle support for lower-copy data movement.
+- SES/PDS/PDC updates for READ/WRITE memory semantics, response-with-data, RUD placement/completion paths, and UDP transport integration.
+- `UET/src/Test/`: guard, READ/WRITE, MR descriptor, libfabric harness, RUD, and NCCL-oriented tests.
+- `scripts/`: environment checks and smoke/regression helpers for libfabric, OFI/NCCL, and local RDMA setup.
+- `README_rdma.md`: detailed implementation notes, environment setup, and validation commands.
+
+Build notes:
+
+```bash
+export PKG_CONFIG_PATH=/opt/libfabric/lib/pkgconfig:$PKG_CONFIG_PATH
+make -C uet_provider
+make -C UET/src/Test RefactorGuardTest
+./UET/src/Test/RefactorGuardTest
+```
+
+The branch intentionally excludes runtime logs, IDE state, and build outputs such as `.so`, `.o`, `.exe`, `.log`, and `.gch` files. Runtime evidence and larger experiment logs should be kept as separate artifacts rather than committed to this source branch.
 
 ## System Architecture
 

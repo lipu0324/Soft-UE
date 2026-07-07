@@ -1,5 +1,7 @@
 # README_RDMA
 
+分支说明：本文件对应 `feature/rdma-provider-prototype`，用于补充根目录 `Readme.md` 中 RDMA/libfabric provider 原型分支的详细实现、环境和验证说明。该分支是代码审查用 feature branch，不代表 `main` 当前发布内容。
+
 本文件用于记录 UET 中与 RDMA 内存语义相关的实现更新（READ/WRITE、DMA 模拟、payload 句柄化等），包含修改思路、主体流程与使用方式，后续相关更新也集中追加在此。
 
 ## 修改思路
