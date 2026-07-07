@@ -27,6 +27,7 @@
 
 - [**Soft**-UE: Software Prototype of Ultra Ethernet](#soft-ue-software-prototype-of-ultra-ethernet)
   - [Soft-UE Overview](#soft-ue-overview)
+  - [Active Feature Branches](#active-feature-branches)
   - [System Architecture](#system-architecture)
     - [Core Components](#core-components)
   - [Repository Structure](#repository-structure)
@@ -46,6 +47,14 @@
 Soft-UE is a software prototype of [Ultra Ethernet Specification](https://ultraethernet.org/) .  Ultra Ethernet is a specification of new protocols for use over Ethernet networks and optional enhancements to existing Ethernet protocols that improve performance, function, and interoperability of AI and HPC applications. The Ultra Ethernet  specification covers a broad range of software and hardware relevant to AI and HPC workloads: from the API supported by UE-compliant devices to the services offered by the transport, link, and physical layers, as well as management, interoperability, benchmarks, and compliance requirements. This project aims to help open-source community developers better understand the Ultra Ethernet Specification while verifying its correctness and feasibility.
 
 **Current Release:** SoftUE v1.0.0
+
+## Active Feature Branches
+
+The project currently has an active RDMA/libfabric prototype branch:
+
+- [`feature/rdma-provider-prototype`](https://github.com/lipu0324/Soft-UE/tree/feature/rdma-provider-prototype): experimental UET RDMA provider work, including a libfabric provider prototype, READ/WRITE memory semantics, payload descriptor/handle support, RUD path updates, RDMA/libfabric-oriented tests, and environment/smoke scripts.
+
+Detailed implementation and validation notes are maintained in [`README_rdma.md`](https://github.com/lipu0324/Soft-UE/blob/feature/rdma-provider-prototype/README_rdma.md) on that branch. Runtime logs, build outputs, and larger experiment evidence are intentionally kept out of the source branch.
 
 ## System Architecture
 
