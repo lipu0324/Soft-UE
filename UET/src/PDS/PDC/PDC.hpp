@@ -35,16 +35,26 @@
 #include "../../logger/Logger.hpp"
 #include "process/ThreadSafeQueue.hpp"
 #include "RTOTimer/RTOTimer.hpp"
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <queue>
 #include <map>
 #include <iostream>
 #include <sstream>
 #include <chrono>
 #include <iomanip>
+#include <functional>
+#include <memory>
+#include <array>
+#include <set>
+#include <unordered_set>
+#include <unordered_map>
+#include <vector>
 
 // Retransmission configuration
-#define USE_RTO 0
+#define USE_RTO 1
 
 /** Maximum PSN range, used to limit the valid range of sequence numbers */ 
 //#define Max_PSN_Range 500
@@ -93,6 +103,7 @@ enum cm_type {
     PROBE,       /**< Probe control message, used to detect connection state */
     CREDIT,      /**< Flow control credit control message */
     CREDIT_REQ,  /**< Flow control credit request control message */
+    SACK_CTRL,   /**< Selective acknowledgment control message for RUD */
     NEGOTIATION, /**< Negotiation control message, used for parameter negotiation */
     NONE         /**< No control message */
 };
@@ -106,184 +117,29 @@ enum error_type
     OPEN,       /**< Error during connection open */
     ACK_ERROR,  /**< Acknowledgment packet error */
     OOO,        /**< Packet out of order error (Out Of Order) */
+    OOO_ACCEPT, /**< RUD accepts the packet into the out-of-order window */
     DROP,       /**< Packet drop error */
     INV_SYN,    /**< Invalid SYN flag */
     INV_DPDCID  /**< Invalid target PDCID */
 };
 
+enum class NackCtrlClass : uint8_t
+{
+    FATAL_PROTOCOL = 0,
+    RESOURCE_RECOVERABLE = 1,
+    LOSS_INFERENCE = 2,
+};
 
-/**
- * @brief PDC state to string conversion
- */
-inline std::string pdcStateToString(pdc_state state) {
-    switch (state) {
-        case CLOSED:         return "CLOSED";
-        case CREATING:       return "CREATING";
-        case ESTABLISHED:    return "ESTABLISHED";
-        case QUIESCE:        return "QUIESCE";
-        case ACK_WAIT:       return "ACK_WAIT";
-        case CLOSE_ACK_WAIT: return "CLOSE_ACK_WAIT";
-        case PENDING:        return "PENDING";
-        default:             return "UNKNOWN_STATE(" + std::to_string(static_cast<int>(state)) + ")";
-    }
-}
+enum class CreditControlReason : uint8_t
+{
+    NONE = 0,
+    REFRESH = 1,
+    RESYNC_RESPONSE = 2,
+};
 
-/**
- * @brief PDC mode to string conversion
- */
-inline std::string pdcModeToString(pdc_mode mode) {
-    switch (mode) {
-        case RUD:  return "RUD";
-        case ROD:  return "ROD";
-        case RUDI: return "RUDI";
-        case UUD:  return "UUD";
-        default:   return "UNKNOWN_MODE(" + std::to_string(static_cast<int>(mode)) + ")";
-    }
-}
+#include "PDCStringUtils.hpp"
 
-/**
- * @brief Control message type to string conversion Control message type to string conversion Control message type to string conversion 
- */
-inline std::string cmTypeToString(cm_type type) {
-    switch (type) {
-        case NOOP:        return "NOOP";
-        case ACK_REQ:     return "ACK_REQ";
-        case CLR_CMD:     return "CLEAR_CMD";
-        case CLR_REQ:     return "CLEAR_REQ";
-        case CLOSE_CMD:   return "CLOSE_CMD";
-        case CLOSE_REQ:   return "CLOSE_REQ";
-        case PROBE:       return "PROBE";
-        case CREDIT:      return "CREDIT";
-        case CREDIT_REQ:  return "CREDIT_REQ";
-        case NEGOTIATION: return "NEGOTIATION";
-        case NONE:        return "NONE";
-        default:          return "UNKNOWN_CM_TYPE(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
 
-/**
- * @brief Error type to string conversion Error type to string conversion Error type to string conversion 
- */
-inline std::string errorTypeToString(error_type type) {
-    switch (type) {
-        case OPEN:       return "OPEN";
-        case ACK_ERROR:  return "ACK_ERROR";
-        case OOO:        return "OOO";
-        case DROP:       return "DROP";
-        case INV_SYN:    return "INV_SYN";
-        case INV_DPDCID: return "INV_DPDCID";
-        default:         return "UNKNOWN_ERROR_TYPE(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
-
-/**
- * @brief PDS packet type to string conversion PDS packet type to string conversion 
- */
-inline std::string pdsTypeToString(PDS_type type) {
-    switch (type) {
-        case Reserved:    return "Reserved";
-        case TSS:         return "TSS";
-        case RUD_REQ:     return "RUD_REQ";
-        case ROD_REQ:     return "ROD_REQ";
-        case RUDI_REQ:    return "RUDI_REQ";
-        case RUDI_RESP:   return "RUDI_RESP";
-        case UUD_REQ:     return "UUD_REQ";
-        case ACK:         return "ACK";
-        case ACK_CC:      return "ACK_CC";
-        case ACK_CCX:     return "ACK_CCX";
-        case NACK:        return "NACK";
-        case CP:          return "CP";
-        case NACK_CCX:    return "NACK_CCX";
-        case RUD_CC_REQ:  return "RUD_CC_REQ";
-        case ROD_CC_REQ:  return "ROD_CC_REQ";
-        default:          return "UNKNOWN_PDS_TYPE(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
-
-/**
- * @brief PDS header type to string conversion PDS header type to string conversion 
- */
-inline std::string pdsHeaderTypeToString(PDS_header_type type) {
-    switch (type) {
-        case entropy_header:   return "entropy_header";
-        case RUOD_req_header:  return "RUOD_req_header";
-        case RUOD_ack_header:  return "RUOD_ack_header";
-        case RUOD_cp_header:   return "RUOD_cp_header";
-        case nack_header:      return "nack_header";
-        default:               return "UNKNOWN_HEADER_TYPE(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
-
-/**
- * @brief PDS next header type to string conversion PDS next header type to string conversion 
- */
-inline std::string pdsNextHdrToString(PDS_next_hdr type) {
-    switch (type) {
-        case UET_HDR_REQUEST_SMALL:      return "UET_HDR_REQUEST_SMALL";
-        case UET_HDR_REQUEST_MEDIUM:     return "UET_HDR_REQUEST_MEDIUM";
-        case UET_HDR_REQUEST_STD:        return "UET_HDR_REQUEST_STD";
-        case UET_HDR_RESPONSE:           return "UET_HDR_RESPONSE";
-        case UET_HDR_RESPONSE_DATA:      return "UET_HDR_RESPONSE_DATA";
-        case UET_HDR_RESPONSE_DATA_SMALL: return "UET_HDR_RESPONSE_DATA_SMALL";
-        case UET_HDR_NONE:               return "UET_HDR_NONE";
-        default:                         return "UNKNOWN_NEXT_HDR(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
-
-/**
- * @brief PDS control type to string conversion PDS control type to string conversion 
- */
-inline std::string pdsCtlTypeToString(PDS_ctl_type type) {
-    switch (type) {
-        case Noop:        return "Noop";
-        case ACK_req:     return "ACK_req";
-        case Clear_cmd:   return "Clear_cmd";
-        case Clear_req:   return "Clear_req";
-        case Close_cmd:   return "Close_cmd";
-        case Close_req:   return "Close_req";
-        case Probe:       return "Probe";
-        case Credit:      return "Credit";
-        case Credit_req:  return "Credit_req";
-        case Negotiation: return "Negotiation";
-        default:          return "UNKNOWN_CTL_TYPE(" + std::to_string(static_cast<int>(type)) + ")";
-    }
-}
-
-/**
- * @brief NACK code to string conversion NACK code to string conversion 
- */
-inline std::string nackCodeToString(PDS_Nack_Codes code) {
-    switch (code) {
-        case UET_TRIMMED:           return "UET_TRIMMED";
-        case UET_TRIMMED_LASTHOP:   return "UET_TRIMMED_LASTHOP";
-        case UET_TRIMMED_ACK:       return "UET_TRIMMED_ACK";
-        case UET_NO_PDC_AVAIL:      return "UET_NO_PDC_AVAIL";
-        case UET_NO_CCC_AVAIL:      return "UET_NO_CCC_AVAIL";
-        case UET_NO_BITMAP:         return "UET_NO_BITMAP";
-        case UET_NO_PKT_BUFFER:     return "UET_NO_PKT_BUFFER";
-        case UET_NO_GTD_DEL_AVAIL:  return "UET_NO_GTD_DEL_AVAIL";
-        case UET_NO_SES_MSG_AVAIL:  return "UET_NO_SES_MSG_AVAIL";
-        case UET_NO_RESOURCE:       return "UET_NO_RESOURCE";
-        case UET_PSN_OOR_WINDOW:    return "UET_PSN_OOR_WINDOW";
-        case reserved:              return "reserved";
-        case UET_ROD_OOO:           return "UET_ROD_OOO";
-        case UET_INV_DPDCID:        return "UET_INV_DPDCID";
-        case UET_PDC_HDR_MISMATCH:  return "UET_PDC_HDR_MISMATCH";
-        case UET_CLOSING:           return "UET_CLOSING";
-        case UET_CLOSING_IN_ERR:    return "UET_CLOSING_IN_ERR";
-        case UET_PKT_NOT_RCVD:      return "UET_PKT_NOT_RCVD";
-        case UET_GTD_RESP_UNAVAIL:  return "UET_GTD_RESP_UNAVAIL";
-        case UET_ACK_WITH_DATA:     return "UET_ACK_WITH_DATA";
-        case UET_INVALID_SYN:       return "UET_INVALID_SYN";
-        case UET_PDC_MODE_MISMATCH: return "UET_PDC_MODE_MISMATCH";
-        case UET_NEW_START_PSN:     return "UET_NEW_START_PSN";
-        case UET_RCVD_SES_PROCG:    return "UET_RCVD_SES_PROCG";
-        case UET_UNEXP_EVENT:       return "UET_UNEXP_EVENT";
-        case UET_RCVR_INFER_LOSS:   return "UET_RCVR_INFER_LOSS";
-        default:                    return "UNKNOWN_NACK_CODE(0x" + 
-                                           std::to_string(static_cast<int>(code)) + ")";
-    }
-}
 // Convenient macro definitions for directly outputting enum strings in logs 
 #define STATE_STR(state) pdcStateToString(state).c_str()
 #define MODE_STR(mode) pdcModeToString(mode).c_str()
@@ -314,7 +170,62 @@ struct TX_pkt_meta
     uint16_t tx_pkt_handle; /**< Sending packet handle */
     uint16_t rto;           /**< Retransmission timeout time */
     uint16_t retry_cnt;     /**< Retry count */
-    // Add any other metadata you need to store here 
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+    bool is_retry{false};
+    bool is_request_som{false};
+    bool is_send_som{false};
+    bool is_read_response_data{false};
+    uint32_t message_offset{0};
+    bool is_last_fragment{false};
+    bool terminal_emitted{false};
+};
+
+struct SenderTerminalKey
+{
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+
+    bool operator==(const SenderTerminalKey &other) const noexcept
+    {
+        return job_id == other.job_id && msg_id == other.msg_id && dst_fep == other.dst_fep;
+    }
+};
+
+struct ReadResponseTerminalKey
+{
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+
+    bool operator==(const ReadResponseTerminalKey &other) const noexcept
+    {
+        return job_id == other.job_id && msg_id == other.msg_id && dst_fep == other.dst_fep;
+    }
+};
+
+struct ReadResponseTerminalKeyHash
+{
+    size_t operator()(const ReadResponseTerminalKey &key) const noexcept
+    {
+        const size_t a = std::hash<uint64_t>{}(key.job_id);
+        const size_t b = std::hash<uint16_t>{}(key.msg_id);
+        const size_t c = std::hash<uint32_t>{}(key.dst_fep);
+        return a ^ (b << 1) ^ (c << 2);
+    }
+};
+
+struct SenderTerminalKeyHash
+{
+    size_t operator()(const SenderTerminalKey &key) const noexcept
+    {
+        const size_t a = std::hash<uint64_t>{}(key.job_id);
+        const size_t b = std::hash<uint16_t>{}(key.msg_id);
+        const size_t c = std::hash<uint32_t>{}(key.dst_fep);
+        return a ^ (b << 1) ^ (c << 2);
+    }
 };
 
 /**
@@ -328,6 +239,7 @@ struct RX_pkt_meta
     PDS_type type;          /**< Packet type (Request/ACK/CP/NACK) */
     PDS_next_hdr next_hdr;  /**< SES header type */
     uint16_t spdcid;        /**< Receiver PDCID */
+    uint32_t src_fep;       /**< Source FEP identifier */
     uint32_t psn;           /**< Packet sequence number (PSN) */
     uint32_t clear_psn;     /**< Clear PSN, used for flow control */
     uint8_t syn : 1;        /**< SYN flag (establish connection) */
@@ -335,6 +247,101 @@ struct RX_pkt_meta
     uint8_t ar : 1;         /**< ACK request flag */
     bool som;               /**< Message start flag (Start Of Message) */
     uint16_t payload_len;   /**< Payload length */
+};
+
+struct RxMessageKey
+{
+    uint8_t opcode{0};
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t src_fep{0};
+    uint16_t pdcid{0};
+
+    bool operator==(const RxMessageKey &other) const noexcept
+    {
+        return opcode == other.opcode && job_id == other.job_id && msg_id == other.msg_id &&
+               src_fep == other.src_fep && pdcid == other.pdcid;
+    }
+};
+
+struct RxMessageKeyHash
+{
+    size_t operator()(const RxMessageKey &key) const noexcept
+    {
+        const size_t a = static_cast<size_t>(key.opcode);
+        const size_t b = static_cast<size_t>(key.job_id);
+        const size_t c = static_cast<size_t>(key.msg_id);
+        const size_t d = static_cast<size_t>(key.src_fep);
+        const size_t e = static_cast<size_t>(key.pdcid);
+        return (a << 56) ^ (b << 24) ^ (c << 8) ^ (d << 3) ^ e;
+    }
+};
+
+struct UnexpectedSendContext
+{
+    RudUnexpectedBufferHandle buffer;
+    int64_t created_at_ms{0};
+    int64_t last_activity_ms{0};
+    bool semantic_accepted{false};
+    bool buffered_complete{false};
+    bool matched_to_recv{false};
+};
+
+struct RxMessageContext
+{
+    uint32_t ePSN{0};
+    uint32_t base_psn{0};
+    uint32_t total_len{0};
+    uint32_t chunk_payload_size{0};
+    uint32_t expected_chunks{0};
+    uint32_t chunks_done{0};
+    bool saw_eom{false};
+    RxPlacementDescriptor placement{};
+    std::unordered_map<uint32_t, RudBitmapPoolHandle> blocks;
+    std::array<uint32_t, 4> hot_block_bases{{0, 0, 0, 0}};
+    std::array<RudBitmapBlock *, 4> hot_block_ptrs{{nullptr, nullptr, nullptr, nullptr}};
+    RudSendPlacementMode send_mode{RudSendPlacementMode::DIRECT_RECV};
+    std::unique_ptr<UnexpectedSendContext> unexpected;
+    bool completed{false};
+    bool failed{false};
+    uint16_t rx_pkt_handle{0};
+};
+
+struct SendCompletionTombstone
+{
+    uint32_t modified_length{0};
+    int64_t completed_at_ms{0};
+};
+
+struct ReceiverFlowCreditSnapshot
+{
+    uint32_t job_id{0};
+    uint16_t credit_gen{0};
+    uint16_t posted_recv_credits{0};
+    uint16_t unexpected_msg_credits{0};
+    uint16_t unexpected_byte_credits{0};
+    uint8_t byte_credit_shift{12};
+    uint8_t flags{0};
+};
+
+struct LocalReceiverCreditState
+{
+    ReceiverFlowCreditSnapshot snapshot{};
+    bool dirty{true};
+    int64_t last_dirty_ms{0};
+    int64_t last_sent_ms{0};
+};
+
+struct PeerReceiverCreditState
+{
+    bool valid{false};
+    uint16_t credit_gen_seen{0};
+    uint16_t posted_recv_credits{0};
+    uint16_t unexpected_msg_credits{0};
+    uint16_t unexpected_byte_credits{0};
+    bool bootstrap_used{false};
+    int64_t blocked_since_ms{0};
+    int64_t last_credit_req_ms{0};
 };
 
 /**
@@ -345,18 +352,29 @@ struct RX_pkt_meta
  * 
  * I_PDC and T_PDC will inherit from this base class and implement their specific functionality.
  */
-class PDC
-{
-public:
-    // Queues and mapping tables
-    std::map<uint32_t, TX_pkt_meta> tx_pkt_map;       /**< Store metadata of sent packets */
-    std::map<uint16_t, RX_pkt_meta> rx_pkt_map;       /**< Store metadata of received packets */
-    std::map<uint32_t, PDStoNET_pkt> tx_pkt_buffer;   /**< Store unacknowledged request packets */
-    std::map<uint32_t, PDStoNET_pkt> tx_ack_buffer;   /**< Store guaranteed delivery ACK packets */
-    const unsigned int tx_ack_buffer_capa = 10;                /**< ACK buffer capacity */
+	class PDC
+	{
+	public:
+        using ResolveRxRequestPlacementFn = std::function<RxPlacementDescriptor(const PDC_SES_req &)>;
+        using ResolveRxResponsePlacementFn = std::function<RxPlacementDescriptor(const PDC_SES_rsp &)>;
+        using CompleteRxOperationFn = std::function<void(const PDC_RX_completion &)>;
+        using CompleteRequestTerminalFn = std::function<void(const RequestTerminalCompletion &)>;
+        using CompleteSenderTerminalFn = std::function<void(const SenderTerminalCompletion &)>;
+        using CompleteReadResponseTerminalFn = std::function<void(const ReadResponseTerminalCompletion &)>;
+        using ResolvePostedRecvCreditsFn = std::function<uint16_t(uint64_t, uint16_t, uint32_t)>;
 
+	    // Queues and mapping tables
+	    std::map<uint32_t, TX_pkt_meta> tx_pkt_map;       /**< Store metadata of sent packets */
+	    std::map<uint16_t, RX_pkt_meta> rx_pkt_map;       /**< Store metadata of received packets */
+	    std::map<uint32_t, PDStoNET_pkt> tx_pkt_buffer;   /**< Store unacknowledged request packets */
+	    std::map<uint32_t, PDStoNET_pkt> tx_ack_buffer;   /**< Store guaranteed delivery ACK packets */
+	    const unsigned int tx_ack_buffer_capa = 10;                /**< ACK buffer capacity */
 
-    RTOTimer rto_timer_;    /**< Retransmission timer Retransmission timer*/
+	    // Protects all std::queue members below.
+	    // These queues are accessed by multiple threads (PDC threads, process managers, provider threads).
+	    mutable std::mutex queue_mutex_;
+
+	    RTOTimer rto_timer_;    /**< Retransmission timer Retransmission timer*/
 
 
  // ==================== Common Member Variables ====================
@@ -369,6 +387,10 @@ public:
     bool SYN;              /**< Synchronization flag / Synchronization flag */
     int MPR;               /**< Maximum Packet Rate / Maximum packet rate */
     int ACK_GEN_COUNT;     /**< ACK generation counter (determines when to send ACK) / Used for cumulative ACK to determine if ACK packet needs to be sent */
+
+    std::atomic<int> pending_ops{0};        /**< In-flight message count / 未完成消息计数 */
+    std::atomic<int64_t> last_activity_ms{0}; /**< Last activity timestamp (ms) / 最近活动时间戳 */
+    static constexpr int64_t kIdleCloseMs = 2000; /**< Idle window before close / 允许关闭的空闲窗口 */
 
     uint32_t start_psn;     /**< Initial packet sequence number / Initial packet sequence number */
     uint32_t tx_cur_psn;    /**< Current transmission sequence number / Current transmission sequence number */
@@ -396,10 +418,87 @@ public:
     std::queue<PDStoNET_pkt> tx_pkt_q;        /**< Transmission packet queue / Transmission packet queue */
     std::queue<PDC_SES_req> rx_req_pkt_q;     /**< Received request packet queue / Received request packet queue */
     std::queue<PDC_SES_rsp> rx_rsp_pkt_q;     /**< Response packet queue to SES layer / Response packet queue to SES layer */
-    std::queue<PDS_PDC_req> tx_req_q;         /**< PDS request transmission queue / PDS request transmission queue */
-    std::queue<SES_PDC_rsp> tx_rsp_q;         /**< SES response transmission queue / SES response transmission queue */
-    std::queue<PDStoNET_pkt> rx_pkt_q;        /**< Received packet queue from PDS / Received packet queue from PDS */
-    std::queue<uint32_t> rto_pkt_q;           /**< Retransmission timeout packet queue / Retransmission timeout packet queue */
+	    std::queue<PDS_PDC_req> tx_req_q;         /**< PDS request transmission queue / PDS request transmission queue */
+	    std::queue<SES_PDC_rsp> tx_rsp_q;         /**< SES response transmission queue / SES response transmission queue */
+	    std::queue<PDStoNET_pkt> rx_pkt_q;        /**< Received packet queue from PDS / Received packet queue from PDS */
+	    std::queue<uint32_t> rto_pkt_q;           /**< Retransmission timeout packet queue / Retransmission timeout packet queue */
+
+        // RUD tracking state.
+        std::set<uint32_t> rud_rx_ooo_psns;
+        std::set<uint32_t> rud_tx_sacked_psns;
+        std::unordered_map<RxMessageKey, RxMessageContext, RxMessageKeyHash> rud_rx_messages_;
+        std::unordered_map<RxMessageKey, SendCompletionTombstone, RxMessageKeyHash> rud_completed_send_tombstones_;
+        bool rud_sack_pending{false};
+        bool rud_gap_pending{false};
+        uint32_t rud_gap_psn{0};
+        int64_t rud_sack_first_ms{0};
+        int64_t rud_gap_first_ms{0};
+        static constexpr int64_t kRudSackDelayMs = 5;
+        static constexpr int64_t kRudAckReqMinIntervalMs = 2;
+        static constexpr int64_t kRudGapDelayMs = 15;
+        static constexpr int64_t kRudGapMaxIntervalMs = 120;
+        static constexpr int64_t kRudCtrlBudgetWindowMs = 100;
+        static constexpr int64_t kCreditPushDelayMs = 10;
+        static constexpr int64_t kRecoverableNackMinIntervalMs = 5;
+        static constexpr uint8_t kUnexpectedCreditByteShift = 12;
+        static constexpr uint32_t kUnexpectedCreditUnitBytes = 1u << kUnexpectedCreditByteShift;
+        static constexpr int kRudCtrlBudgetCapacity = 12;
+        static constexpr int kRudCtrlBudgetClassBCost = 2;
+        static constexpr int kRudCtrlBudgetClassCCost = 1;
+        static constexpr uint16_t kAckCtrlExtSectionSack = ACK_CTRL_SECTION_SACK;
+        static constexpr uint16_t kAckCtrlExtSectionCredit = ACK_CTRL_SECTION_CREDIT;
+        static constexpr uint16_t kAckCtrlExtSectionAckReqHint = ACK_CTRL_SECTION_ACKREQ_HINT;
+        static constexpr uint16_t kAckCtrlExtSectionReceiverPressure = ACK_CTRL_SECTION_RECEIVER_PRESSURE;
+        static constexpr uint16_t kBootstrapSendCredits = 1;
+        uint32_t last_ack_req_psn_{0};
+        int64_t last_ack_req_ms_{0};
+        uint32_t last_sack_base_psn_{0};
+        uint32_t last_sack_bitmap_{0};
+        int64_t last_sack_ms_{0};
+        int64_t rud_gap_last_nack_ms_{0};
+        int64_t rud_gap_retry_interval_ms_{kRudGapDelayMs};
+        bool rud_gap_suppressed_in_window_{false};
+        uint32_t rud_rsp_gap_psn_{0};
+        int64_t rud_rsp_gap_first_ms_{0};
+        int64_t rud_rsp_gap_last_nack_ms_{0};
+        int64_t rud_rsp_gap_retry_interval_ms_{kRudGapDelayMs};
+        bool rud_rsp_gap_suppressed_in_window_{false};
+        int rud_ctrl_budget_tokens_{kRudCtrlBudgetCapacity};
+        int64_t rud_ctrl_budget_last_refill_ms_{0};
+        bool ctrl_tx_deferred_{false};
+        bool skip_ctrl_emit_once_{false};
+        std::unordered_map<uint32_t, LocalReceiverCreditState> local_receiver_credits_;
+        std::unordered_map<uint32_t, PeerReceiverCreditState> peer_receiver_credits_;
+        std::unordered_set<uint32_t> observed_receiver_jobs_;
+        uint32_t pending_credit_job_id_{0};
+        uint32_t pending_credit_req_job_id_{0};
+        uint32_t last_credit_ack_job_id_{0};
+        uint16_t local_credit_gen_{0};
+        uint16_t local_credit_last_sent_gen_{0};
+        uint16_t peer_credit_gen_seen_{0};
+        uint16_t peer_credit_available_{0};
+        bool peer_credit_valid_{false};
+        bool local_credit_dirty_{true};
+        bool bootstrap_credit_used_{false};
+        uint16_t last_advertised_credit_{0};
+        int64_t local_credit_dirty_since_ms_{0};
+        int64_t last_credit_sent_ms_{0};
+        int64_t credit_blocked_since_ms_{0};
+        int64_t last_credit_req_ms_{0};
+        uint16_t last_receiver_pressure_unexpected_byte_credits_{0};
+        uint16_t last_receiver_pressure_bitmap_blocks_available_{0};
+        uint16_t last_receiver_pressure_arrival_blocks_available_{0};
+        uint16_t last_unexpected_msgs_in_use_{0};
+        uint16_t last_pressure_sent_unexpected_msgs_in_use_{0};
+        bool receiver_pressure_dirty_{true};
+        CreditControlReason pending_credit_reason_{CreditControlReason::NONE};
+        PDS_Nack_Codes last_resource_nack_code_{UET_TRIMMED};
+        uint32_t last_resource_nack_psn_{0};
+        uint32_t last_resource_nack_payload_{0};
+        int64_t last_resource_nack_ms_{0};
+        std::unordered_set<SenderTerminalKey, SenderTerminalKeyHash> sender_terminalized_keys_;
+        std::unordered_set<SenderTerminalKey, SenderTerminalKeyHash> request_terminalized_keys_;
+        std::unordered_set<ReadResponseTerminalKey, ReadResponseTerminalKeyHash> read_response_terminalized_keys_;
 
     // Public queue pointers  
     ThreadSafeQueue<PDStoNET_pkt>* public_net_queue = nullptr;
@@ -410,6 +509,25 @@ public:
     // ==================== Constructors and Destructors ====================
     PDC();
     virtual ~PDC();
+    static void setRxCallbacks(ResolveRxRequestPlacementFn req_cb,
+                               ResolveRxResponsePlacementFn rsp_cb,
+                               CompleteRxOperationFn complete_cb,
+                               CompleteRequestTerminalFn request_terminal_cb,
+                               CompleteSenderTerminalFn terminal_cb,
+                               CompleteReadResponseTerminalFn read_terminal_cb,
+                               ResolvePostedRecvCreditsFn posted_recv_cb);
+    static bool matchUnexpectedSend(uint64_t job_id,
+                                    uint16_t pdc_id,
+                                    uint32_t src_fep,
+                                    uint64_t completion_key,
+                                    uint64_t base_addr,
+                                    uint32_t buffer_len);
+    static RequestTxProbe queryRequestTxProbe(uint64_t job_id,
+                                              uint16_t msg_id,
+                                              uint32_t dst_fep);
+    static UnexpectedSendProbe queryUnexpectedSendProbe(uint64_t job_id,
+                                                        uint16_t msg_id,
+                                                        uint32_t src_fep);
 
     // ==================== Common Utility Functions ====================
     /**
@@ -556,7 +674,7 @@ public:
      * @brief Forward response to SES layer Forward response to SES layer Forward response to SES layer
      * @param pkt Response packet pointer Response packet指针
      */
-    void fwdRsp2SES(SEStoPDS_pkt *pkt);
+    void fwdRsp2SES(const PDStoNET_pkt *pkt);
 
     /**
      * @brief Check reception error Check reception error Check reception error
@@ -574,6 +692,7 @@ public:
      * @param p Data packet to process Data packet to process
      */
     void rxCtrlAckReq(PDStoNET_pkt *p);
+    void rxCtrlSack(PDStoNET_pkt *p);
 
     /**
      * @brief Process Clear_cmd control message Process Clear_cmd control message Process Clear_cmd control message
@@ -603,7 +722,8 @@ public:
      * @brief Send ACK Request control packet Send ACK Request control packet Send ACK Request control packet
      * @param p Control packet pointer Control packet pointer
      */
-    void sendCtrlAckReq(PDStoNET_pkt *p);
+    bool sendCtrlAckReq(PDStoNET_pkt *p);
+    bool sendCtrlSack(PDStoNET_pkt *p);
 
     /**
      * @brief Send Clear Command control packet Send Clear Command control packet Send Clear Command control packet
@@ -627,7 +747,8 @@ public:
      * @param p Data packet to process Data packet to process
      * @warning TODO: We need to study credit-based flow control // TODO: We need to study credit-based flow control
      */
-    void sendCtrlCredit(PDStoNET_pkt *p);
+    bool sendCtrlCredit(PDStoNET_pkt *p);
+    bool sendCtrlCreditReq(PDStoNET_pkt *p);
 
     /**
      * @brief Send Negotiation control message Send Negotiation control message Send Negotiation control message
@@ -667,7 +788,7 @@ public:
      * @param id PDC identifier PDC identifier
      * @return Whether initialization is successful Whether initialization is successful
      */
-    virtual bool initPDC(uint16_t id) = 0;
+    virtual bool initPDC(uint16_t id, pdc_mode init_mode) = 0;
     /**
      * @brief Main event loop Main event loop Main event loop
      */
@@ -716,7 +837,13 @@ public:
      * @param pkt Packet data Packet data
      * @param gtd_del Guaranteed delivery flag Guaranteed delivery flag
      */
-    void sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del);
+    void sendAck(PDS_next_hdr next_hdr,
+                 uint8_t retx,
+                 uint8_t req,
+                 uint32_t psn,
+                 SEStoPDS_pkt *pkt,
+                 bool gtd_del,
+                 uint32_t credit_job_id = 0);
     /**
      * @brief Send NACK packet Send NACK包
      * @param retx Retransmission flag Retransmission flag
@@ -748,11 +875,34 @@ public:
                         ThreadSafeQueue<PDC_SES_rsp>* ses_rsp_q,
                         ThreadSafeQueue<uint16_t>* close_q);
 
+    int64_t nowMs() const;
+    void markActivity();
+    void incPending();
+    void decPending();
+
     /**
      * @brief Check if PDC can safely close Check if PDC can safely close Check if PDC can safely close
      * @return Whether it can be closed safely Whether it can be closed safely
      */
     bool canSafelyClose();
+    bool isRudMode() const;
+    bool packetModeMatches(const PDStoNET_pkt *pkt) const;
+    pdc_mode packetMode(const PDStoNET_pkt *pkt) const;
+    static bool hasRxCallbacks();
+    void resetRudState();
+    void advanceRudRxFrontier();
+    void refreshRudGapState();
+    uint32_t buildRudSackBitmap(uint32_t *base_psn_out = nullptr) const;
+    void noteRudSackPending();
+    void noteRudGapPending();
+    void maybeTriggerRudControl();
+    bool canDispatchFrontReq(const PDS_PDC_req &req, int64_t now_ms);
+    void rxAckControlExt(const PDStoNET_pkt *pkt);
+    void rxCtrlCredit(PDStoNET_pkt *p);
+    void rxCtrlCreditReq(PDStoNET_pkt *p);
+    bool handleRudRxRequest(PDStoNET_pkt *pkt);
+    bool handleRudRxResponse(const PDStoNET_pkt *pkt);
+    void applyRudSack(uint32_t base_psn, uint32_t bitmap);
 
     // ==================== Timer management functions Timer management functions Timer management functions ====================
     
@@ -816,6 +966,142 @@ public:
      * @param src Source IP address Source IP address
      */
     void setFep(uint32_t dst, uint32_t src);
+
+private:
+    static int64_t rudSackRefreshMs();
+    static int controlPriority(cm_type type);
+    static NackCtrlClass classifyNack(PDS_Nack_Codes nack_code);
+    bool shouldSendAckReq(uint32_t req_psn, int64_t now_ms);
+    bool shouldSendSack(uint32_t base_psn, uint32_t bitmap, int64_t now_ms);
+    bool shouldSendGapNack(int64_t now_ms);
+    bool selectRudReadResponseGap(uint32_t *gap_psn_out, int64_t now_ms);
+    bool shouldSendRecoverableNack(PDS_Nack_Codes nack_code,
+                                   uint32_t nack_psn,
+                                   uint32_t payload,
+                                   int64_t now_ms);
+    void noteAckReqSent(uint32_t req_psn, int64_t now_ms);
+    void noteSackSent(uint32_t base_psn, uint32_t bitmap, int64_t now_ms);
+    void noteGapNackSent(int64_t now_ms);
+    void noteGapNackSuppressed();
+    bool requestControl(cm_type type);
+    void refillCtrlBudget(int64_t now_ms);
+    bool tryConsumeCtrlBudget(cm_type type, int64_t now_ms);
+    bool tryConsumeGapNackBudget(int64_t now_ms);
+    bool hasCreditRefreshActivity() const;
+    bool maybeScheduleCreditRefresh(int64_t now_ms);
+    bool tryConsumeBudgetClassB(int64_t now_ms);
+    bool tryConsumeBudgetClassC(int64_t now_ms);
+    static int64_t creditRefreshMs();
+    static int64_t creditReqDelayMs();
+    static bool isNewerCreditGen(uint16_t newer, uint16_t older);
+    uint16_t computePostedRecvCredits(uint32_t job_id) const;
+    uint16_t computeUnexpectedMsgCredits() const;
+    uint16_t computeUnexpectedByteCredits() const;
+    uint16_t computeUnexpectedMsgsInUse() const;
+    uint16_t computeBitmapBlocksAvailable() const;
+    uint16_t computeArrivalBlocksAvailable() const;
+    void observeReceiverJob(uint32_t job_id);
+    LocalReceiverCreditState &localCreditStateForJob(uint32_t job_id);
+    PeerReceiverCreditState &peerCreditStateForJob(uint32_t job_id);
+    bool refreshLocalCreditForJob(uint32_t job_id, int64_t now_ms);
+    bool hasDirtyLocalCreditJob() const;
+    bool selectCreditJobForAck(uint32_t ack_job_id, int64_t now_ms, uint32_t *job_id_out);
+    bool selectStandaloneCreditJob(int64_t now_ms, uint32_t *job_id_out);
+    bool maybeFillAckControlExt(PDStoNET_pkt *ack, int64_t now_ms, uint32_t ack_job_id);
+    void clearPendingSackControlIfMatching();
+    void encodeCreditSnapshotPayload(UET::PayloadHandle &payload,
+                                     const ReceiverFlowCreditSnapshot &snapshot) const;
+    bool decodeCreditSnapshotPayload(const UET::PayloadHandle &payload,
+                                     ReceiverFlowCreditSnapshot *snapshot) const;
+    void encodeCreditReqPayload(UET::PayloadHandle &payload, uint32_t job_id, uint16_t last_seen_credit_gen) const;
+    bool decodeCreditReqPayload(const UET::PayloadHandle &payload,
+                                uint32_t *job_id,
+                                uint16_t *last_seen_credit_gen) const;
+    enum class ChunkArrivalResult : uint8_t
+    {
+        ALREADY_ARRIVED = 0x00,
+        MARKED_OK = 0x01,
+        NO_BITMAP = 0x02,
+    };
+
+    static ResolveRxRequestPlacementFn resolve_rx_request_placement_;
+    static ResolveRxResponsePlacementFn resolve_rx_response_placement_;
+    static CompleteRxOperationFn complete_rx_operation_;
+    static CompleteRequestTerminalFn complete_request_terminal_;
+    static CompleteSenderTerminalFn complete_sender_terminal_;
+    static CompleteReadResponseTerminalFn complete_read_response_terminal_;
+    static ResolvePostedRecvCreditsFn resolve_posted_recv_credits_;
+
+    PDC_SES_req buildSesReq(uint16_t handle, const RX_pkt_meta &meta, const SEStoPDS_pkt &pkt) const;
+    PDC_SES_rsp buildSesRsp(const PDStoNET_pkt *pkt) const;
+    bool shouldOwnRudRequest(const PDStoNET_pkt *pkt) const;
+    bool shouldOwnRudResponse(const PDStoNET_pkt *pkt) const;
+    uint32_t payloadChunkSizeForRequest(const PDC_SES_req &req) const;
+    uint32_t payloadChunkSizeForResponse(const PDC_SES_rsp &rsp) const;
+    RxMessageKey buildRxMessageKey(const PDC_SES_req &req) const;
+    RxMessageKey buildRxMessageKey(const PDC_SES_rsp &rsp) const;
+    bool ensureRxMessageContext(const PDC_SES_req &req,
+                                uint32_t base_psn,
+                                uint16_t rx_pkt_handle,
+                                RxMessageContext *&ctx_out);
+    bool ensureRxMessageContext(const PDC_SES_rsp &rsp, RxMessageContext *&ctx_out);
+    uint16_t cacheResponseHandle(const PDStoNET_pkt *pkt);
+    void eraseRxHandle(uint16_t handle);
+    RudBitmapBlock *findHotArrivalBlock(RxMessageContext &ctx, uint32_t block_base);
+    RudBitmapBlock *getArrivalBlock(RxMessageContext &ctx, uint32_t block_base, bool create_if_missing);
+    ChunkArrivalResult markChunkArrived(RxMessageContext &ctx, uint32_t chunk_idx);
+    bool isChunkArrived(const RxMessageContext &ctx, uint32_t chunk_idx) const;
+    void advanceMessageFrontier(RxMessageContext &ctx);
+    void pruneCompletedArrivalBlocks(RxMessageContext &ctx);
+    void emitRxCompletion(const RxMessageKey &key,
+                          const RxMessageContext &ctx,
+                          PDC_RX_completion_type type,
+                          uint8_t return_code,
+                          bool success,
+                          PDC_RX_completion_notify_kind notify_kind,
+                          uint32_t modified_length,
+                          PDC_RX_failure_kind failure_kind = PDC_RX_failure_kind::SEMANTIC,
+                          PDS_Nack_Codes pds_nack_code = UET_NO_RESOURCE);
+    void releaseRxMessageContext(const RxMessageKey &key,
+                                 RxMessageContext &ctx,
+                                 RudReleaseReason reason = RudReleaseReason::NORMAL);
+    void completeRxMessage(const RxMessageKey &key,
+                           RxMessageContext &ctx,
+                           PDC_RX_completion_type type,
+                           uint8_t return_code,
+                           bool success,
+                           PDC_RX_completion_notify_kind notify_kind = PDC_RX_completion_notify_kind::OP_COMPLETE,
+                           uint32_t modified_length = 0,
+                           PDC_RX_failure_kind failure_kind = PDC_RX_failure_kind::SEMANTIC,
+                           PDS_Nack_Codes pds_nack_code = UET_NO_RESOURCE);
+    bool extractSenderTerminalFromReq(const PDS_PDC_req &req, SenderTerminalCompletion *completion) const;
+    bool emitRequestTerminalCompletion(const RequestTerminalCompletion &completion);
+    bool emitRequestTerminalCompletion(const TX_pkt_meta &meta, SenderTerminalReason reason);
+    size_t terminalizeOutstandingRequests(SenderTerminalReason reason);
+    bool emitSenderTerminalCompletion(const SenderTerminalCompletion &completion);
+    bool emitSenderTerminalCompletion(const TX_pkt_meta &meta, SenderTerminalReason reason);
+    size_t terminalizeOutstandingSenderRetries(SenderTerminalReason reason);
+    bool extractReadResponseTerminalFromRsp(const SES_PDC_rsp &rsp, ReadResponseTerminalCompletion *completion) const;
+    bool emitReadResponseTerminalCompletion(const ReadResponseTerminalCompletion &completion);
+    bool emitReadResponseTerminalCompletion(const TX_pkt_meta &meta, ReadResponseTerminalReason reason);
+    size_t terminalizeOutstandingReadResponses(ReadResponseTerminalReason reason);
+    void reapUnexpectedPartialState();
+    void pruneCompletedSendTombstones(int64_t now_ms);
+    void rememberCompletedSendTombstone(const RxMessageKey &key, uint32_t modified_length, int64_t completed_at_ms);
+    bool replayCompletedSendDuplicate(const RxMessageKey &key, uint16_t rx_pkt_handle);
+
+protected:
+    bool directPlaceRudWrite(PDStoNET_pkt *pkt, uint16_t handle, const RX_pkt_meta &meta);
+    bool directPlaceRudSend(PDStoNET_pkt *pkt, uint16_t handle, const RX_pkt_meta &meta);
+    bool directPlaceRudResponse(const PDStoNET_pkt *pkt);
+    bool consumeSkipCtrlEmitOnce();
+
+private:
+    bool bindUnexpectedSend(const RxMessageKey &key, uint64_t completion_key, uint64_t base_addr, uint32_t buffer_len);
+    void copyArrivedSendChunks(const RxMessageContext &ctx, uint8_t *dst) const;
+    uint32_t expectedChunks(uint32_t total_len, uint32_t chunk_size) const;
+    RequestTxProbe buildRequestTxProbe(uint64_t job_id, uint16_t msg_id, uint32_t dst_fep) const;
+    static UnexpectedSendProbe buildUnexpectedSendProbe(const RxMessageContext &ctx);
 };
 
 // Default parameter definitions (using macro definitions to avoid duplicate definition errors) Default parameter definitions (using macro definitions to avoid duplicate definition errors)

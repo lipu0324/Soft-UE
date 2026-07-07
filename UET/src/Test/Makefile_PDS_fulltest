@@ -1,0 +1,60 @@
+# Makefile for PDS_fulltest
+# 编译PDS_fulltest测试程序及其依赖的PDC文件
+
+CXX = g++
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g -pthread
+INCLUDES = -I.. -I../SES -I../PDS -I../PDS/PDC -I../PDS/PDS_Manager -I../logger
+
+# 源文件
+SOURCES = PDS_fulltest.cpp \
+          ../PDS/PDC/PDC.cpp \
+          ../PDS/PDC/IPDC.cpp \
+          ../PDS/PDC/TPDC.cpp \
+          ../PDS/PDC/RTOTimer/RTOTimer.cpp
+
+# 目标可执行文件
+TARGET = PDS_fulltest
+
+# 依赖的头文件路径
+DEPS = ../SES/SES.hpp \
+       ../Transport_Layer.hpp \
+       ../PDS/PDS_Manager/PDSManager.hpp \
+       ../PDS/PDC/PDC.hpp \
+       ../PDS/PDC/IPDC.hpp \
+       ../PDS/PDC/TPDC.hpp \
+       ../PDS/PDC/RTOTimer/RTOTimer.hpp \
+       ../PDS/PDC/process/IPDCProcessManager.hpp \
+       ../PDS/PDC/process/TPDCProcessManager.hpp \
+       ../PDS/PDC/process/ThreadSafeQueue.hpp \
+       ../logger/Logger.hpp \
+       ../logger/LoggingEnhancer.hpp \
+
+# 编译目标
+all: $(TARGET)
+
+$(TARGET): $(SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(TARGET) $(SOURCES)
+
+# 运行测试
+run: $(TARGET)
+	./$(TARGET)
+
+# 清理
+clean:
+	rm -f $(TARGET) *.log
+
+# 调试编译
+debug: CXXFLAGS += -DDEBUG -g3
+debug: $(TARGET)
+
+# 显示帮助
+help:
+	@echo "可用目标:"
+	@echo "  all        - 编译测试程序 (默认)"
+	@echo "  $(TARGET)  - 编译测试程序"
+	@echo "  run        - 编译并运行测试"
+	@echo "  debug      - 编译调试版本"
+	@echo "  clean      - 清理编译文件和日志"
+	@echo "  help       - 显示此帮助信息"
+
+.PHONY: all run clean debug help

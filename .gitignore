@@ -179,6 +179,56 @@ DocProject/Help/*.hhp
 DocProject/Help/Html2
 DocProject/Help/html
 
+# Linux / C++ build outputs
+*.o
+*.obj
+*.d
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.gch
+
+# Runtime and benchmark logs
+*.log
+logs/
+MRDesc*_client*.log
+MRDesc*_server*.log
+
+# Local editor and temporary files
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+*.tmp
+*.swp
+*:Zone.Identifier
+
+# Provider build outputs
+uet_provider/libuet-fi.so
+
+# In-tree test binaries
+UET/src/Test/LibfabricHarnessGuardTest
+UET/src/Test/MRDescTest
+UET/src/Test/MRDescReadLibfabricTest
+UET/src/Test/MRDescWriteLibfabricTest
+UET/src/Test/MRDescWriteThroughputLibfabricTest
+UET/src/Test/MRRegLibfabricTest
+UET/src/Test/PDS_fulltest
+UET/src/Test/READTest
+UET/src/Test/RefactorGuardTest
+UET/src/Test/RudBitmapResourceTest
+UET/src/Test/RudControlPressureTest
+UET/src/Test/RudSendNegativeTest
+UET/src/Test/RudSoakTest
+UET/src/Test/RudSynCollisionTest
+UET/src/Test/SESTest
+UET/src/Test/WRITETest
+UET/src/Test/WRITE_MultiProc
+
 # Click-Once directory
 publish/
 

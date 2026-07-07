@@ -74,8 +74,19 @@ struct pend_node
 // pdc structure definition
 struct pdc
 {
-    bool is_open;             // PDC status
-    pdc() : is_open(false) {} // Initialize to closed state
+    bool is_open;                    // PDC status
+    bool has_binding;                // Whether the manager has an active binding record
+    uint32_t bound_src_fep;          // Remote/source FEP used to establish this PDC
+    uint32_t bound_dst_fep;          // Local/destination FEP used to establish this PDC
+    uint16_t bound_remote_spdcid;    // Remote SPDCID paired with this PDC
+    uint8_t bound_mode;              // Delivery mode for the active binding
+    pdc()
+        : is_open(false),
+          has_binding(false),
+          bound_src_fep(0),
+          bound_dst_fep(0),
+          bound_remote_spdcid(0),
+          bound_mode(0) {} // Initialize to closed state
 };
 
 enum pdc_type

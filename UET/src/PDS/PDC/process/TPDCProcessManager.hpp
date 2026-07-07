@@ -112,6 +112,9 @@ private:
     std::mutex manager_mutex;                           // Manager mutex
     std::atomic<bool> manager_running;                  // Manager running status
     std::unique_ptr<std::thread> monitor_thread;       // Monitoring thread
+    // 用于唤醒 monitor_thread，避免 stop() 时最多阻塞 MONITOR_INTERVAL 才退出
+    std::mutex monitor_mutex;
+    std::condition_variable monitor_cv;
     
     // Configuration parameters
     static constexpr std::chrono::milliseconds OPENCHK_INTERVAL{1};     // openchk call interval
@@ -164,6 +167,7 @@ public:
         LOG_DEBUG(__FUNCTION__, "Stopping TPDC process manager...");
         
         manager_running.store(false);
+        monitor_cv.notify_all();
         
         // Stop all TPDC processes
         {
@@ -196,7 +200,7 @@ public:
      * @param pdcid PDC identifier
      * @return Whether creation was successful
      */
-    bool createTPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep) {
+    bool createTPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep, pdc_mode mode) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         
         if (!manager_running.load()) {
@@ -204,8 +208,8 @@ public:
             return false;
         }
         
-        // Check if already exists
-        if (tpdc_processes.find(pdcid) != tpdc_processes.end()) {
+        // Reclaim stale stopped entry so a recently closed TPDC can be reused immediately.
+        if (!cleanupStoppedProcessLocked(pdcid)) {
             LOG_ERROR(__FUNCTION__, "Process for PDCID " + std::to_string(pdcid) + " already exists");
             return false;
         }
@@ -214,7 +218,7 @@ public:
         auto process_info = std::make_unique<TPDC_ProcessInfo>(pdcid);
         
         // Initialize TPDC instance
-        if (!process_info->tpdc_instance->initPDC(pdcid)) {
+        if (!process_info->tpdc_instance->initPDC(pdcid, mode)) {
             LOG_ERROR(__FUNCTION__, "Failed to initialize TPDC instance, PDCID: " + std::to_string(pdcid));
             return false;
         }
@@ -338,7 +342,10 @@ public:
         }
         
         // Thread-safely add to receive queue - use instance member queue
-        process_info->tpdc_instance->rx_pkt_q.push(pkt);
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            process_info->tpdc_instance->rx_pkt_q.push(pkt);
+        }
         process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -356,7 +363,10 @@ public:
         }
         
         // Use instance member queue
-        process_info->tpdc_instance->tx_req_q.push(req);
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            process_info->tpdc_instance->tx_req_q.push(req);
+        }
         process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -374,7 +384,10 @@ public:
         }
         
         // Use instance member queue
-        process_info->tpdc_instance->tx_rsp_q.push(rsp);
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            process_info->tpdc_instance->tx_rsp_q.push(rsp);
+        }
         process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -387,13 +400,19 @@ public:
      */
     bool popTxPacket(uint16_t pdcid, PDStoNET_pkt& pkt) {
         auto* process_info = getProcessInfo(pdcid);
-        if (!process_info || process_info->tpdc_instance->tx_pkt_q.empty()) {
+        if (!process_info) {
             return false;
         }
         
         // Use instance member queue
-        pkt = process_info->tpdc_instance->tx_pkt_q.front();
-        process_info->tpdc_instance->tx_pkt_q.pop();
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            if (process_info->tpdc_instance->tx_pkt_q.empty()) {
+                return false;
+            }
+            pkt = process_info->tpdc_instance->tx_pkt_q.front();
+            process_info->tpdc_instance->tx_pkt_q.pop();
+        }
         return true;
     }
 
@@ -406,13 +425,19 @@ public:
      */
     bool popSESRequest(uint16_t pdcid, PDC_SES_req& req) {
         auto* process_info = getProcessInfo(pdcid);
-        if (!process_info || process_info->tpdc_instance->rx_req_pkt_q.empty()) {
+        if (!process_info) {
             return false;
         }
         
         // Use instance member queue
-        req = process_info->tpdc_instance->rx_req_pkt_q.front();
-        process_info->tpdc_instance->rx_req_pkt_q.pop();
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            if (process_info->tpdc_instance->rx_req_pkt_q.empty()) {
+                return false;
+            }
+            req = process_info->tpdc_instance->rx_req_pkt_q.front();
+            process_info->tpdc_instance->rx_req_pkt_q.pop();
+        }
         return true;
     }
 
@@ -424,13 +449,19 @@ public:
      */
     bool popSESResponse(uint16_t pdcid, PDC_SES_rsp& rsp) {
         auto* process_info = getProcessInfo(pdcid);
-        if (!process_info || process_info->tpdc_instance->rx_rsp_pkt_q.empty()) {
+        if (!process_info) {
             return false;
         }
         
         // Use instance member queue
-        rsp = process_info->tpdc_instance->rx_rsp_pkt_q.front();
-        process_info->tpdc_instance->rx_rsp_pkt_q.pop();
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            if (process_info->tpdc_instance->rx_rsp_pkt_q.empty()) {
+                return false;
+            }
+            rsp = process_info->tpdc_instance->rx_rsp_pkt_q.front();
+            process_info->tpdc_instance->rx_rsp_pkt_q.pop();
+        }
         return true;
     }
 
@@ -485,13 +516,15 @@ public:
             return status;
         }
         
-        // Use instance member queue to get queue status - Note: queue size retrieval here is not thread-safe, for monitoring only
-        status.rx_pkt_count = process_info->tpdc_instance->rx_pkt_q.size();
-        status.tx_req_count = process_info->tpdc_instance->tx_req_q.size();
-        status.tx_rsp_count = process_info->tpdc_instance->tx_rsp_q.size();
-        status.tx_pkt_count = process_info->tpdc_instance->tx_pkt_q.size();
-        status.rx_req_count = process_info->tpdc_instance->rx_req_pkt_q.size();
-        status.rx_rsp_count = process_info->tpdc_instance->rx_rsp_pkt_q.size();
+        {
+            std::lock_guard<std::mutex> lock(process_info->tpdc_instance->queue_mutex_);
+            status.rx_pkt_count = process_info->tpdc_instance->rx_pkt_q.size();
+            status.tx_req_count = process_info->tpdc_instance->tx_req_q.size();
+            status.tx_rsp_count = process_info->tpdc_instance->tx_rsp_q.size();
+            status.tx_pkt_count = process_info->tpdc_instance->tx_pkt_q.size();
+            status.rx_req_count = process_info->tpdc_instance->rx_req_pkt_q.size();
+            status.rx_rsp_count = process_info->tpdc_instance->rx_rsp_pkt_q.size();
+        }
         
         return status;
     }
@@ -577,7 +610,11 @@ private:
         LOG_DEBUG(__FUNCTION__, "Monitoring thread started");
         
         while (manager_running.load()) {
-            std::this_thread::sleep_for(MONITOR_INTERVAL);
+            // 使用可唤醒的 wait_for，保证 stop() 后 monitor_thread 立即退出
+            {
+                std::unique_lock<std::mutex> lock(monitor_mutex);
+                monitor_cv.wait_for(lock, MONITOR_INTERVAL, [&]() { return !manager_running.load(); });
+            }
             
             if (!manager_running.load()) {
                 break;
@@ -652,6 +689,33 @@ private:
                 ++it;
             }
         }
+    }
+
+    bool cleanupStoppedProcessLocked(uint16_t pdcid) {
+        auto it = tpdc_processes.find(pdcid);
+        if (it == tpdc_processes.end()) {
+            return true;
+        }
+        auto &process_info = it->second;
+        const ProcessState process_state = process_info->state.load();
+        const bool instance_closed =
+            process_info->tpdc_instance &&
+            process_info->tpdc_instance->state == pdc_state::CLOSED;
+        if (process_state != STOPPED && !instance_closed) {
+            return false;
+        }
+        if (process_state != STOPPED) {
+            process_info->should_stop.store(true);
+            process_info->state.store(STOPPING);
+            process_info->process_cv.notify_all();
+        }
+        if (process_info->process_thread && process_info->process_thread->joinable()) {
+            process_info->process_thread->join();
+        }
+        process_info->state.store(STOPPED);
+        LOG_DEBUG(__FUNCTION__, "Reclaiming stopped TPDC process, PDCID: " + std::to_string(pdcid));
+        tpdc_processes.erase(it);
+        return true;
     }
 
     /**

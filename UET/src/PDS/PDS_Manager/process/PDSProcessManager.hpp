@@ -115,6 +115,9 @@ private:
     std::mutex manager_mutex;                          // Manager mutex
     std::atomic<bool> manager_running;                 // Manager running status
     std::unique_ptr<std::thread> monitor_thread;       // Monitoring thread
+    // 用于唤醒 monitor_thread，避免 stop() 时最多阻塞 MONITOR_INTERVAL 才退出
+    std::mutex monitor_mutex;
+    std::condition_variable monitor_cv;
 
     // Configuration parameters
     static constexpr std::chrono::milliseconds MAINCHK_INTERVAL{1}; // mainChk call interval
@@ -234,6 +237,7 @@ public:
         LOG_DEBUG(__FUNCTION__, "Stopping PDS process manager...");
 
         manager_running.store(false);
+        monitor_cv.notify_all();
 
         // Stop PDS process
         if (pds_process_info && pds_process_info->state.load() != STOPPED)
@@ -323,7 +327,10 @@ public:
         }
 
         // Thread-safely add to request queue
-        pds_process_info->pds_instance->SES_tx_req_q.push(req);
+        {
+            std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+            pds_process_info->pds_instance->SES_tx_req_q.push(req);
+        }
         pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -341,7 +348,10 @@ public:
         }
 
         // Thread-safely add to response queue
-        pds_process_info->pds_instance->SES_tx_rsp_q.push(rsp);
+        {
+            std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+            pds_process_info->pds_instance->SES_tx_rsp_q.push(rsp);
+        }
         pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -359,7 +369,10 @@ public:
         }
 
         // Thread-safely add to network layer receive queue
-        pds_process_info->pds_instance->Net_rx_pkt_q.push(pkt);
+        {
+            std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+            pds_process_info->pds_instance->Net_rx_pkt_q.push(pkt);
+        }
         pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
@@ -371,13 +384,20 @@ public:
      */
     bool popEagerRequest(SES_PDS_eager &req)
     {
-        if (!pds_process_info || pds_process_info->pds_instance->SES_eager_req_q.empty())
+        if (!pds_process_info)
         {
             return false;
         }
 
-        req = pds_process_info->pds_instance->SES_eager_req_q.front();
-        pds_process_info->pds_instance->SES_eager_req_q.pop();
+        {
+            std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+            if (pds_process_info->pds_instance->SES_eager_req_q.empty())
+            {
+                return false;
+            }
+            req = pds_process_info->pds_instance->SES_eager_req_q.front();
+            pds_process_info->pds_instance->SES_eager_req_q.pop();
+        }
         return true;
     }
 
@@ -388,13 +408,20 @@ public:
      */
     bool popErrorEvent(PDS_SES_error &error)
     {
-        if (!pds_process_info || pds_process_info->pds_instance->PDS_error_q.empty())
+        if (!pds_process_info)
         {
             return false;
         }
 
-        error = pds_process_info->pds_instance->PDS_error_q.front();
-        pds_process_info->pds_instance->PDS_error_q.pop();
+        {
+            std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+            if (pds_process_info->pds_instance->PDS_error_q.empty())
+            {
+                return false;
+            }
+            error = pds_process_info->pds_instance->PDS_error_q.front();
+            pds_process_info->pds_instance->PDS_error_q.pop();
+        }
         return true;
     }
 
@@ -496,17 +523,28 @@ public:
 
         if (pds_process_info)
         {
-            status.ses_req_count = pds_process_info->pds_instance->SES_tx_req_q.size();
-            status.ses_rsp_count = pds_process_info->pds_instance->SES_tx_rsp_q.size();
-            status.net_pkt_count = pds_process_info->pds_instance->Net_rx_pkt_q.size();
-            status.eager_req_count = pds_process_info->pds_instance->SES_eager_req_q.size();
-            status.error_count = pds_process_info->pds_instance->PDS_error_q.size();
+            {
+                std::lock_guard<std::mutex> lock(pds_process_info->pds_instance->local_queue_mutex_);
+                status.ses_req_count = pds_process_info->pds_instance->SES_tx_req_q.size();
+                status.ses_rsp_count = pds_process_info->pds_instance->SES_tx_rsp_q.size();
+                status.net_pkt_count = pds_process_info->pds_instance->Net_rx_pkt_q.size();
+                status.eager_req_count = pds_process_info->pds_instance->SES_eager_req_q.size();
+                status.error_count = pds_process_info->pds_instance->PDS_error_q.size();
+            }
             status.pdc_to_net_count = pds_process_info->pds_instance->PDStoNet.size();
             status.pdc_to_ses_req_count = pds_process_info->pds_instance->PDCtoSES_req.size();
             status.pdc_to_ses_rsp_count = pds_process_info->pds_instance->PDCtoSES_rsp.size();
         }
 
         return status;
+    }
+
+    int requestCloseAllOpenIPDCs()
+    {
+        if (!pds_process_info || pds_process_info->state.load() != RUNNING) {
+            return 0;
+        }
+        return pds_process_info->pds_instance->requestCloseAllOpenIPDCs();
     }
 
 private:
@@ -545,7 +583,6 @@ private:
 
             // Brief sleep to avoid high CPU usage
             std::this_thread::sleep_for(MAINCHK_INTERVAL);
-            LOG_DEBUG(__FUNCTION__, "PDS process main loop executed once");
         }
 
         pds_process_info->state.store(STOPPED);
@@ -561,7 +598,11 @@ private:
 
         while (manager_running.load())
         {
-            std::this_thread::sleep_for(MONITOR_INTERVAL);
+            // 使用可唤醒的 wait_for，保证 stop() 后 monitor_thread 立即退出
+            {
+                std::unique_lock<std::mutex> lock(monitor_mutex);
+                monitor_cv.wait_for(lock, MONITOR_INTERVAL, [&]() { return !manager_running.load(); });
+            }
 
             if (!manager_running.load())
             {

@@ -55,7 +55,7 @@ void testIPDCInit() {
 
     // Initialize IPDC
     uint16_t pdcid = 5001;
-    bool init_result = ipdc.initPDC(pdcid);
+    bool init_result = ipdc.initPDC(pdcid, ROD);
     
     assert(init_result);
     assert(ipdc.SPDCID == pdcid);
@@ -79,7 +79,7 @@ void testIPDCSendReq() {
     std::cout << "\n=== Test IPDC Sending Request Packet ===" << std::endl;
 
     I_PDC ipdc;
-    ipdc.initPDC(5002);
+    ipdc.initPDC(5002, ROD);
 
     // Prepare to send request
     PDS_PDC_req req;
@@ -122,7 +122,7 @@ void testIPDCRetransmission() {
     std::cout << "\n=== Test IPDC Timeout Retransmission Mechanism ===" << std::endl;
 
     I_PDC ipdc;
-    ipdc.initPDC(5003);
+    ipdc.initPDC(5003, ROD);
 
     // Prepare and send request
     PDS_PDC_req req;
@@ -199,7 +199,7 @@ void testIPDCMultipleRetransmissions() {
     std::cout << "\n=== Test IPDC Multiple Retransmissions ===" << std::endl;
 
     I_PDC ipdc;
-    ipdc.initPDC(5004);
+    ipdc.initPDC(5004, ROD);
 
     // Send request
     PDS_PDC_req req;
@@ -272,7 +272,7 @@ void testIPDCReceiveACK() {
     std::cout << "\n=== 测试IPDC接收ACK后停止计时器 ===" << std::endl;
     
     I_PDC ipdc;
-    ipdc.initPDC(5005);
+    ipdc.initPDC(5005, ROD);
     ipdc.DPDCID = 5006;  // 设置目标PDCID
     ipdc.state = ESTABLISHED;  // 设置为已建立状态
     

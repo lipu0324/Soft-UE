@@ -85,6 +85,7 @@ void test_recv_packet(){
     SESManager ses_manager;
     std::cout<<"Testing single packet receive"<<endl;
     PDC_SES_req req;
+    req.src_fep = 1001;
     req.rx_pkt_handle = 1234;
     req.orig_pdcid = 125;
     req.orig_psn = 1;

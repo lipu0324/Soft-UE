@@ -62,7 +62,7 @@ public:
      * @param id PDC identifier
      * @return Initialization success status
      */
-    bool initPDC(uint16_t id);
+    bool initPDC(uint16_t id, pdc_mode init_mode);
     
     /**
      * @brief Main event loop, handles various events by priority: control messages, close requests, packet reception, response sending, etc.

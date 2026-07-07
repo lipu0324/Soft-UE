@@ -1,39 +1,74 @@
-# Smart Makefile for Soft-UE Test
-# Automatically detects cpp files in current directory and supports user-selected compilation targets
+# Makefile for SESTest
+# 编译SESTest测试程序及其依赖的PDC文件
 
 CXX = g++
+NVCC ?= nvcc
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g -pthread -w
-INCLUDES = -I.. -I../SES -I../PDS -I../PDS/PDC -I../PDS/PDS_Manager -I../logger
+LIBFABRIC_PREFIX ?= /opt/libfabric
+LIBFABRIC_INCLUDE ?= $(LIBFABRIC_PREFIX)/include
+LIBFABRIC_LIB ?= $(LIBFABRIC_PREFIX)/lib
+LIBFABRIC_CPPFLAGS ?= -I$(LIBFABRIC_INCLUDE)
+ifneq ($(strip $(CONDA_PREFIX)),)
+ifneq ($(wildcard $(CONDA_PREFIX)/lib/libstdc++.so.6),)
+LIBFABRIC_CXX_RUNTIME_RPATH := -Wl,-rpath,$(CONDA_PREFIX)/lib
+endif
+endif
+LIBFABRIC_LDLIBS ?= -L$(LIBFABRIC_LIB) -Wl,-rpath,$(LIBFABRIC_LIB) $(LIBFABRIC_CXX_RUNTIME_RPATH) -lfabric
+INCLUDES = -I.. -I../SES -I../PDS -I../PDS/PDC -I../PDS/PDS_Manager -I../logger $(LIBFABRIC_CPPFLAGS)
+UET_SRC_ROOT := ..
+UET_CORE_SOURCES_MK := ../UETCoreSources.mk
+include $(UET_CORE_SOURCES_MK)
 
-# Windows platform needs ws2_32 library
+# Windows平台需要链接ws2_32库
 ifeq ($(OS),Windows_NT)
 	LDFLAGS = -lws2_32
 else
 	LDFLAGS =
 endif
 
-# Auto-discover test files in current directory
-TEST_FILES = $(wildcard *.cpp)
-PDC_SOURCES = ../PDS/PDC/PDC.cpp \
-              ../PDS/PDC/IPDC.cpp \
-              ../PDS/PDC/TPDC.cpp \
-              ../PDS/PDC/RTOTimer/RTOTimer.cpp \
-              ../Network_Layer/UDP_Network_Layer.cpp
+# 源文件
+COMMON_SOURCES = $(UET_CORE_RUNTIME_SOURCES)
 
-# Default compilation target (modifiable)
-DEFAULT_TARGET = PDS_fulltest
+SOURCES = SESTest.cpp $(COMMON_SOURCES)
+READ_SOURCES = READTest.cpp $(COMMON_SOURCES)
+WRITE_SOURCES = WRITETest.cpp $(COMMON_SOURCES)
+MPWRITE_SOURCES = WRITE_MultiProc.cpp $(COMMON_SOURCES)
+RUD_SEND_NEG_SOURCES = RudSendNegativeTest.cpp $(COMMON_SOURCES)
+RUD_BITMAP_SOURCES = RudBitmapResourceTest.cpp $(COMMON_SOURCES)
+RUD_SOAK_SOURCES = RudSoakTest.cpp $(COMMON_SOURCES)
+RUD_CTRL_PRESSURE_SOURCES = RudControlPressureTest.cpp $(COMMON_SOURCES)
+RUD_SYN_COLLISION_SOURCES = RudSynCollisionTest.cpp $(COMMON_SOURCES)
+GUARD_SOURCES = RefactorGuardTest.cpp $(COMMON_SOURCES)
+LF_GUARD_SOURCES = LibfabricHarnessGuardTest.cpp
+MRDESC_SOURCES = MRDescTest.cpp
+MRDESC_WRITE_SOURCES = MRDescWriteTest.cpp $(COMMON_SOURCES)
+MRDESC_WRITE_LF_SOURCES = MRDescWriteLibfabricTest.cpp
+MRDESC_WRITE_TP_LF_SOURCES = MRDescWriteThroughputLibfabricTest.cpp
+MRDESC_READ_LF_SOURCES = MRDescReadLibfabricTest.cpp
+MRREG_LF_SOURCES = MRRegLibfabricTest.cpp
+NCCL_AR_SOURCES = NCCLAllReduceTest.cu
 
-# Get filenames without extension
-TARGETS = $(basename $(TEST_FILES))
+# 目标可执行文件
+TARGET = PDS_fulltest
+READ_TARGET = READTest
+WRITE_TARGET = WRITETest
+MPWRITE_TARGET = WRITE_MultiProc
+RUD_SEND_NEG_TARGET = RudSendNegativeTest
+RUD_BITMAP_TARGET = RudBitmapResourceTest
+RUD_SOAK_TARGET = RudSoakTest
+RUD_CTRL_PRESSURE_TARGET = RudControlPressureTest
+RUD_SYN_COLLISION_TARGET = RudSynCollisionTest
+GUARD_TARGET = RefactorGuardTest
+LF_GUARD_TARGET = LibfabricHarnessGuardTest
+MRDESC_TARGET = MRDescTest
+MRDESC_WRITE_TARGET = MRDescWriteTest
+MRDESC_WRITE_LF_TARGET = MRDescWriteLibfabricTest
+MRDESC_WRITE_TP_LF_TARGET = MRDescWriteThroughputLibfabricTest
+MRDESC_READ_LF_TARGET = MRDescReadLibfabricTest
+MRREG_LF_TARGET = MRRegLibfabricTest
+NCCL_AR_TARGET = NCCLAllReduceTest
 
-# Current selected compilation target
-TARGET ?= $(DEFAULT_TARGET)
-
-# Get corresponding source file
-CURRENT_SOURCE = $(TARGET).cpp
-SOURCES = $(CURRENT_SOURCE) $(PDC_SOURCES)
-
-# Dependency header file paths
+# 依赖的头文件路径
 DEPS = ../SES/SES.hpp \
        ../Transport_Layer.hpp \
        ../PDS/PDS_Manager/PDSManager.hpp \
@@ -47,121 +82,92 @@ DEPS = ../SES/SES.hpp \
        ../logger/Logger.hpp \
        ../logger/LoggingEnhancer.hpp \
        ../Network_Layer/UDP_Network_Layer.hpp \
-       ../PDS/PDS_Manager/process/PDSProcessManager.hpp
+       ../PDS/PDS_Manager/process/PDSProcessManager.hpp 
 
-# ==================== Main Targets ====================
+LIBFABRIC_TEST_DEPS = LibfabricTestCommon.hpp $(UET_CORE_SOURCES_MK)
 
-# Default target
-all: $(TARGET)
 
-# Compile specified target
-$(TARGET): $(CURRENT_SOURCE) $(PDC_SOURCES) $(DEPS)
-	@echo "Compiling: $(TARGET)"
+
+# 编译目标
+all: $(TARGET) $(READ_TARGET) $(WRITE_TARGET) $(MPWRITE_TARGET) $(RUD_SEND_NEG_TARGET) $(RUD_BITMAP_TARGET) $(RUD_SYN_COLLISION_TARGET) $(GUARD_TARGET) $(LF_GUARD_TARGET) $(MRDESC_TARGET) $(MRDESC_WRITE_TARGET) $(MRDESC_WRITE_LF_TARGET) $(MRDESC_WRITE_TP_LF_TARGET) $(MRDESC_READ_LF_TARGET) $(MRREG_LF_TARGET) $(NCCL_AR_TARGET)
+
+$(TARGET): $(SOURCES) $(DEPS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(TARGET) $(SOURCES) $(LDFLAGS)
-	@echo "Compilation complete: $(TARGET)"
 
-# Run current target
+$(READ_TARGET): $(READ_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(READ_TARGET) $(READ_SOURCES) $(LDFLAGS)
+
+$(WRITE_TARGET): $(WRITE_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(WRITE_TARGET) $(WRITE_SOURCES) $(LDFLAGS)
+
+$(MPWRITE_TARGET): $(MPWRITE_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MPWRITE_TARGET) $(MPWRITE_SOURCES) $(LDFLAGS)
+
+$(RUD_SEND_NEG_TARGET): $(RUD_SEND_NEG_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(RUD_SEND_NEG_TARGET) $(RUD_SEND_NEG_SOURCES) $(LDFLAGS)
+
+$(RUD_BITMAP_TARGET): $(RUD_BITMAP_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(RUD_BITMAP_TARGET) $(RUD_BITMAP_SOURCES) $(LDFLAGS)
+
+$(RUD_SOAK_TARGET): $(RUD_SOAK_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(RUD_SOAK_TARGET) $(RUD_SOAK_SOURCES) $(LDFLAGS)
+
+$(RUD_CTRL_PRESSURE_TARGET): $(RUD_CTRL_PRESSURE_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(RUD_CTRL_PRESSURE_TARGET) $(RUD_CTRL_PRESSURE_SOURCES) $(LDFLAGS)
+
+$(RUD_SYN_COLLISION_TARGET): $(RUD_SYN_COLLISION_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(RUD_SYN_COLLISION_TARGET) $(RUD_SYN_COLLISION_SOURCES) $(LDFLAGS)
+
+$(GUARD_TARGET): $(GUARD_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(GUARD_TARGET) $(GUARD_SOURCES) $(LDFLAGS)
+
+$(LF_GUARD_TARGET): $(LF_GUARD_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(LF_GUARD_TARGET) $(LF_GUARD_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(MRDESC_TARGET): $(MRDESC_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRDESC_TARGET) $(MRDESC_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(MRDESC_WRITE_TARGET): $(MRDESC_WRITE_SOURCES) $(DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRDESC_WRITE_TARGET) $(MRDESC_WRITE_SOURCES) $(LIBFABRIC_LDLIBS) $(LDFLAGS)
+
+$(MRDESC_WRITE_LF_TARGET): $(MRDESC_WRITE_LF_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRDESC_WRITE_LF_TARGET) $(MRDESC_WRITE_LF_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(MRDESC_WRITE_TP_LF_TARGET): $(MRDESC_WRITE_TP_LF_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRDESC_WRITE_TP_LF_TARGET) $(MRDESC_WRITE_TP_LF_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(MRDESC_READ_LF_TARGET): $(MRDESC_READ_LF_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRDESC_READ_LF_TARGET) $(MRDESC_READ_LF_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(MRREG_LF_TARGET): $(MRREG_LF_SOURCES) $(LIBFABRIC_TEST_DEPS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(MRREG_LF_TARGET) $(MRREG_LF_SOURCES) $(LIBFABRIC_LDLIBS)
+
+$(NCCL_AR_TARGET): $(NCCL_AR_SOURCES)
+	$(NVCC) -O2 -std=c++17 -o $(NCCL_AR_TARGET) $(NCCL_AR_SOURCES) -lnccl
+
+# 运行测试
 run: $(TARGET)
-	@echo "Running: $(TARGET)"
 	./$(TARGET)
 
-# Compile and run
-test: $(TARGET)
-	@echo "Compiling and running: $(TARGET)"
-	./$(TARGET)
-
-# ==================== Multi-Target Support ====================
-
-# Create compilation targets for each discovered cpp file
-define TARGET_template
-$(1): $(1).cpp $(PDC_SOURCES) $(DEPS)
-	@echo "Compiling: $(1)"
-	$$(CXX) $$(CXXFLAGS) $$(INCLUDES) -o $(1) $(1).cpp $$(PDC_SOURCES) $$(LDFLAGS)
-	@echo "Compilation complete: $(1)"
-
-run_$(1): $(1)
-	@echo "Running: $(1)"
-	./$(1)
-
-test_$(1): $(1)
-	@echo "Compiling and running: $(1)"
-	./$(1)
-endef
-
-# Generate targets for each test file
-$(foreach target,$(TARGETS),$(eval $(call TARGET_template,$(target))))
-
-# ==================== Maintenance Targets ====================
-
-# Clean all compilation artifacts
+# 清理
 clean:
-	@echo "Cleaning compilation artifacts..."
-	rm -f $(TARGETS) *.log *.o
-	@echo "Clean complete"
+	rm -f $(TARGET) $(READ_TARGET) $(WRITE_TARGET) $(MPWRITE_TARGET) $(RUD_SEND_NEG_TARGET) $(RUD_BITMAP_TARGET) $(RUD_SOAK_TARGET) $(RUD_CTRL_PRESSURE_TARGET) $(RUD_SYN_COLLISION_TARGET) $(GUARD_TARGET) $(LF_GUARD_TARGET) $(MRDESC_TARGET) $(MRDESC_WRITE_TARGET) $(MRDESC_WRITE_LF_TARGET) $(MRDESC_WRITE_TP_LF_TARGET) $(MRDESC_READ_LF_TARGET) $(MRREG_LF_TARGET) $(NCCL_AR_TARGET) *.log
 
-# Clean and rebuild default target
-rebuild: clean all
-
-# Debug compile current target
+# 调试编译
 debug: CXXFLAGS += -DDEBUG -g3
 debug: $(TARGET)
 
-# List all available test files
-list:
-	@echo "Discovered test files:"
-# @for file in $(TEST_FILES); do echo "  - $$file"; done
-	@echo ""
-	@echo "Available compilation targets:"
-	@for target in $(TARGETS); do echo "  - $$target"; done
-	@echo ""
-	@echo "Current default target: $(DEFAULT_TARGET)"
-	@echo ""
-	@echo "Usage:"
-	@echo "  make                    # Compile default target"
-	@echo "  make TARGET=xxx         # Compile specified target"
-	@echo "  make xxx                # Compile specified target"
-	@echo "  make run               # Run current target"
-	@echo "  make run_xxx           # Compile and run specified target"
-	@echo "  make list              # Show all available targets"
-	@echo "  make clean             # Clean compilation artifacts"
-	@echo "  make debug             # Debug compilation"
-
-# Show detailed help
+# 显示帮助
 help:
-	@echo "Smart Soft-UE Test Compiler"
-	@echo "============================"
-	@echo ""
-	@make list
-	@echo ""
-	@echo "Examples:"
-	@echo "  make                           # Compile PDS_fulltest"
-	@echo "  make TARGET=SESTest            # Compile SESTest"
-	@echo "  make SESTest                   # Compile SESTest"
-	@echo "  make run_SESTest               # Compile and run SESTest"
-	@echo "  make debug TARGET=PDS_test     # Debug compile PDS_test"
+	@echo "可用目标:"
+	@echo "  all        - 编译测试程序 (默认)"
+	@echo "  $(TARGET)  - 编译测试程序"
+	@echo "  run        - 编译并运行测试"
+	@echo "  debug      - 编译调试版本"
+	@echo "  $(RUD_SOAK_TARGET) - 编译 RUD soak/stress 测试"
+	@echo "  $(RUD_CTRL_PRESSURE_TARGET) - 编译控制面 pressure validation 测试"
+	@echo "  $(NCCL_AR_TARGET) - 编译 NCCL AllReduce 测试"
+	@echo "  clean      - 清理编译文件和日志"
+	@echo "  help       - 显示此帮助信息"
 
-# Check if source files exist
-check:
-	@echo "Checking source files..."
-	@for file in $(TEST_FILES); do \
-		if [ -f $$file ]; then \
-			echo "✓ $$file"; \
-		else \
-			echo "✗ $$file (missing)"; \
-		fi; \
-	done
-	@echo ""
-	@echo "PDC dependency files:"
-	@for file in $(PDC_SOURCES); do \
-		if [ -f $$file ]; then \
-			echo "✓ $$file"; \
-		else \
-			echo "✗ $$file (missing)"; \
-		fi; \
-	done
-
-# Set default goal
-.DEFAULT_GOAL := all
-
-# Declare phony targets
-.PHONY: all run test clean rebuild debug list help check $(foreach target,$(TARGETS),run_$(target) test_$(target))
+.PHONY: all run clean debug help

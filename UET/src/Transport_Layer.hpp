@@ -32,7 +32,11 @@
 #define TRANSPORT_LAYER_HPP
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
+
+#include "PayloadHandle.hpp"
 
 //=============================================================================
 // Cross-platform structure packing macro definitions
@@ -76,7 +80,7 @@
 #define IP_Proto_Nxt_Hdr    0                      // Protocol number when UET runs directly over IP, can use experimental numbers (253-254) before official protocol number assignment
 #define UET_Data_Protect    0                      // Global data protection configuration: 0=no CRC and TSS, 1=enable CRC, 2=enable TSS, 3=reserved
 #define Limit_PSN_Range     1                      // When set, PDC closes when PSN reaches Start_PSN + 2^31 (optional security feature)
-#define Default_MPR         8                      // Default MPR value assumed when creating PDC, 0 is invalid, if set to 0 then use 1
+#define Default_MPR         16                     // Default MPR value assumed when creating PDC, 0 is invalid, if set to 0 then use 1
 
 // ACK related configuration parameters
 #define Max_ACK_Data_Size   16 * 8                 // Maximum return data that can be carried in PDS ACK (bytes)
@@ -166,7 +170,8 @@ enum PDS_ctl_type{
     Probe,          // Source to target: probe packet requesting PDS ACK
     Credit,         // Target to source: carries congestion control credit
     Credit_req,     // Source to target: request credit
-    Negotiation     // Negotiation packet
+    Negotiation,    // Negotiation packet
+    SACK            // Receiver reports selective acknowledgment bitmap for RUD
 };
 
 /**
@@ -256,7 +261,7 @@ struct PDS_RUOD_ack_header
         uint8_t retx : 1;           // Retransmission ACK: 1 indicates this is ACK for retransmitted packet
         uint8_t p    : 1;           // Probe ACK: 1 indicates this is ACK for Probe CP, ignore ack_psn_offset and cack_psn
         uint8_t req  : 2;           // Request flag: request clear or close
-        uint8_t rsvd1: 1;           // Reserved bit
+        uint8_t x    : 1;           // ACK control extension present
     } PACKED flags;
     union{
         int16_t ack_psn_off;           // 16 bits, signed offset representation from CACK_PSN to ACK_PSN
@@ -266,6 +271,78 @@ struct PDS_RUOD_ack_header
     uint16_t spdcid;                // 16 bits, source PDCID
     uint16_t dpdcid;                // 16 bits, destination PDCID
 }PACKED;
+
+enum AckCtrlSectionMask : uint16_t
+{
+    ACK_CTRL_SECTION_SACK = 0x0001,
+    ACK_CTRL_SECTION_CREDIT = 0x0002,
+    ACK_CTRL_SECTION_ACKREQ_HINT = 0x0004,
+    ACK_CTRL_SECTION_RECEIVER_PRESSURE = 0x0008,
+};
+
+struct PDS_RUOD_ack_ctrl_prefix
+{
+    uint8_t version;                // ACK control extension format version
+    uint8_t total_len;              // total serialized bytes including this prefix
+    uint16_t section_mask;          // AckCtrlSectionMask bits
+} PACKED;
+
+struct PDS_RUOD_ack_ctrl_sack_section
+{
+    uint32_t sack_base_psn;
+    uint32_t sack_bitmap;
+} PACKED;
+
+struct PDS_RUOD_ack_ctrl_credit_section
+{
+    uint32_t job_id;
+    uint16_t credit_gen;
+    uint16_t posted_recv_credits;
+    uint16_t unexpected_msg_credits;
+    uint16_t unexpected_byte_credits;
+    uint8_t byte_credit_shift;
+    uint8_t flags;
+} PACKED;
+
+struct PDS_RUOD_ack_ctrl_ackreq_hint_section
+{
+    uint32_t req_psn;
+} PACKED;
+
+struct PDS_RUOD_ack_ctrl_receiver_pressure_section
+{
+    uint16_t unexpected_msgs_in_use;
+    uint16_t unexpected_byte_credits_available;
+    uint16_t bitmap_blocks_available;
+    uint16_t arrival_blocks_available;
+} PACKED;
+
+struct PDS_RUOD_ack_ctrl_ext
+{
+    PDS_RUOD_ack_ctrl_prefix prefix{};
+    PDS_RUOD_ack_ctrl_sack_section sack{};
+    PDS_RUOD_ack_ctrl_credit_section credit{};
+    PDS_RUOD_ack_ctrl_ackreq_hint_section ackreq_hint{};
+    PDS_RUOD_ack_ctrl_receiver_pressure_section receiver_pressure{};
+} PACKED;
+
+struct PDS_RUOD_credit_cp_payload
+{
+    uint32_t job_id;
+    uint16_t credit_gen;
+    uint16_t posted_recv_credits;
+    uint16_t unexpected_msg_credits;
+    uint16_t unexpected_byte_credits;
+    uint8_t byte_credit_shift;
+    uint8_t flags;
+} PACKED;
+
+struct PDS_RUOD_credit_req_cp_payload
+{
+    uint32_t job_id;
+    uint16_t last_seen_credit_gen;
+    uint16_t rsvd;
+} PACKED;
 
 /**
  * @brief PDS RUOD control packet (CP) header structure
@@ -498,8 +575,12 @@ struct SEStoPDS_pkt //Add any additional SES outputs here
         SES_Rendezvous_Extension_Header Rendezvous_Extension_Header;
     }eth_header;
     
-
-    std::string DMA_command;//Temporarily use DMA command as payload
+    // SES "application bytes" carried with the request/response.
+    // We keep it as raw bytes (not std::string) because:
+    // - FI_MSG SEND/RECV payload is arbitrary binary
+    // - it must survive end-to-end serialization in UDP_Network_Layer
+    // - it is also used for multi-packet slicing/reassembly (som/eom + message_offset)
+    UET::PayloadHandle payload;
 };
 
 //=============================================================================
@@ -525,6 +606,7 @@ struct PDStoNET_pkt
         PDS_RUOD_cp_header RUOD_cp_header;      // RUOD control packet header
         PDS_nack_header nack_header;            // NACK header
     } PDS_header;
+    PDS_RUOD_ack_ctrl_ext ack_ctrl_ext{}; // Optional ACK-side control extension
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
 };
 
@@ -567,9 +649,11 @@ struct PDC_SES_req
 {
     uint16_t PDCID;          /**< SPDC identifier */
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request */
+    uint8_t mode;            /**< Delivery mode of the owning PDC */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
     PDS_next_hdr next_hdr;        /**< Next header type */
+    uint32_t src_fep;        /**< Source FEP identifier */
     uint16_t orig_pdcid;     /**< DPDCID */
     uint32_t orig_psn;       /**< Original packet sequence number */
 };
@@ -583,8 +667,208 @@ struct PDC_SES_rsp
 {
     uint16_t PDCID;          /**< SPDC identifier */
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */
+    uint8_t mode;            /**< Delivery mode of the owning PDC */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
+    uint32_t src_fep;        /**< Source FEP identifier */
+};
+
+enum PDC_SES_event_type : uint8_t
+{
+    PDC_SES_PACKET = 0x00,
+    PDC_SES_RESOLVE_RX = 0x01,
+    PDC_SES_RX_COMPLETE = 0x02,
+    PDC_SES_RX_ERROR = 0x03,
+};
+
+enum class PDC_RX_path : uint8_t
+{
+    REQUEST = 0x00,
+    RESPONSE = 0x01,
+};
+
+enum class PDC_RX_completion_type : uint8_t
+{
+    WRITE = 0x00,
+    READ_RESPONSE = 0x01,
+    SEND = 0x02,
+};
+
+enum class PDC_RX_completion_notify_kind : uint8_t
+{
+    OP_COMPLETE = 0x00,
+    SEMANTIC_ACCEPT = 0x01,
+    TARGET_DELIVERY_COMPLETE = 0x02,
+    DUPLICATE_REPLAY = 0x03,
+};
+
+enum class PDC_RX_failure_kind : uint8_t
+{
+    SEMANTIC = 0x00,
+    PDS_NACK = 0x01,
+};
+
+enum class RudSendPlacementMode : uint8_t
+{
+    DIRECT_RECV = 0x00,
+    UNEXPECTED_BUFFERED = 0x01,
+};
+
+enum class RudReleaseReason : uint8_t
+{
+    NORMAL = 0x00,
+    PARTIAL_TIMEOUT = 0x01,
+    CLOSE_RESET = 0x02,
+};
+
+enum class SenderTerminalReason : uint8_t
+{
+    RTO_EXHAUSTED = 0x00,
+    CLOSE_RESET = 0x01,
+    TEARDOWN_ORPHAN = 0x02,
+};
+
+enum class RequestCloseCause : uint8_t
+{
+    CLOSE_REQ_PATH = 0x00,
+    CLOSE_ERROR_PATH = 0x01,
+    SAFE_CLOSE_TEARDOWN = 0x02,
+    RTO_EXHAUST_PATH = 0x03,
+    UNKNOWN = 0x04,
+};
+
+struct SenderTerminalCompletion
+{
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+    SenderTerminalReason reason{SenderTerminalReason::CLOSE_RESET};
+};
+
+struct RequestTerminalCompletion
+{
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+    SenderTerminalReason reason{SenderTerminalReason::CLOSE_RESET};
+    int64_t terminalized_at_ms{0};
+    RequestCloseCause close_cause{RequestCloseCause::UNKNOWN};
+    uint8_t close_state_at_terminalize{0};
+    uint32_t tx_pending_count_at_terminalize{0};
+    uint32_t unack_cnt_at_terminalize{0};
+    bool all_ack_at_terminalize{false};
+    bool retry_present_at_terminalize{false};
+    bool read_track_present_at_terminalize{false};
+};
+
+struct UnexpectedSendProbe
+{
+    bool present{false};
+    bool semantic_accepted{false};
+    bool buffered_complete{false};
+    bool matched_to_recv{false};
+    uint32_t chunks_done{0};
+    uint32_t expected_chunks{0};
+    int64_t last_activity_ms{0};
+    RudSendPlacementMode send_mode{RudSendPlacementMode::DIRECT_RECV};
+    bool completed{false};
+    bool failed{false};
+};
+
+struct SendRetryProbe
+{
+    bool present{false};
+    bool waiting_response{false};
+    uint16_t retry_count{0};
+    int64_t next_retry_ms{0};
+};
+
+struct RequestTxProbe
+{
+    bool present{false};
+    bool has_tx_pkt_map_entries{false};
+    bool has_tx_pkt_buffer_entries{false};
+    uint32_t oldest_pending_psn{0};
+    uint32_t pending_psn_count{0};
+    bool pending_control_only{false};
+    bool pending_data_only{false};
+    int64_t last_tx_progress_ms{0};
+};
+
+enum class ReadResponseTerminalReason : uint8_t
+{
+    RTO_EXHAUSTED = 0x00,
+    CLOSE_RESET = 0x01,
+    TEARDOWN_ORPHAN = 0x02,
+};
+
+struct ReadResponseTerminalCompletion
+{
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t dst_fep{0};
+    ReadResponseTerminalReason reason{ReadResponseTerminalReason::CLOSE_RESET};
+};
+
+struct RudBitmapBlock
+{
+    uint32_t base_index{0};
+    uint64_t received_bits{0};
+    uint8_t received_count{0};
+    bool full{false};
+};
+
+struct RudBitmapPoolHandle
+{
+    uint32_t block_base{0};
+    std::unique_ptr<RudBitmapBlock> block;
+};
+
+struct RudUnexpectedBufferHandle
+{
+    uint32_t capacity{0};
+    std::unique_ptr<uint8_t[]> bytes;
+
+    uint8_t *data() const { return bytes.get(); }
+};
+
+struct RxPlacementDescriptor
+{
+    uint8_t opcode{0};
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t src_fep{0};
+    uint16_t pdcid{0};
+    uint64_t base_addr{0};
+    uint32_t buffer_offset{0};
+    uint32_t total_len{0};
+    uint32_t chunk_payload_size{0};
+    bool rkey_ok{false};
+    bool bounds_ok{false};
+    uint64_t completion_key{0};
+    uint8_t return_code{0};
+    bool valid{false};
+    bool response_required{false};
+};
+
+struct PDC_RX_completion
+{
+    PDC_RX_completion_type type{PDC_RX_completion_type::WRITE};
+    PDC_RX_completion_notify_kind notify_kind{PDC_RX_completion_notify_kind::OP_COMPLETE};
+    uint8_t opcode{0};
+    uint64_t job_id{0};
+    uint16_t msg_id{0};
+    uint32_t src_fep{0};
+    uint16_t pdcid{0};
+    uint16_t rx_pkt_handle{0};
+    uint64_t completion_key{0};
+    uint32_t total_len{0};
+    uint32_t modified_length{0};
+    uint8_t return_code{0};
+    PDC_RX_failure_kind failure_kind{PDC_RX_failure_kind::SEMANTIC};
+    PDS_Nack_Codes pds_nack_code{UET_NO_RESOURCE};
+    bool success{false};
+    bool response_required{false};
 };
 
 /**
@@ -616,6 +900,7 @@ struct PDS_PDC_req
     uint16_t tx_pkt_handle; /**< Transmit packet handle */
     SEStoPDS_pkt pkt;       /**< Request packet data */
     uint16_t pkt_len;       /**< Packet length */
+    bool is_retry;          /**< Whole-message retry request flag */
     bool som;               /**< Start of message flag */
     bool eom;               /**< End of message flag */
 };
@@ -695,6 +980,7 @@ struct SES_PDS_req {
     PDS_next_hdr next_hdr;       // Encapsulated UET payload header type
     uint8_t tc;             // Traffic control category
     bool lock_pdc;          // TRUE => do not close this PDC until SES indicates
+    bool is_retry;          // TRUE => request is an SES-driven whole-message retry
     uint16_t tx_pkt_handle; // Data packet handle allocated by source SES
     SEStoPDS_pkt pkt;       // Actual SES to PDS packet data
     uint16_t pkt_len;       // Packet length, in bytes
@@ -717,6 +1003,7 @@ struct SES_PDS_rsp
     uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
     bool gtd_del;           /**< Guaranteed delivery flag */
     bool ses_nack;          /**< SES layer NACK flag */
+    NackPayload nack_payload; /**< NACK information payload */
     SEStoPDS_pkt rsp;       /**< Response packet data */
     uint16_t rsp_len;       /**< Response length */
 };

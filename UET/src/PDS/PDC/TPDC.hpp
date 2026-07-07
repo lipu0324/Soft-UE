@@ -67,7 +67,7 @@ public:
      * @param id PDC identifier 
      * @return Whether initialization was successful 
      */
-    bool initPDC(uint16_t id);
+    bool initPDC(uint16_t id, pdc_mode init_mode);
 
 
     // ==========================================
