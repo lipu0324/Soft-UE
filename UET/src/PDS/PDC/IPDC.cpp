@@ -82,7 +82,7 @@ bool I_PDC::initPDC(uint16_t id){
     // Clear all static queues
     while (!tx_req_q.empty()) tx_req_q.pop();
     while (!tx_rsp_q.empty()) tx_rsp_q.pop();
-    while (!rx_pkt_q.empty()) rx_pkt_q.pop();
+    rx_pkt_q.clear();
     while (!tx_pkt_q.empty()) tx_pkt_q.pop();
     while (!rx_req_pkt_q.empty()) rx_req_pkt_q.pop();
     while (!rx_rsp_pkt_q.empty()) rx_rsp_pkt_q.pop();
@@ -161,7 +161,8 @@ void I_PDC::openChk(){
         targetClose();
     }
     else if(!rx_pkt_q.empty()){
-        PDStoNET_pkt p = rx_pkt_q.front();
+        PDStoNET_pkt p;
+        if (!rx_pkt_q.pop(p)) return;
         std::cout << getCurrentTimestamp() << "I_PDC process receive queue packet - Type: " << p.PDS_type << std::endl;
 
         if(p.PDS_type == RUOD_req_header) {
@@ -180,7 +181,6 @@ void I_PDC::openChk(){
         LOG_DEBUG(__FUNCTION__, "Process negative acknowledgment packet");
         rxNack(&p);      // Process negative acknowledgment packet
         }
-        rx_pkt_q.pop();
     }
     else if(!rto_pkt_q.empty()){
         uint32_t psn = rto_pkt_q.front();

@@ -106,7 +106,7 @@ PDC::~PDC()
     while (!rx_rsp_pkt_q.empty()) rx_rsp_pkt_q.pop();
     while (!tx_req_q.empty()) tx_req_q.pop();
     while (!tx_rsp_q.empty()) tx_rsp_q.pop();
-    while (!rx_pkt_q.empty()) rx_pkt_q.pop();
+    rx_pkt_q.clear();
     while (!rto_pkt_q.empty()) rto_pkt_q.pop();
 
     
@@ -405,7 +405,7 @@ void PDC::freePDC()
     while (!tx_pkt_q.empty()) tx_pkt_q.pop();
     while (!tx_req_q.empty()) tx_req_q.pop();
     while (!tx_rsp_q.empty()) tx_rsp_q.pop();
-    while (!rx_pkt_q.empty()) rx_pkt_q.pop();
+    rx_pkt_q.clear();
     while (!rx_req_pkt_q.empty()) rx_req_pkt_q.pop();
     while (!rx_rsp_pkt_q.empty()) rx_rsp_pkt_q.pop();
     while (!rto_pkt_q.empty()) rto_pkt_q.pop();
