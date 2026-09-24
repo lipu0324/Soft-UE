@@ -78,7 +78,7 @@ bool T_PDC::initPDC(uint16_t id)
     // Clear all static queues
     while (!tx_req_q.empty()) tx_req_q.pop();
     while (!tx_rsp_q.empty()) tx_rsp_q.pop();
-    while (!rx_pkt_q.empty()) rx_pkt_q.pop();
+    rx_pkt_q.clear();
     while (!tx_pkt_q.empty()) tx_pkt_q.pop();
     while (!rx_req_pkt_q.empty()) rx_req_pkt_q.pop();
     while (!rx_rsp_pkt_q.empty()) rx_rsp_pkt_q.pop();
@@ -223,7 +223,8 @@ void T_PDC::openChk()
         { // Handle received packets
             LOG_DEBUG(__FUNCTION__, formatLogMessage("Process data packets in receive queue"));
             std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx_pkt_q size:" << rx_pkt_q.size() << std::endl;
-            PDStoNET_pkt p = rx_pkt_q.front();
+            PDStoNET_pkt p;
+            if (!rx_pkt_q.pop(p)) return;
             if (p.PDS_type == nack_header)
             {
                 LOG_DEBUG(__FUNCTION__, formatLogMessage("Process negative acknowledgment packet"));
@@ -244,7 +245,6 @@ void T_PDC::openChk()
                 LOG_DEBUG(__FUNCTION__, formatLogMessage("Process control packet"));
                 netRxCm(&p); // Handle control packet / Process control packet
             }
-            rx_pkt_q.pop();
         }
         else if(!rto_pkt_q.empty()){
             uint32_t psn = rto_pkt_q.front();
@@ -278,13 +278,13 @@ void T_PDC::openChk()
         std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Connection closed state, only process receive packets" << rx_pkt_q.size() << std::endl;
         if (!rx_pkt_q.empty())
         { // Handle received packets
-            PDStoNET_pkt p = rx_pkt_q.front();
+            PDStoNET_pkt p;
+            if (!rx_pkt_q.pop(p)) return;
             if (p.PDS_type == RUOD_req_header)
             {
                 LOG_DEBUG(__FUNCTION__, formatLogMessage("Process request packet in closed state"));
                 netRxReq(&p); // Handle request packet / Process request packet
             }
-            rx_pkt_q.pop();
         }
     }
 

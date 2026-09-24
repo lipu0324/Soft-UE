@@ -398,7 +398,7 @@ public:
     std::queue<PDC_SES_rsp> rx_rsp_pkt_q;     /**< Response packet queue to SES layer / Response packet queue to SES layer */
     std::queue<PDS_PDC_req> tx_req_q;         /**< PDS request transmission queue / PDS request transmission queue */
     std::queue<SES_PDC_rsp> tx_rsp_q;         /**< SES response transmission queue / SES response transmission queue */
-    std::queue<PDStoNET_pkt> rx_pkt_q;        /**< Received packet queue from PDS / Received packet queue from PDS */
+    ThreadSafeQueue<PDStoNET_pkt> rx_pkt_q;   /**< Received packet queue from PDS / Received packet queue from PDS */
     std::queue<uint32_t> rto_pkt_q;           /**< Retransmission timeout packet queue / Retransmission timeout packet queue */
 
     // Public queue pointers  

@@ -164,8 +164,9 @@ public:
         bool is_fwd_pkt = false; // Default: cannot forward
         uint16_t pdc_id = 0;
         // Process receive request logic
-        PDStoNET_pkt *rx = &Net_rx_pkt_q.front(); // Get queue head element
-        Net_rx_pkt_q.pop();                       // Pop queue head element
+        PDStoNET_pkt packet = Net_rx_pkt_q.front(); // Keep a copy before removing the queue element
+        Net_rx_pkt_q.pop();
+        PDStoNET_pkt *rx = &packet;
 
         if (checkRxPkt(rx))
         {
