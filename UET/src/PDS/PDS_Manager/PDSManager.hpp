@@ -86,6 +86,26 @@ public:
 
     bool hasNetworkChannel() const { return network_transport_ != nullptr; }
 
+    // Report whether at least one PDC has completed the protocol handshake.
+    // This is used by integration code to distinguish allocation from a
+    // completed network connection.
+    bool hasEstablishedPDC()
+    {
+        for (uint16_t pdc_id = 0; pdc_id < MAX_PDC; ++pdc_id)
+        {
+            if (pdc_list[pdc_id].is_open &&
+                IPDC_Processmanager.getPDCState(pdc_id) == ESTABLISHED)
+                return true;
+        }
+        for (uint16_t pdc_id = MAX_PDC; pdc_id < MAX_PDC * 2; ++pdc_id)
+        {
+            if (pdc_list[pdc_id].is_open &&
+                TPDC_Processmanager.getPDCState(pdc_id) == ESTABLISHED)
+                return true;
+        }
+        return false;
+    }
+
     bool initPDSM()
     {
         LOG_INFO(__FUNCTION__, "=====================PDS Manager State Machine Initialization=====================");

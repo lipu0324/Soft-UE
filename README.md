@@ -25,6 +25,23 @@ make test-pds-rdma-queue
 
 The two-process RDMA tests use a TCP connection only to exchange queue parameters. Message bytes travel through an RC queue pair. Pass `--device <device>` to the test binary when the active device is not the default.
 
+The formal PDS process test runs the real `PDSProcessManager` loop on both
+sides. It sends a SES request from the client, receives it through RDMA on the
+server, verifies the payload at the server SES queue, and waits for the server
+PDS to return the establishment ACK:
+
+```bash
+make test-pds-process-rdma-e2e
+```
+
+The test defaults to `mlx5_1` and uses `127.0.0.1` for the TCP control
+connection. The selected InfiniBand port must be active. To select another
+verbs device, pass its name to the script:
+
+```bash
+python3 scripts/test_pds_process_rdma_e2e.py mlx5_1
+```
+
 ## Added path
 
 - `UET/src/Network_Layer/PacketCodec.*`: versioned framing, byte order, bounds checks and CRC32.

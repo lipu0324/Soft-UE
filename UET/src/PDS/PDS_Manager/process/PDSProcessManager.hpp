@@ -332,6 +332,12 @@ public:
                pds_process_info->pds_instance->hasNetworkChannel();
     }
 
+    bool hasEstablishedPDC()
+    {
+        return pds_process_info && pds_process_info->pds_instance &&
+               pds_process_info->pds_instance->hasEstablishedPDC();
+    }
+
     /**
      * @brief Add request to PDS SES request queue
      * @param req Request
