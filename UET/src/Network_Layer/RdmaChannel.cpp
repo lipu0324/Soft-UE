@@ -262,9 +262,11 @@ void RdmaChannel::progress() {
     require(count >= 0, "ibv_poll_cq failed");
     for (int i = 0; i < count; ++i) {
         const auto& wc = completions[i];
-        if (wc.status != IBV_WC_SUCCESS)
+        if (wc.status != IBV_WC_SUCCESS) {
+            if (wc.wr_id == kSendId) send_pending_ = false;
             throw std::runtime_error(std::string("RDMA work completion failed: ") +
                                      ibv_wc_status_str(wc.status));
+        }
         if (wc.wr_id == kSendId) {
             send_pending_ = false;
         } else {
@@ -281,8 +283,16 @@ void RdmaChannel::progress() {
 
 void RdmaChannel::send_packet(const std::vector<uint8_t>& bytes,
                               std::chrono::milliseconds timeout) {
-    require(!bytes.empty() && bytes.size() <= kSlotSize && !send_pending_,
+    require(!bytes.empty() && bytes.size() <= kSlotSize,
             "invalid RDMA send request");
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (send_pending_) {
+        progress();
+        if (!send_pending_) break;
+        if (std::chrono::steady_clock::now() >= deadline)
+            throw PacketTimeout("previous RDMA send completion timed out");
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
     std::memcpy(send_buffer_.data(), bytes.data(), bytes.size());
     ibv_sge sge{};
     sge.addr = reinterpret_cast<uintptr_t>(send_buffer_.data());
@@ -297,7 +307,6 @@ void RdmaChannel::send_packet(const std::vector<uint8_t>& bytes,
     ibv_send_wr* bad = nullptr;
     require(ibv_post_send(qp_, &wr, &bad) == 0, "ibv_post_send failed");
     send_pending_ = true;
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (send_pending_) {
         progress();
         if (std::chrono::steady_clock::now() >= deadline)

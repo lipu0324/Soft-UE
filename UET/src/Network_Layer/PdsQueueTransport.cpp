@@ -30,15 +30,27 @@ size_t PdsQueueTransport::progress(std::chrono::milliseconds timeout) {
     if (!outbound_.empty()) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
-        if (remaining.count() <= 0) throw PacketTimeout("PDS progress timed out before send");
-        pump_outbound(remaining);
-        ++progressed;
+        if (remaining.count() > 0) {
+            try {
+                if (pump_outbound(remaining)) ++progressed;
+            } catch (const PacketTimeout&) {
+                // A transport may need to receive its first frame before it
+                // can send (UDP server peer learning), or may still be
+                // completing an earlier RDMA send. Keep the queue head and
+                // continue driving inbound progress below.
+            }
+        }
     }
 
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
     try {
-        if (remaining.count() > 0 && pump_inbound(remaining)) ++progressed;
+        // Even when an outbound attempt consumed the whole budget, make a
+        // non-blocking receive attempt. RDMA uses this call to poll a CQ and
+        // UDP uses it to observe a frame that may have arrived meanwhile.
+        if (pump_inbound(remaining.count() > 0 ? remaining
+                                               : std::chrono::milliseconds(0)))
+            ++progressed;
     } catch (const PacketTimeout&) {
         // A quiet receive side is normal for a shared progress loop.
     }

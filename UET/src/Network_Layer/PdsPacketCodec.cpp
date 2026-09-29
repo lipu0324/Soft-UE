@@ -7,11 +7,16 @@ namespace {
 
 constexpr uint32_t kMagic = 0x53555031; // SUP1
 constexpr uint8_t kVersion = 1;
-constexpr size_t kStandardHeaderSize = 50;
+constexpr size_t kStandardHeaderSize = 51;
 
 void put8(std::vector<uint8_t>& out, uint8_t value) { out.push_back(value); }
 void put16(std::vector<uint8_t>& out, uint16_t value) {
     out.push_back(static_cast<uint8_t>(value >> 8)); out.push_back(static_cast<uint8_t>(value));
+}
+void put24(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value >> 16));
+    out.push_back(static_cast<uint8_t>(value >> 8));
+    out.push_back(static_cast<uint8_t>(value));
 }
 void put32(std::vector<uint8_t>& out, uint32_t value) {
     for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<uint8_t>(value >> shift));
@@ -21,6 +26,10 @@ void put64(std::vector<uint8_t>& out, uint64_t value) {
 }
 uint8_t get8(const uint8_t* p) { return p[0]; }
 uint16_t get16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
+uint32_t get24(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 16) |
+           (static_cast<uint32_t>(p[1]) << 8) | p[2];
+}
 uint32_t get32(const uint8_t* p) {
     return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
            (static_cast<uint32_t>(p[2]) << 8) | p[3];
@@ -34,6 +43,7 @@ public:
     Reader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
     uint8_t u8() { require(1); return get8(data_ + offset_++); }
     uint16_t u16() { require(2); const auto v = get16(data_ + offset_); offset_ += 2; return v; }
+    uint32_t u24() { require(3); const auto v = get24(data_ + offset_); offset_ += 3; return v; }
     uint32_t u32() { require(4); const auto v = get32(data_ + offset_); offset_ += 4; return v; }
     uint64_t u64() { require(8); const auto v = get64(data_ + offset_); offset_ += 8; return v; }
     std::vector<uint8_t> bytes(size_t length) {
@@ -65,24 +75,101 @@ uint8_t nack_flags(const PDS_nack_header& h) {
 }
 
 void put_standard(std::vector<uint8_t>& out, const SES_Standard_Header& h) {
+    put8(out, static_cast<uint8_t>((h.rsvd & 0x3u) |
+                                   ((h.opcode & 0x3fu) << 2)));
+    put8(out, static_cast<uint8_t>((h.version & 0x3u) |
+                                   ((h.ie & 1u) << 2) |
+                                   ((h.rel & 1u) << 3) |
+                                   ((h.dc & 1u) << 4) |
+                                   ((h.hd & 1u) << 5) |
+                                   ((h.eom & 1u) << 6) |
+                                   ((h.som & 1u) << 7)));
     put16(out, h.msg_id); put8(out, h.ri_generation); put32(out, h.job_id);
     put16(out, h.PIDonFEP); put16(out, h.resource_index); put64(out, h.buffer_offset);
     put32(out, h.initiator); put64(out, h.match_bits);
-    put8(out, static_cast<uint8_t>((h.ie << 0) | (h.rel << 1) | (h.dc << 2) |
-                                   (h.hd << 3) | (h.eom << 4) | (h.som << 5)));
     put64(out, h.diff.som_true.header_data);
     put16(out, h.diff.som_false.payload_length); put32(out, h.diff.som_false.message_offset);
     put32(out, h.request_length);
 }
 
 void get_standard(Reader& r, SES_Standard_Header& h) {
+    const auto op = r.u8();
+    const auto flags = r.u8();
+    h.rsvd = op & 0x3u; h.opcode = (op >> 2) & 0x3fu;
+    h.version = flags & 0x3u; h.ie = (flags >> 2) & 1u;
+    h.rel = (flags >> 3) & 1u; h.dc = (flags >> 4) & 1u;
+    h.hd = (flags >> 5) & 1u; h.eom = (flags >> 6) & 1u;
+    h.som = (flags >> 7) & 1u;
     h.msg_id = r.u16(); h.ri_generation = r.u8(); h.job_id = r.u32();
     h.PIDonFEP = r.u16(); h.resource_index = r.u16(); h.buffer_offset = r.u64();
-    h.initiator = r.u32(); h.match_bits = r.u64(); const auto flags = r.u8();
-    h.ie = flags & 1; h.rel = (flags >> 1) & 1; h.dc = (flags >> 2) & 1;
-    h.hd = (flags >> 3) & 1; h.eom = (flags >> 4) & 1; h.som = (flags >> 5) & 1;
+    h.initiator = r.u32(); h.match_bits = r.u64();
     h.diff.som_true.header_data = r.u64(); h.diff.som_false.payload_length = r.u16();
     h.diff.som_false.message_offset = r.u32(); h.request_length = r.u32();
+}
+
+void put_response(std::vector<uint8_t>& out,
+                  const SES_Semantic_Response_Header& h) {
+    put8(out, static_cast<uint8_t>((h.list & 0x3u) |
+                                   ((h.opcode & 0x3fu) << 2)));
+    put8(out, static_cast<uint8_t>((h.version & 0x3u) |
+                                   ((h.return_code & 0x3fu) << 2)));
+    put16(out, h.message_id); put8(out, h.ri_generation); put24(out, h.job_id);
+    put32(out, h.modified_length);
+}
+
+void put_response_with_data(std::vector<uint8_t>& out,
+                            const SES_Semantic_Response_with_Data_Header& h) {
+    put8(out, static_cast<uint8_t>((h.list & 0x3u) |
+                                   ((h.opcode & 0x3fu) << 2)));
+    put8(out, static_cast<uint8_t>((h.version & 0x3u) |
+                                   ((h.return_code & 0x3fu) << 2)));
+    put16(out, h.response_message_id); put8(out, h.rsvd);
+    put24(out, h.job_id); put16(out, h.read_request_msg_id);
+    put16(out, static_cast<uint16_t>((h.rsvd1 & 0x3u) |
+                                     ((h.payload_length & 0x3fffu) << 2)));
+    put32(out, h.modified_length); put32(out, h.message_offset);
+}
+
+void put_optimized_response_with_data(
+    std::vector<uint8_t>& out,
+    const SES_Optimized_Response_with_Data_Header& h) {
+    put8(out, static_cast<uint8_t>((h.list & 0x3u) |
+                                   ((h.opcode & 0x3fu) << 2)));
+    put8(out, static_cast<uint8_t>((h.version & 0x3u) |
+                                   ((h.return_code & 0x3fu) << 2)));
+    put16(out, static_cast<uint16_t>((h.rsvd & 0x3u) |
+                                     ((h.payload_length & 0x3fffu) << 2)));
+    put8(out, h.rsvd1); put24(out, h.job_id); put32(out, h.original_request_psn);
+}
+
+void get_response(Reader& r, SES_Semantic_Response_Header& h) {
+    const auto op = r.u8(); const auto flags = r.u8();
+    h.list = op & 0x3u; h.opcode = (op >> 2) & 0x3fu;
+    h.version = flags & 0x3u; h.return_code = (flags >> 2) & 0x3fu;
+    h.message_id = r.u16(); h.ri_generation = r.u8(); h.job_id = r.u24();
+    h.modified_length = r.u32();
+}
+
+void get_response_with_data(
+    Reader& r, SES_Semantic_Response_with_Data_Header& h) {
+    const auto op = r.u8(); const auto flags = r.u8();
+    h.list = op & 0x3u; h.opcode = (op >> 2) & 0x3fu;
+    h.version = flags & 0x3u; h.return_code = (flags >> 2) & 0x3fu;
+    h.response_message_id = r.u16(); h.rsvd = r.u8(); h.job_id = r.u24();
+    h.read_request_msg_id = r.u16();
+    const auto lengths = r.u16(); h.rsvd1 = lengths & 0x3u;
+    h.payload_length = (lengths >> 2) & 0x3fffu;
+    h.modified_length = r.u32(); h.message_offset = r.u32();
+}
+
+void get_optimized_response_with_data(
+    Reader& r, SES_Optimized_Response_with_Data_Header& h) {
+    const auto op = r.u8(); const auto flags = r.u8();
+    h.list = op & 0x3u; h.opcode = (op >> 2) & 0x3fu;
+    h.version = flags & 0x3u; h.return_code = (flags >> 2) & 0x3fu;
+    const auto lengths = r.u16(); h.rsvd = lengths & 0x3u;
+    h.payload_length = (lengths >> 2) & 0x3fffu;
+    h.rsvd1 = r.u8(); h.job_id = r.u24(); h.original_request_psn = r.u32();
 }
 
 size_t pds_wire_size(PDS_header_type type) {
@@ -92,6 +179,16 @@ size_t pds_wire_size(PDS_header_type type) {
     case RUOD_cp_header: return 20;
     case nack_header: return 17;
     default: throw std::invalid_argument("unsupported PDS header type");
+    }
+}
+
+size_t ses_wire_size(SES_BTH_header_type type) {
+    switch (type) {
+    case Standard_Header: return kStandardHeaderSize;
+    case Semantic_Response_Header: return 12;
+    case Semantic_Response_with_Data_Header: return 20;
+    case Optimized_Response_with_Data_Header: return 12;
+    default: throw std::invalid_argument("unsupported SES header type");
     }
 }
 
@@ -114,11 +211,39 @@ void validate_standard_payload(const SES_Standard_Header& h, size_t payload_size
         throw std::invalid_argument("SES single fragment length mismatch");
 }
 
+void validate_ses_payload(const SEStoPDS_pkt& ses) {
+    switch (ses.bth_type) {
+    case Standard_Header:
+        validate_standard_payload(ses.bth_header.Standard_Header,
+                                  ses.payload.size());
+        return;
+    case Semantic_Response_Header:
+        if (!ses.payload.empty())
+            throw std::invalid_argument("semantic response has unexpected payload");
+        return;
+    case Semantic_Response_with_Data_Header: {
+        const auto& h = ses.bth_header.Semantic_Response_with_Data_Header;
+        if (h.payload_length != ses.payload.size() ||
+            ses.payload.size() > 0x3fffu ||
+            static_cast<uint64_t>(h.message_offset) + ses.payload.size() >
+                h.modified_length)
+            throw std::invalid_argument("semantic response payload mismatch");
+        return;
+    }
+    case Optimized_Response_with_Data_Header: {
+        const auto& h = ses.bth_header.Optimized_Response_with_Data_Header;
+        if (h.payload_length != ses.payload.size() || ses.payload.size() > 0x3fffu)
+            throw std::invalid_argument("optimized response payload mismatch");
+        return;
+    }
+    default:
+        throw std::invalid_argument("unsupported SES header type");
+    }
+}
+
 } // namespace
 
 std::vector<uint8_t> PdsPacketCodec::encode(const PDStoNET_pkt& packet) {
-    if (packet.SESpkt.bth_type != Standard_Header)
-        throw std::invalid_argument("only SES standard headers are supported");
     std::vector<uint8_t> out;
     out.reserve(160 + packet.SESpkt.payload.size());
     put32(out, kMagic); put8(out, kVersion); put8(out, static_cast<uint8_t>(packet.PDS_type));
@@ -154,10 +279,29 @@ std::vector<uint8_t> PdsPacketCodec::encode(const PDStoNET_pkt& packet) {
     default: throw std::invalid_argument("unsupported PDS header type");
     }
     const uint16_t pds_size = static_cast<uint16_t>(out.size() - pds_begin);
-    const size_t ses_begin = out.size(); put_standard(out, packet.SESpkt.bth_header.Standard_Header);
+    const size_t ses_begin = out.size();
+    switch (packet.SESpkt.bth_type) {
+    case Standard_Header:
+        put_standard(out, packet.SESpkt.bth_header.Standard_Header);
+        break;
+    case Semantic_Response_Header:
+        put_response(out, packet.SESpkt.bth_header.Semantic_Response_Header);
+        break;
+    case Semantic_Response_with_Data_Header:
+        put_response_with_data(
+            out, packet.SESpkt.bth_header.Semantic_Response_with_Data_Header);
+        break;
+    case Optimized_Response_with_Data_Header:
+        put_optimized_response_with_data(
+            out, packet.SESpkt.bth_header.Optimized_Response_with_Data_Header);
+        break;
+    default:
+        throw std::invalid_argument("unsupported SES header type");
+    }
     const uint16_t ses_size = static_cast<uint16_t>(out.size() - ses_begin);
-    validate_standard_payload(packet.SESpkt.bth_header.Standard_Header,
-                              packet.SESpkt.payload.size());
+    if (ses_size != ses_wire_size(packet.SESpkt.bth_type))
+        throw std::invalid_argument("SES header size mismatch");
+    validate_ses_payload(packet.SESpkt);
     if (out.size() > PdsPacketCodec::kMaxPacketSize ||
         packet.SESpkt.payload.size() > PdsPacketCodec::kMaxPacketSize - out.size())
         throw std::length_error("PDS packet exceeds RDMA frame size");
@@ -170,16 +314,19 @@ std::vector<uint8_t> PdsPacketCodec::encode(const PDStoNET_pkt& packet) {
 }
 
 PDStoNET_pkt PdsPacketCodec::decode(const uint8_t* bytes, size_t size) {
-    if (!bytes || size < 16 || size > kMaxPacketSize) throw std::invalid_argument("invalid PDS wire packet");
+    if (!bytes || size < 24 || size > kMaxPacketSize) throw std::invalid_argument("invalid PDS wire packet");
     Reader r(bytes, size);
     if (r.u32() != kMagic || r.u8() != kVersion) throw std::invalid_argument("PDS wire magic/version mismatch");
     const auto pds_type = r.u8(); const auto bth_type = r.u8();
     if (r.u8() != 0) throw std::invalid_argument("PDS wire reserved byte is nonzero");
-    if (bth_type != Standard_Header) throw std::invalid_argument("unsupported SES header type");
+    if (bth_type > Optimized_Response_with_Data_Header)
+        throw std::invalid_argument("unsupported SES header type");
     PDStoNET_pkt packet{}; packet.PDS_type = static_cast<PDS_header_type>(pds_type);
+    packet.SESpkt.bth_type = static_cast<SES_BTH_header_type>(bth_type);
     packet.src_fep = r.u32(); packet.dst_fep = r.u32(); const auto pds_size = r.u16(); const auto ses_size = r.u16(); const auto payload_size = r.u32();
     const size_t header_start = r.offset();
-    if (pds_size != pds_wire_size(packet.PDS_type) || ses_size != kStandardHeaderSize ||
+    if (pds_size != pds_wire_size(packet.PDS_type) ||
+        ses_size != ses_wire_size(packet.SESpkt.bth_type) ||
         header_start + pds_size + ses_size + payload_size != size ||
         pds_size == 0 || ses_size == 0)
         throw std::invalid_argument("PDS wire lengths are inconsistent");
@@ -191,11 +338,27 @@ PDStoNET_pkt PdsPacketCodec::decode(const uint8_t* bytes, size_t size) {
     default: throw std::invalid_argument("unsupported PDS header type");
     }
     if (r.offset() != header_start + pds_size) throw std::invalid_argument("PDS header length mismatch");
-    packet.SESpkt.bth_type = Standard_Header; get_standard(r, packet.SESpkt.bth_header.Standard_Header);
+    switch (packet.SESpkt.bth_type) {
+    case Standard_Header:
+        get_standard(r, packet.SESpkt.bth_header.Standard_Header);
+        break;
+    case Semantic_Response_Header:
+        get_response(r, packet.SESpkt.bth_header.Semantic_Response_Header);
+        break;
+    case Semantic_Response_with_Data_Header:
+        get_response_with_data(
+            r, packet.SESpkt.bth_header.Semantic_Response_with_Data_Header);
+        break;
+    case Optimized_Response_with_Data_Header:
+        get_optimized_response_with_data(
+            r, packet.SESpkt.bth_header.Optimized_Response_with_Data_Header);
+        break;
+    default:
+        throw std::invalid_argument("unsupported SES header type");
+    }
     if (r.offset() != header_start + pds_size + ses_size) throw std::invalid_argument("SES header length mismatch");
     packet.SESpkt.payload = r.bytes(payload_size);
-    validate_standard_payload(packet.SESpkt.bth_header.Standard_Header,
-                              packet.SESpkt.payload.size());
+    validate_ses_payload(packet.SESpkt);
     return packet;
 }
 

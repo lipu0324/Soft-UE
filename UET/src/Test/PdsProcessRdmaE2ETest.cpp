@@ -1,5 +1,6 @@
 #include "../Network_Layer/RdmaChannel.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
+#include "../SES/SES.hpp"
 #include "../logger/Logger.hpp"
 
 #include <chrono>
@@ -17,7 +18,7 @@ namespace {
 constexpr uint32_t kSourceFep = 11;
 constexpr uint32_t kDestinationFep = 22;
 constexpr uint32_t kJobId = 0x1234;
-constexpr uint16_t kMessageId = 7;
+constexpr uint16_t kMessageId = 1;
 
 std::vector<uint8_t> payload() {
     std::vector<uint8_t> bytes(257);
@@ -41,6 +42,8 @@ SES_PDS_req connection_request(const std::vector<uint8_t>& bytes) {
     request.rsv_ccc_context = 1;
     request.pkt.bth_type = Standard_Header;
     auto& header = request.pkt.bth_header.Standard_Header;
+    header.opcode = SEND;
+    header.version = 2;
     header.som = 1;
     header.eom = 1;
     header.msg_id = kMessageId;
@@ -141,14 +144,44 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("server PDS did not forward packet to SES");
             if (received.pkt.payload != expected)
                 throw std::runtime_error("server SES payload mismatch");
-            std::cout << "PASS: formal PDS loop + local RDMA handshake and payload"
+            if (received.pkt.bth_header.Standard_Header.opcode != SEND ||
+                received.pkt.bth_header.Standard_Header.version != 2)
+                throw std::runtime_error("server SES semantic fields mismatch");
+
+            // Use the real SES request handler to generate a semantic
+            // response through the same PDS process manager and RDMA path.
+            SESManager ses(manager);
+            ses.process_recv_req_packet(received);
+            std::cout << "PASS: formal PDS loop + local RDMA request reached SES"
                       << std::endl;
             // The TPDC worker enqueues its ACK asynchronously. Keep the
             // formal PDS loop alive long enough for progressNetwork() to
             // transfer that ACK over the real RDMA channel before teardown.
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         } else {
-            std::cout << "PASS: formal PDS loop + local RDMA handshake" << std::endl;
+            PDC_SES_rsp response{};
+            const bool response_received = wait_for(
+                [&] {
+                    PDC_SES_rsp candidate{};
+                    while (manager.popSESResponse(candidate)) {
+                        if (candidate.pkt.bth_type == Semantic_Response_Header) {
+                            response = candidate;
+                            return true;
+                        }
+                    }
+                    return false;
+                },
+                std::chrono::seconds(5));
+            if (!response_received)
+                throw std::runtime_error("client SES semantic response timed out");
+            const auto& header = response.pkt.bth_header.Semantic_Response_Header;
+            if (header.message_id != kMessageId || header.job_id != kJobId ||
+                header.version != 2 ||
+                header.opcode != static_cast<uint8_t>(RSP_OP_CODE::UET_DEFAULT_RESPONSE) ||
+                header.return_code != static_cast<uint8_t>(RSP_RETURN_CODE::RC_OK))
+                throw std::runtime_error("client SES semantic response mismatch");
+            std::cout << "PASS: formal PDS loop + local RDMA semantic response"
+                      << std::endl;
         }
         manager.stop();
         return EXIT_SUCCESS;

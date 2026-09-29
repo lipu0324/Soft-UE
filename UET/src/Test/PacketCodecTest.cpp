@@ -83,6 +83,8 @@ int main() {
     packet.PDS_header.RUOD_req_header.spdcid = 3;
     packet.PDS_header.RUOD_req_header.dpdcid = 4;
     packet.SESpkt.bth_type = Standard_Header;
+    packet.SESpkt.bth_header.Standard_Header.opcode = 1; // SEND
+    packet.SESpkt.bth_header.Standard_Header.version = 2;
     packet.SESpkt.bth_header.Standard_Header.som = 1;
     packet.SESpkt.bth_header.Standard_Header.eom = 1;
     packet.SESpkt.bth_header.Standard_Header.msg_id = 5;
@@ -94,7 +96,76 @@ int main() {
     assert(decoded.src_fep == packet.src_fep && decoded.dst_fep == packet.dst_fep);
     assert(decoded.PDS_header.RUOD_req_header.psn == 7);
     assert(decoded.PDS_header.RUOD_req_header.flags.syn == 1);
+    assert(decoded.SESpkt.bth_header.Standard_Header.opcode == 1); // SEND
+    assert(decoded.SESpkt.bth_header.Standard_Header.version == 2);
     assert(decoded.SESpkt.payload == packet.SESpkt.payload);
+
+    PDStoNET_pkt response{};
+    response.src_fep = 22;
+    response.dst_fep = 11;
+    response.PDS_type = RUOD_ack_header;
+    response.PDS_header.RUOD_ack_header.type = ACK;
+    response.PDS_header.RUOD_ack_header.next_hdr = UET_HDR_RESPONSE;
+    response.PDS_header.RUOD_ack_header.spdcid = 4;
+    response.PDS_header.RUOD_ack_header.dpdcid = 3;
+    response.SESpkt.bth_type = Semantic_Response_Header;
+    response.SESpkt.bth_header.Semantic_Response_Header.list = 1;
+    response.SESpkt.bth_header.Semantic_Response_Header.opcode = 1; // default response
+    response.SESpkt.bth_header.Semantic_Response_Header.version = 2;
+    response.SESpkt.bth_header.Semantic_Response_Header.return_code =
+        static_cast<uint8_t>(RSP_RETURN_CODE::RC_OK);
+    response.SESpkt.bth_header.Semantic_Response_Header.message_id = 5;
+    response.SESpkt.bth_header.Semantic_Response_Header.job_id = 0x123456;
+    response.SESpkt.bth_header.Semantic_Response_Header.modified_length = 5;
+    const auto response_wire = UET::NetworkLayer::PdsPacketCodec::encode(response);
+    const auto response_decoded = UET::NetworkLayer::PdsPacketCodec::decode(
+        response_wire.data(), response_wire.size());
+    assert(response_decoded.SESpkt.bth_type == Semantic_Response_Header);
+    assert(response_decoded.SESpkt.bth_header.Semantic_Response_Header.opcode ==
+           1); // default response
+    assert(response_decoded.SESpkt.bth_header.Semantic_Response_Header.version == 2);
+    assert(response_decoded.SESpkt.bth_header.Semantic_Response_Header.job_id ==
+           0x123456);
+
+    PDStoNET_pkt response_with_data = response;
+    response_with_data.SESpkt.bth_type = Semantic_Response_with_Data_Header;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.list = 1;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.opcode = 2;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.version = 1;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.return_code =
+        static_cast<uint8_t>(RSP_RETURN_CODE::RC_OK);
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.response_message_id = 5;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.job_id = 0xabcdef;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.read_request_msg_id = 9;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.payload_length = 3;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.modified_length = 10;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.message_offset = 2;
+    response_with_data.SESpkt.payload = {9, 8, 7};
+    const auto response_data_wire = UET::NetworkLayer::PdsPacketCodec::encode(response_with_data);
+    const auto response_data_decoded = UET::NetworkLayer::PdsPacketCodec::decode(
+        response_data_wire.data(), response_data_wire.size());
+    assert(response_data_decoded.SESpkt.bth_type == Semantic_Response_with_Data_Header);
+    assert(response_data_decoded.SESpkt.bth_header.Semantic_Response_with_Data_Header.opcode == 2);
+    assert(response_data_decoded.SESpkt.bth_header.Semantic_Response_with_Data_Header.job_id ==
+           0xabcdef);
+    assert(response_data_decoded.SESpkt.payload == response_with_data.SESpkt.payload);
+
+    PDStoNET_pkt optimized_response = response_with_data;
+    optimized_response.SESpkt.bth_type = Optimized_Response_with_Data_Header;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.list = 0;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.opcode = 3;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.version = 2;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.payload_length = 3;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.job_id = 0x654321;
+    optimized_response.SESpkt.bth_header.Optimized_Response_with_Data_Header.original_request_psn = 77;
+    const auto optimized_wire = UET::NetworkLayer::PdsPacketCodec::encode(optimized_response);
+    const auto optimized_decoded = UET::NetworkLayer::PdsPacketCodec::decode(
+        optimized_wire.data(), optimized_wire.size());
+    assert(optimized_decoded.SESpkt.bth_type == Optimized_Response_with_Data_Header);
+    assert(optimized_decoded.SESpkt.bth_header.Optimized_Response_with_Data_Header.opcode == 3);
+    assert(optimized_decoded.SESpkt.bth_header.Optimized_Response_with_Data_Header.job_id ==
+           0x654321);
+    assert(optimized_decoded.SESpkt.payload == optimized_response.SESpkt.payload);
 
     auto bad_reserved = wire_packet;
     bad_reserved[7] = 1;

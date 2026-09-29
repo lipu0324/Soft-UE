@@ -218,6 +218,7 @@ class SESManager {
     public:
         // Constructor/Destructor
         SESManager();
+        explicit SESManager(PDSProcessManager& process_manager);
         ~SESManager();
         PDSProcessManager pds_process_manager;
         // Add receiving task queue above
@@ -292,11 +293,16 @@ class SESManager {
 
         // Temporarily not locked std::mutex msn_mutex_; // Mutex to protect msn_table_
 
+        PDSProcessManager* active_pds_manager_ = &pds_process_manager;
+        PDSProcessManager& activePdsManager() { return *active_pds_manager_; }
+
 };
 
 SESManager::SESManager() {
     pds_process_manager.start();
 }
+SESManager::SESManager(PDSProcessManager& process_manager)
+    : active_pds_manager_(&process_manager) {}
 SESManager::~SESManager() {}
 
 void SESManager::mainChk(){
@@ -308,7 +314,7 @@ void SESManager::mainChk(){
         lfbric_ses_q.pop();
         process_send_packet(metadata);
     }
-    else if(pds_process_manager.getQueueStatus().pdc_to_ses_req_count != 0 || pds_process_manager.getQueueStatus().pdc_to_ses_rsp_count != 0){
+    else if(activePdsManager().getQueueStatus().pdc_to_ses_req_count != 0 || activePdsManager().getQueueStatus().pdc_to_ses_rsp_count != 0){
         process_pdc_2_ses();
     }
 
@@ -466,18 +472,18 @@ bool SESManager::validate_rkey(uint64_t rkey, uint32_t messages_id) {
 
 // Check if there are requests below to process
 void SESManager::process_pdc_2_ses() {
-    if (pds_process_manager.getQueueStatus().pdc_to_ses_req_count != 0){
+    if (activePdsManager().getQueueStatus().pdc_to_ses_req_count != 0){
         // req not empty, take it
         LOG_DEBUG(__FUNCTION__, "Processing __pds_req");
         PDC_SES_req req;
-        pds_process_manager.popSESRequest(req);
+        activePdsManager().popSESRequest(req);
         process_recv_req_packet(req);
     }
-    else if (pds_process_manager.getQueueStatus().pdc_to_ses_rsp_count != 0){
+    else if (activePdsManager().getQueueStatus().pdc_to_ses_rsp_count != 0){
         // rsp not empty, take it
         LOG_DEBUG(__FUNCTION__, "Processing __pds_rsp");
         PDC_SES_rsp rsp;
-        pds_process_manager.popSESResponse(rsp);
+        activePdsManager().popSESResponse(rsp);
         process_recv_rsp_packet(rsp);
     }
     else{
@@ -712,7 +718,7 @@ void SESManager::send_packet_to_pds(const SES_Standard_Header& header, const SES
     // Actually construct packet
     //SES_PDS_req send_pkt;
     //send_pkt.
-    pds_process_manager.pushSESRequest(sent_pkt);
+    activePdsManager().pushSESRequest(sent_pkt);
 
 }
 
@@ -727,7 +733,7 @@ void SESManager::send_rsp_to_pds(const SES_PDS_rsp& rsp) {
                                  ", rx_pkt_handle: " + std::to_string(rsp.rx_pkt_handle));
 
     // Push to manager
-    pds_process_manager.pushSESResponse(rsp);
+    activePdsManager().pushSESResponse(rsp);
 }
 
 

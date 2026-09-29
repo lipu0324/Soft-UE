@@ -39,8 +39,10 @@ UdpChannel::~UdpChannel() { if (fd_ >= 0) ::close(fd_); }
 
 void UdpChannel::send_packet(const std::vector<uint8_t>& bytes,
                              std::chrono::milliseconds timeout) {
-    if (!peer_known_ || bytes.empty() || bytes.size() > PdsPacketCodec::kMaxPacketSize)
-        throw std::invalid_argument("invalid UDP packet or unknown peer");
+    if (bytes.empty() || bytes.size() > PdsPacketCodec::kMaxPacketSize)
+        throw std::invalid_argument("invalid UDP packet");
+    if (!peer_known_)
+        throw PacketTimeout("UDP peer is not known yet");
     pollfd ready{fd_, POLLOUT, 0};
     if (::poll(&ready, 1, static_cast<int>(timeout.count())) != 1 ||
         !(ready.revents & POLLOUT))

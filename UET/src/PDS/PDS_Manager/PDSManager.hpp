@@ -93,14 +93,14 @@ public:
     {
         for (uint16_t pdc_id = 0; pdc_id < MAX_PDC; ++pdc_id)
         {
-            if (pdc_list[pdc_id].is_open &&
-                IPDC_Processmanager.getPDCState(pdc_id) == ESTABLISHED)
+            if (pdc_list[pdc_id].is_open.load() &&
+                IPDC_Processmanager.isPDCEstablished(pdc_id))
                 return true;
         }
         for (uint16_t pdc_id = MAX_PDC; pdc_id < MAX_PDC * 2; ++pdc_id)
         {
-            if (pdc_list[pdc_id].is_open &&
-                TPDC_Processmanager.getPDCState(pdc_id) == ESTABLISHED)
+            if (pdc_list[pdc_id].is_open.load() &&
+                TPDC_Processmanager.isPDCEstablished(pdc_id))
                 return true;
         }
         return false;

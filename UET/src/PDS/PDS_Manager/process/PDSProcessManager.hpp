@@ -334,6 +334,10 @@ public:
 
     bool hasEstablishedPDC()
     {
+        // Keep the process object alive while the underlying PDS manager
+        // checks its PDC maps. start() uses the same mutex when replacing the
+        // process object after a stop.
+        std::lock_guard<std::mutex> lock(manager_mutex);
         return pds_process_info && pds_process_info->pds_instance &&
                pds_process_info->pds_instance->hasEstablishedPDC();
     }
