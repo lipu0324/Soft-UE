@@ -263,12 +263,17 @@ void RdmaChannel::progress() {
     for (int i = 0; i < count; ++i) {
         const auto& wc = completions[i];
         if (wc.status != IBV_WC_SUCCESS) {
-            if (wc.wr_id == kSendId) send_pending_ = false;
+            if (wc.wr_id == kSendId) {
+                send_pending_ = false;
+                send_completed_ = false;
+                send_length_ = 0;
+            }
             throw std::runtime_error(std::string("RDMA work completion failed: ") +
                                      ibv_wc_status_str(wc.status));
         }
         if (wc.wr_id == kSendId) {
             send_pending_ = false;
+            send_completed_ = true;
         } else {
             require(wc.wr_id < kReceiveSlots && wc.byte_len <= kSlotSize,
                     "invalid RDMA receive completion");
@@ -293,6 +298,20 @@ void RdmaChannel::send_packet(const std::vector<uint8_t>& bytes,
             throw PacketTimeout("previous RDMA send completion timed out");
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+
+    // The previous call may have timed out after posting this exact payload.
+    // Its completion can arrive while the receive side is being progressed,
+    // so consume that completion without submitting the payload a second
+    // time. A different queue head would violate single-SEND ordering.
+    if (send_completed_) {
+        if (send_length_ != bytes.size() ||
+            !std::equal(bytes.begin(), bytes.end(), send_buffer_.begin()))
+            throw std::runtime_error("RDMA send completion is awaiting its queue head");
+        send_completed_ = false;
+        send_length_ = 0;
+        return;
+    }
+
     std::memcpy(send_buffer_.data(), bytes.data(), bytes.size());
     ibv_sge sge{};
     sge.addr = reinterpret_cast<uintptr_t>(send_buffer_.data());
@@ -306,6 +325,8 @@ void RdmaChannel::send_packet(const std::vector<uint8_t>& bytes,
     wr.send_flags = IBV_SEND_SIGNALED;
     ibv_send_wr* bad = nullptr;
     require(ibv_post_send(qp_, &wr, &bad) == 0, "ibv_post_send failed");
+    send_length_ = bytes.size();
+    send_completed_ = false;
     send_pending_ = true;
     while (send_pending_) {
         progress();
@@ -313,6 +334,11 @@ void RdmaChannel::send_packet(const std::vector<uint8_t>& bytes,
             throw PacketTimeout("RDMA send completion timed out");
         if (send_pending_) std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+
+    // This call observed its own completion. Clear the acknowledgement state
+    // so the next queue head can submit a new SEND.
+    send_completed_ = false;
+    send_length_ = 0;
 }
 
 std::vector<uint8_t> RdmaChannel::receive_packet(std::chrono::milliseconds timeout) {

@@ -138,7 +138,7 @@ int main() {
     response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.job_id = 0xabcdef;
     response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.read_request_msg_id = 9;
     response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.payload_length = 3;
-    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.modified_length = 10;
+    response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.modified_length = 0;
     response_with_data.SESpkt.bth_header.Semantic_Response_with_Data_Header.message_offset = 2;
     response_with_data.SESpkt.payload = {9, 8, 7};
     const auto response_data_wire = UET::NetworkLayer::PdsPacketCodec::encode(response_with_data);

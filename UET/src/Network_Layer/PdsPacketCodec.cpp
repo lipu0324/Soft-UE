@@ -224,10 +224,11 @@ void validate_ses_payload(const SEStoPDS_pkt& ses) {
     case Semantic_Response_with_Data_Header: {
         const auto& h = ses.bth_header.Semantic_Response_with_Data_Header;
         if (h.payload_length != ses.payload.size() ||
-            ses.payload.size() > 0x3fffu ||
-            static_cast<uint64_t>(h.message_offset) + ses.payload.size() >
-                h.modified_length)
+            ses.payload.size() > 0x3fffu)
             throw std::invalid_argument("semantic response payload mismatch");
+        // modified_length describes the target buffer mutation and may be
+        // zero for a read response carrying data. It is not the bound of the
+        // response message, so do not reject a valid payload based on it.
         return;
     }
     case Optimized_Response_with_Data_Header: {

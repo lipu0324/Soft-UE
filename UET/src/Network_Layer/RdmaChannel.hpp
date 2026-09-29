@@ -59,6 +59,11 @@ private:
     uint32_t psn_ = 0;
     uint8_t port_ = 1;
     bool send_pending_ = false;
+    // A timed-out send remains associated with the queue head until the
+    // caller retries it. Once its completion is observed, the retry is an
+    // acknowledgement of that send and must not post a duplicate WR.
+    bool send_completed_ = false;
+    size_t send_length_ = 0;
     std::array<uint8_t, kSlotSize> send_buffer_{};
     std::array<std::array<uint8_t, kSlotSize>, kReceiveSlots> receive_buffers_{};
     // A completed receive slot is reposted only after the application consumes
