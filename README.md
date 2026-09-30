@@ -15,6 +15,8 @@ make test-udp    # 两进程 UDP 消息回环
 make test-rdma   # 两进程 mlx5_1 RDMA 消息回环
 make test-pds-process-loopback # 正式 PDS 线程 TX/RX 内存回环
 make test-pds-rdma-queue # PDS 队列桥接的 mlx5_1 RDMA 双进程回环
+make test-pds-process-rdma-e2e # 正式 PDS 循环 + 本机 RDMA 请求/响应
+make test-pds-udp-queue # UDP 预置发送队列与对端学习回环
 make check-env  # 检查当前机器的 RDMA 环境
 ```
 
@@ -60,3 +62,36 @@ TCP 只用于连接参数交换；消息走 RDMA。两端必须位于可互通�
 - 整理清单：上述目录的 `manifest.json`，路径相对本仓库。
 
 整理采用移动归档，原文件仍可恢复。协议源码、历史诊断与设计资料保留，构建输出统一从 `build/` 开始管理。
+
+## 本次 RDMA/PDS 更新（2026-09-30）
+
+本节是在保留上文原始项目说明、入口、目录说明和恢复位置的基础上追加的当前实现状态。
+
+### 当前新增能力
+
+- `PdsPacketCodec` 已编码和解码 SES 标准头的 `opcode`、`version`，并支持无数据语义响应、带数据语义响应和优化带数据语义响应。
+- `PdsQueueTransport::progress()` 已接入正式 `PDSProcessManager` 循环。发送超时或 UDP 服务端尚未学习对端时，会保留队首包并继续推进接收。
+- RDMA SEND 的延迟完成会与原始队首 payload 关联；重试时消费已完成状态，不会重复提交同一个 work request。
+- PDC 的 open/state 查询使用原子状态和进程管理器锁，覆盖 PDC 创建、建立和关闭期间的并发查询。
+- 正式端到端测试使用真实 SES 请求处理逻辑生成 semantic response，客户端通过 RDMA 接收并校验响应。
+- UDP 回归测试覆盖服务端预先排队发送包、客户端首包触发对端学习，以及后续双向通信。
+
+上文关于“尚未把旧 PDS 状态机和旧 libfabric provider 改接到该路径”的描述仍适用于旧 `uet_provider` 兼容层；当前新增的正式 PDS 进程循环路径已经接入，但没有替换旧 provider。
+
+### 本次验证
+
+在本机活动设备 `mlx5_1` 上通过：
+
+```bash
+make test-codec
+make test-ses-payload
+make test-pds-loopback
+make test-pds-process-loopback
+make test-pds-udp-queue
+make test-udp
+make test-rdma
+make test-pds-rdma-queue
+make test-pds-process-rdma-e2e
+```
+
+其中正式 RDMA 端到端测试的 TCP 连接只交换 RC 队列参数，消息内容通过 RDMA 队列传输；测试确认 SES payload 到达服务端、PDS 建立完成并返回语义响应。
