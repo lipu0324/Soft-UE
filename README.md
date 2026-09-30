@@ -15,8 +15,6 @@ make test-udp    # 两进程 UDP 消息回环
 make test-rdma   # 两进程 mlx5_1 RDMA 消息回环
 make test-pds-process-loopback # 正式 PDS 线程 TX/RX 内存回环
 make test-pds-rdma-queue # PDS 队列桥接的 mlx5_1 RDMA 双进程回环
-make test-pds-process-rdma-e2e # 正式 PDS 循环 + 本机 RDMA 请求/响应
-make test-pds-udp-queue # UDP 预置发送队列与对端学习回环
 make check-env  # 检查当前机器的 RDMA 环境
 ```
 
@@ -83,15 +81,15 @@ TCP 只用于连接参数交换；消息走 RDMA。两端必须位于可互通�
 在本机活动设备 `mlx5_1` 上通过：
 
 ```bash
+make test-pds-process-rdma-e2e
+make test-pds-udp-queue
 make test-codec
 make test-ses-payload
 make test-pds-loopback
 make test-pds-process-loopback
-make test-pds-udp-queue
 make test-udp
 make test-rdma
 make test-pds-rdma-queue
-make test-pds-process-rdma-e2e
 ```
 
 其中正式 RDMA 端到端测试的 TCP 连接只交换 RC 队列参数，消息内容通过 RDMA 队列传输；测试确认 SES payload 到达服务端、PDS 建立完成并返回语义响应。
