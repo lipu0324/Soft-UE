@@ -172,3 +172,40 @@ softuegroup@gmail.com
 ​                             **If you find this project helpful, please consider giving it a ⭐ star! Thank you so much for your support.**
 
 ​      
+
+## RDMA/PDS Integration Update (2026-09-30)
+
+The current implementation adds an RDMA-capable message path while keeping the
+original SES, PDS, and PDC design described above. `PdsQueueTransport::progress()`
+is driven by the formal `PDSProcessManager` loop; the same packet path can use a
+local software loopback, UDP, or an InfiniBand RC queue through `libibverbs`.
+SES payload bytes, PDS/SES headers, semantic responses, and the PDC state are
+validated by the integration tests.
+
+### Build and verification
+
+The root `Makefile` places generated files under `build/`:
+
+```bash
+make test-codec
+make test-ses-payload
+make test-pds-loopback
+make test-pds-process-loopback
+make test-pds-process-rdma-e2e
+make test-pds-udp-queue
+make test-pds-rdma-queue
+make test-rdma
+make test-udp
+make check-env
+```
+
+The formal RDMA end-to-end test uses the PDS process loop and the active
+`mlx5_1` device. Its TCP connection exchanges RC queue parameters only; the
+message payload travels through the RDMA queue, and the client checks the
+semantic response. The UDP queue test covers a server send queue populated
+before the peer is learned. The detailed adaptation notes are in
+[`DOC/RDMA_ADAPTATION.md`](DOC/RDMA_ADAPTATION.md).
+
+The original README content, logos, and architecture diagrams above remain the
+project overview. This section records the additional RDMA/PDS work without
+replacing that overview.
