@@ -32,6 +32,7 @@
 #define TRANSPORT_LAYER_HPP
 
 #include <cstdint>
+#include <vector>
 #include <string>
 
 //=============================================================================
@@ -57,7 +58,7 @@
 #else
     #define PACKED_END
 #endif
-//#include "SES/SES.hpp" 
+//#include "SES/SES.hpp"
 
 
 
@@ -350,14 +351,14 @@ struct SES_Standard_Header
     uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
     uint8_t     ri_generation   : 8;        //Resource Index Generation
     uint32_t    job_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4; 
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.   
-    uint8_t     rsvd0           : 4;   
+    uint8_t     rsvd1           : 4;
+    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
+    uint8_t     rsvd0           : 4;
     uint16_t    resource_index  : 12;       //Resource Index field.
     uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
     uint32_t    initiator       : 32;       //Initiator ID used as part of matching criteria.
     uint64_t    match_bits      : 64;       //Used for tagged matching or as a memory key, depending on the opcode being used.
-    union 
+    union
     {
         struct  //when ses.som = 1
         {
@@ -365,7 +366,7 @@ struct SES_Standard_Header
         }som_true;
         struct // when ses.som = 0
         {
-            uint32_t rsvd2          : 18;   
+            uint32_t rsvd2          : 18;
             uint16_t payload_length : 14;   //Length (in bytes) of the payload portion of this packet.
             uint32_t message_offset : 32;   //32-bit offset (in bytes) from the start of the message.
         }som_false;
@@ -387,10 +388,10 @@ struct SES_Optimized_Header
     uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
     uint8_t     ri_generation   : 8;        //Resource Index Generation
     uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4; 
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.   
-    uint8_t     rsvd0           : 4;   
-    uint16_t    resource_index  : 12;       //Resource Index field.    
+    uint8_t     rsvd1           : 4;
+    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
+    uint8_t     rsvd0           : 4;
+    uint16_t    resource_index  : 12;       //Resource Index field.
     uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
 }PACKED;
 
@@ -407,10 +408,10 @@ struct SES_Small_Message_RMA_Header
     uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
     uint8_t     ri_generation   : 8;        //Resource Index Generation
     uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4; 
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.   
-    uint8_t     rsvd0           : 4;   
-    uint16_t    resource_index  : 12;       //Resource Index field.    
+    uint8_t     rsvd1           : 4;
+    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
+    uint8_t     rsvd0           : 4;
+    uint16_t    resource_index  : 12;       //Resource Index field.
     uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
     uint32_t    initiator       : 32;       //Initiator ID used as part of matching criteria.
     uint64_t    match_bits      : 64;       //Used for tagged matching or as a memory key, depending on the opcode being used.
@@ -454,13 +455,13 @@ struct SES_Semantic_Response_with_Data_Header
     uint8_t     version             : 2;    //Semantic protocol version – set to 0 in the initial version.
     uint8_t     return_code         : 6;    //Indicates success conditions and some types of error conditions detected at the semantic sublayer.
     uint16_t    response_message_id : 16;   //Message ID of the original request
-    uint8_t     rsvd                : 8;    
+    uint8_t     rsvd                : 8;
     uint32_t    job_id              : 24;   //JobID of the original request
     uint16_t    read_request_msg_id : 16;   // Message ID used in the original read request (or of the original fetching atomic operation request).
     uint8_t     rsvd1               : 2;
     uint16_t    payload_length      : 14;   // Length of the payload in this specific packet for a response with data.
-    uint32_t    modified_length     : 32;   //Indicates the number of bytes of the target buffer that will be modified by this transaction.   
-    uint32_t    message_offset      : 32;   // Indicates the relative position in the message that this payload corresponds to. 
+    uint32_t    modified_length     : 32;   //Indicates the number of bytes of the target buffer that will be modified by this transaction.
+    uint32_t    message_offset      : 32;   // Indicates the relative position in the message that this payload corresponds to.
 }PACKED;
 
 struct SES_Optimized_Response_with_Data_Header
@@ -473,7 +474,7 @@ struct SES_Optimized_Response_with_Data_Header
     uint16_t    payload_length      : 14;   //Length of the payload for a response with data.
     uint8_t     rsvd1               : 8;
     uint32_t    job_id              : 24;   //JobID of the original request
-    uint32_t    original_request_psn: 32;   //The PSN of the original request (either fetching atomic or read) that yielded this return data.                
+    uint32_t    original_request_psn: 32;   //The PSN of the original request (either fetching atomic or read) that yielded this return data.
 }PACKED;
 
 
@@ -491,15 +492,19 @@ struct SEStoPDS_pkt //Add any additional SES outputs here
         SES_Semantic_Response_with_Data_Header Semantic_Response_with_Data_Header;
         SES_Optimized_Response_with_Data_Header Optimized_Response_with_Data_Header;
     }bth_header;
-    
+
     union
     {
         SES_Atomic_Operation_Extension_Header Atomic_Operation_Extension_Header;
         SES_Rendezvous_Extension_Header Rendezvous_Extension_Header;
     }eth_header;
-    
 
-    std::string DMA_command;//Temporarily use DMA command as payload
+
+    // Owned bytes for the current SES fragment. The old DMA_command field is
+    // retained for source compatibility with legacy tests and is not a wire
+    // representation.
+    std::vector<uint8_t> payload;
+    std::string DMA_command;
 };
 
 //=============================================================================
@@ -512,7 +517,7 @@ struct SEStoPDS_pkt //Add any additional SES outputs here
  *          This is the complete packet structure output by PDS layer to network layer
  */
 struct PDStoNET_pkt
-{   
+{
     // Used by network layer, temporarily placed here
     uint32_t src_fep;       // Source FEP
     uint32_t dst_fep;       // Destination FEP
@@ -593,7 +598,7 @@ struct PDC_SES_rsp
  *
  * Contains response information from SES layer for requests, used by PDC to send responses to network layer
  */
-// 
+//
 struct SES_PDC_rsp
 {
     uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
@@ -619,7 +624,7 @@ struct PDS_PDC_req
     bool som;               /**< Start of message flag */
     bool eom;               /**< End of message flag */
 };
- 
+
 /**
  * @struct SES_PDS_Standard_Header_rsp
  * @brief Request structure from SES layer to PDC

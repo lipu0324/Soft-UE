@@ -32,6 +32,7 @@
 #ifndef PDS_HPP
 #define PDS_HPP
 #include "../Transport_Layer.hpp"
+#include <atomic>
 #include <cstdint>
 
 // Define constants
@@ -74,7 +75,7 @@ struct pend_node
 // pdc structure definition
 struct pdc
 {
-    bool is_open;             // PDC status
+    std::atomic<bool> is_open; // PDC status, published across PDS/query threads
     pdc() : is_open(false) {} // Initialize to closed state
 };
 
@@ -217,4 +218,4 @@ inline bool isClose(PDS_Nack_Codes nack_code){
         );
 }
 
-#endif 
+#endif

@@ -547,12 +547,23 @@ public:
      */
     pdc_state getPDCState(uint16_t pdcid)
     {
-        auto *process_info = getProcessInfo(pdcid);
-        if (!process_info)
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        auto it = ipdc_processes.find(pdcid);
+        if (it == ipdc_processes.end() || !it->second->ipdc_instance)
         {
             return pdc_state::CLOSED;
         }
-        return process_info->ipdc_instance->state;
+        return it->second->ipdc_instance->state.load();
+    }
+
+    // Read the state while retaining the process-map lock. This keeps the
+    // instance alive while a concurrent close removes the process entry.
+    bool isPDCEstablished(uint16_t pdcid)
+    {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        auto it = ipdc_processes.find(pdcid);
+        return it != ipdc_processes.end() && it->second->ipdc_instance &&
+               it->second->ipdc_instance->state.load() == ESTABLISHED;
     }
 
     //======================= Command Interface =======================//

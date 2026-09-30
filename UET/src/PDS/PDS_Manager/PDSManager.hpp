@@ -33,10 +33,15 @@
 #include "../PDC/process/TPDCProcessManager.hpp"
 #include "../PDC/process/IPDCProcessManager.hpp"
 #include "../PDC/process/ThreadSafeQueue.hpp"
+#include "../../Network_Layer/PdsQueueTransport.hpp"
+
+#include <chrono>
+#include <cstddef>
+#include <memory>
 
 class PDS_Manager
 {
-    
+
 private:
 
 public:
@@ -45,7 +50,7 @@ public:
     pdc pdc_list[MAX_PDC * 2];             // PDC list
     std::queue<SES_PDS_req> SES_tx_req_q;  // SES layer send request queue
     std::queue<SES_PDS_rsp> SES_tx_rsp_q;  // SES layer send response queue
-    std::queue<PDStoNET_pkt> Net_rx_pkt_q; // Network layer receive request queue
+    ThreadSafeQueue<PDStoNET_pkt> Net_rx_pkt_q; // Network layer receive request queue
 
     std::queue<SES_PDS_eager> SES_eager_req_q; // Eager request queue
     std::queue<PDS_SES_error> PDS_error_q;     // Error event queue
@@ -65,6 +70,42 @@ public:
     uint8_t BitMap[MAX_PDC] = {0};           // PDC bitmap, each variable represents the number of tasks stored in that PDC
     std::map<uint16_t, uint16_t> msg_map;                     // msgid mapping table
     std::queue<pend_node> pend_q;                             // Pending task queue
+
+    // Optional network bridge driven by the owning PDS process loop. The
+    // bridge is attached after a PacketChannel has been configured.
+    void attachNetworkChannel(UET::NetworkLayer::PacketChannel& channel)
+    {
+        network_transport_ = std::make_unique<UET::NetworkLayer::PdsQueueTransport>(
+            PDStoNet, Net_rx_pkt_q, channel);
+    }
+
+    size_t progressNetwork(std::chrono::milliseconds timeout)
+    {
+        return network_transport_ ? network_transport_->progress(timeout) : 0;
+    }
+
+    bool hasNetworkChannel() const { return network_transport_ != nullptr; }
+
+    // Report whether at least one PDC has completed the protocol handshake.
+    // This is used by integration code to distinguish allocation from a
+    // completed network connection.
+    bool hasEstablishedPDC()
+    {
+        for (uint16_t pdc_id = 0; pdc_id < MAX_PDC; ++pdc_id)
+        {
+            if (pdc_list[pdc_id].is_open.load() &&
+                IPDC_Processmanager.isPDCEstablished(pdc_id))
+                return true;
+        }
+        for (uint16_t pdc_id = MAX_PDC; pdc_id < MAX_PDC * 2; ++pdc_id)
+        {
+            if (pdc_list[pdc_id].is_open.load() &&
+                TPDC_Processmanager.isPDCEstablished(pdc_id))
+                return true;
+        }
+        return false;
+    }
+
     bool initPDSM()
     {
         LOG_INFO(__FUNCTION__, "=====================PDS Manager State Machine Initialization=====================");
@@ -77,6 +118,7 @@ public:
 
         // Initialize public queues
         PDStoNet.set_max_size(1024); // Set maximum capacity, can be adjusted as needed
+        Net_rx_pkt_q.set_max_size(1024);
         PDCtoSES_req.set_max_size(512);
         PDCtoSES_rsp.set_max_size(512);
         LOG_INFO(__FUNCTION__, "Public queue initialization completed");
@@ -98,6 +140,11 @@ public:
 
         return true;
     }
+
+private:
+    std::unique_ptr<UET::NetworkLayer::PdsQueueTransport> network_transport_;
+
+public:
 
     // IDLE, TX_READY, TX_PROCESSING, PDC and ERROR -> idle
     void mainChk()
@@ -164,8 +211,8 @@ public:
         bool is_fwd_pkt = false; // Default: cannot forward
         uint16_t pdc_id = 0;
         // Process receive request logic
-        PDStoNET_pkt packet = Net_rx_pkt_q.front(); // Keep a copy before removing the queue element
-        Net_rx_pkt_q.pop();
+        PDStoNET_pkt packet{};
+        if (!Net_rx_pkt_q.pop(packet)) return;
         PDStoNET_pkt *rx = &packet;
 
         if (checkRxPkt(rx))

@@ -32,11 +32,16 @@
 using namespace std;
 #ifndef SES_HPP
 #define SES_HPP
-#define MAX_MTU 4096 
+#define MAX_MTU 4096
 #define MAX_QUEUE_SIZE 512
 
 #include <cstdint>
+#include <algorithm>
+#include <limits>
+#include <queue>
 #include <string>
+#include <unordered_map>
+#include <vector>
 #include "../Transport_Layer.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
 #include "../logger/Logger.hpp"
@@ -60,31 +65,31 @@ using namespace std;
 
 // bool rsv_pdc;                       // 1 = use reserved PDC, 0 = do not use resv’d PDC
 // uint16_t rsv_pdc_context;           // used to keep pkts in same reserved PDC
-// uint16_t rsv_ccc_context;           // used to keep pkts in same reserved CCC 
-// uint16_t tx_pkt_handle;             // SES assigned packet handle at source 
-// uint16_t msg_id;                    // SES assigned message identifier at source 
-// void *pkt;                          // ptr to packet 
-// uint16_t pkt_len;                   // packet length in bytes 
-// void *rsp;                          // ptr to response 
-// uint16_t rsp_len;                   // response length in bytes 
-// uint8_t tc;                         // traffic 
-// uint8_t next_hdr;                   // controlled by SES, used to determine the type of header in the encapsulated UET payload 
+// uint16_t rsv_ccc_context;           // used to keep pkts in same reserved CCC
+// uint16_t tx_pkt_handle;             // SES assigned packet handle at source
+// uint16_t msg_id;                    // SES assigned message identifier at source
+// void *pkt;                          // ptr to packet
+// uint16_t pkt_len;                   // packet length in bytes
+// void *rsp;                          // ptr to response
+// uint16_t rsp_len;                   // response length in bytes
+// uint8_t tc;                         // traffic
+// uint8_t next_hdr;                   // controlled by SES, used to determine the type of header in the encapsulated UET payload
 
-// bool som;                           // TRUE => start of message 
-// bool eom;                           // TRUE => end of message 
-// bool lock_pdc;                      // TRUE => do not close this PDC until SES indicates the lock can be lifted (separate function) 
+// bool som;                           // TRUE => start of message
+// bool eom;                           // TRUE => end of message
+// bool lock_pdc;                      // TRUE => do not close this PDC until SES indicates the lock can be lifted (separate function)
 // bool return_data;                   // TRUE => packet must use PDC in orig_pdcid, set for read responses
 // uint16_t orig_pdcid;                // PDCID from Read request in fwd direction local ID identifying a specific PDC
 
-// bool orig_psn_val;                  // TRUE => include orig PSN field in PDS Request hdr 
-// uint32_t orig_psn;                  // PSN from Read req or Def Send in fwd direction 
-// bool gtd_del;                       // TRUE => SES Response needs guaranteed delivery 
-// bool ses_nack;                      // SES indication to send a PDS NACK 
-// uint16_t eager_id;                  // SES identifier for eager estimate request 
-// uint32_t eager_size;                // size in bytes of eager data 
-// uint16_t rx_pkt_handle;             // PDS assigned packet handle at destination 
-// bool pdc_pause;                     // TRUE => SES stops sending RUD/ROD packets to PDS 
-// bool rudi_pause;                    // TRUE => SES stops sending RUDI packets to PDS 
+// bool orig_psn_val;                  // TRUE => include orig PSN field in PDS Request hdr
+// uint32_t orig_psn;                  // PSN from Read req or Def Send in fwd direction
+// bool gtd_del;                       // TRUE => SES Response needs guaranteed delivery
+// bool ses_nack;                      // SES indication to send a PDS NACK
+// uint16_t eager_id;                  // SES identifier for eager estimate request
+// uint32_t eager_size;                // size in bytes of eager data
+// uint16_t rx_pkt_handle;             // PDS assigned packet handle at destination
+// bool pdc_pause;                     // TRUE => SES stops sending RUD/ROD packets to PDS
+// bool rudi_pause;                    // TRUE => SES stops sending RUDI packets to PDS
 // enum pds_error;                     // enum of reasons for PDC reset
 
 #pragma once
@@ -101,50 +106,51 @@ enum OpType {
     READ = 2,       // RMA read operation
     WRITE= 3,      // RMA write operation
     DEFERRABLE = 4 // Deferred send (AI Full exclusive)
-} op_type;
+};
 
 struct OperationMetadata {
     // Operation type
     OpType op_type;
-    
+
     /*/* Can be reused, no classification needed
     // Destination endpoint address
     struct{
         uint32_t pid_on_fep;     // Target endpoint process ID
         uint32_t initiator_id;   // Target ID
     } destnation;
-    
+
     // Source endpoint information
     struct {
         uint32_t pid_on_fep;     // Local endpoint process ID
         uint32_t initiator_id;   // Initiator ID
     } source;
     */
-   
+
     // Memory region information
     struct {
         uint64_t rkey;           // Registered memory key
         bool idempotent_safe;    // Idempotent operation safety flag
     } memory;
-    
+
     // Data payload
     struct {
         uint64_t start_addr;      // Data start address
         size_t length;           // Data length
         uint64_t imm_data;       // Immediate data (optional)
+        std::vector<uint8_t> data; // Owned application bytes, if available
     } payload;
     uint32_t s_pid_on_fep;      // Source endpoint process ID
     uint32_t t_pid_on_fep;     // Target endpoint process ID
     uint32_t job_id;         // Job identifier
-    uint16_t res_index; 
+    uint16_t res_index;
     uint32_t messages_id;    // Message identifier
     // Operation flag bits
     bool relative;              // Whether it is relative addressing
     bool use_optimized_header;   // Whether to use optimized header
     bool has_imm_data;           // Whether to carry immediate data
-    
+
     // Constructor default initialization, uint types default to 0, memory also defaults
-    OperationMetadata() : op_type(SEND), memory({0, false}), payload({0, 0, 0}), s_pid_on_fep(0), job_id(0), res_index(0), relative(false), use_optimized_header(false), has_imm_data(false) {}
+    OperationMetadata() : op_type(SEND), memory({0, false}), payload(), s_pid_on_fep(0), t_pid_on_fep(0), job_id(0), res_index(0), messages_id(0), relative(false), use_optimized_header(false), has_imm_data(false) {}
 
     // Destructor
     ~OperationMetadata() {}
@@ -154,29 +160,29 @@ struct OperationMetadata {
 struct UETAddress {
     uint8_t version;        // Address format version
     uint16_t flags;          // Valid field flag bits
-    
+
     // Capability identifiers (Figure 1-5)
     struct {
         bool ai_base : 1;   // AI basic profile support
         bool ai_full : 1;   // AI full profile support
         bool hpc : 1;       // HPC profile support
     } capabilities;
-    
+
     uint16_t pid_on_fep;     // Process ID on endpoint
     // 128-bit integer address - represented by two 64-bit integers for cross-platform compatibility
     struct {
         uint64_t low;   // Low 64 bits
         uint64_t high;  // High 64 bits
-    } fabric_addr;    
+    } fabric_addr;
     uint16_t start_res_index; // Starting resource index
     uint16_t num_res_indices; // Number of resource indices
     uint32_t initiator_id;   // Initiator ID
 };
 
-struct MemoryRegion {  
-    uint64_t start_addr;   // Memory region start address  
-    size_t   length;  // Memory region length  
-};  
+struct MemoryRegion {
+    uint64_t start_addr;   // Memory region start address
+    size_t   length;  // Memory region length
+};
 
 struct MemoryKey {
     // Control flag bits
@@ -187,13 +193,13 @@ struct MemoryKey {
             uint64_t reserved : 6;          // Reserved bits
             uint64_t vendor_specific : 8;   // Vendor-specific field
         } flags;
-        
+
         // Key structure in different modes
         struct {
             uint64_t : 48;         // Unused bits
             uint64_t rkey : 16;     // Standard mode memory key
         } standard;
-        
+
         struct {
             uint64_t : 36;         // Unused bits
             uint64_t index : 12;    // Optimized mode resource index
@@ -212,6 +218,7 @@ class SESManager {
     public:
         // Constructor/Destructor
         SESManager();
+        explicit SESManager(PDSProcessManager& process_manager);
         ~SESManager();
         PDSProcessManager pds_process_manager;
         // Add receiving task queue above
@@ -236,7 +243,7 @@ class SESManager {
         void process_pdc_2_ses();
         void mainChk();
 
-        
+
     private:
         // Default header initialization function
         SES_Standard_Header initialize_header(const OperationMetadata& metadata);
@@ -286,39 +293,44 @@ class SESManager {
 
         // Temporarily not locked std::mutex msn_mutex_; // Mutex to protect msn_table_
 
+        PDSProcessManager* active_pds_manager_ = &pds_process_manager;
+        PDSProcessManager& activePdsManager() { return *active_pds_manager_; }
+
 };
 
 SESManager::SESManager() {
     pds_process_manager.start();
 }
+SESManager::SESManager(PDSProcessManager& process_manager)
+    : active_pds_manager_(&process_manager) {}
 SESManager::~SESManager() {}
 
 void SESManager::mainChk(){
     LOG_ERROR(__FUNCTION__, "SES - message check");
-    
+
     if(!lfbric_ses_q.empty()){
         OperationMetadata metadata ;
         metadata = lfbric_ses_q.front();
         lfbric_ses_q.pop();
         process_send_packet(metadata);
     }
-    else if(pds_process_manager.getQueueStatus().pdc_to_ses_req_count != 0 || pds_process_manager.getQueueStatus().pdc_to_ses_rsp_count != 0){
+    else if(activePdsManager().getQueueStatus().pdc_to_ses_req_count != 0 || activePdsManager().getQueueStatus().pdc_to_ses_rsp_count != 0){
         process_pdc_2_ses();
     }
-    
+
 }
 // Below are various bool validations for receiver header permissions, etc.
 
 bool SESManager::validate_pid_on_fep(uint32_t pid_on_fep,uint32_t job_id, bool relative) {
     // For absolute addressing, only check if target pid_on_fep is local
     if (!relative) {
-        // Simulate normal query if pid_on_fep == locationfep, default true  
+        // Simulate normal query if pid_on_fep == locationfep, default true
         if (pid_on_fep == 0) {
             return false;
         }
         return true;
     }
-    
+
     // For relative addressing, check if corresponding pid in jobid is valid in local jobid
     else{
         // Simulate normal query if job_id == locationjobid and pid_on_fep == locationfep, should be a function to compare with upper interface, default true
@@ -341,10 +353,10 @@ bool SESManager::validate_header_type(SES_BTH_header_type type) {
 
 bool SESManager::validate_need_ack(uint32_t messages_id, bool FI_DELIVERY_COMPLETE) {
     // Simulate verification
-    // Should confirm whether to return ack based on msg   
+    // Should confirm whether to return ack based on msg
     LOG_DEBUG(__FUNCTION__, "check_validate_need_ack");
     if (messages_id == 1 && FI_DELIVERY_COMPLETE == true) {
-        return true;    
+        return true;
     }
     return false;
 }
@@ -365,9 +377,9 @@ bool SESManager::validate_job_id(uint64_t job_id) {
     Real-time verification process
     SES completes verification through register access (no real-time cross-layer queries)：
     bool ValidateJobID(uint32_t job_id) {
-    return (hw_policy_registry[job_id] & POLICY_VALID_BIT); 
+    return (hw_policy_registry[job_id] & POLICY_VALID_BIT);
     }
-    */   
+    */
     LOG_DEBUG(__FUNCTION__, "validate_job_id: " + std::to_string(job_id));
     return true;
 }
@@ -377,7 +389,7 @@ bool SESManager::validate_opcode(OpType opcode) {
     constexpr uint8_t valid_ops[] = {SEND, READ, WRITE, DEFERRABLE};
     if (std::none_of(valid_ops, valid_ops+4, [&](auto op){
         return op == opcode;
-    })) {    
+    })) {
     return false;
     }
     return true;
@@ -413,7 +425,7 @@ bool SESManager::validate_msn(uint32_t job_id, uint64_t psn, uint64_t requires_l
         // Add to MSN hash table with job_id as key
         msn_table[job_id] = msn;
         LOG_INFO(__FUNCTION__, "add new msn_table item");
-    }       
+    }
     // If it is not the first packet, table entry already established, check if valid
     else{
         // Check if job_id can be found in hashmap
@@ -424,9 +436,9 @@ bool SESManager::validate_msn(uint32_t job_id, uint64_t psn, uint64_t requires_l
         }
         // Check if pdc_id is consistent
         if(pcd_id != msn_table[job_id].pdc_id){
-            // pdc_id inconsistent, discard    
+            // pdc_id inconsistent, discard
             LOG_WARN(__FUNCTION__, "msn_pdc_id not match, except_pcd_id: " + std::to_string(msn_table[job_id].pdc_id) + " but recv_pcd_id: " + std::to_string(pcd_id));
-            return false;    
+            return false;
         }
         // Check if psn is last_psn + 1 for ordered reception
         if(psn != msn_table[job_id].last_psn + 1){
@@ -437,7 +449,7 @@ bool SESManager::validate_msn(uint32_t job_id, uint64_t psn, uint64_t requires_l
         }
         // Normal, update last_psn
         msn_table[job_id].last_psn =psn;
-    }    
+    }
     return true;
 }
 
@@ -454,24 +466,24 @@ bool SESManager::validate_rkey(uint64_t rkey, uint32_t messages_id) {
     */
     LOG_DEBUG(__FUNCTION__, "validate_rkey: " + std::to_string(rkey) + " for msg_id: " + std::to_string(messages_id));
     return true;
-}   
+}
 // bool check end bit
 
 
 // Check if there are requests below to process
 void SESManager::process_pdc_2_ses() {
-    if (pds_process_manager.getQueueStatus().pdc_to_ses_req_count != 0){
+    if (activePdsManager().getQueueStatus().pdc_to_ses_req_count != 0){
         // req not empty, take it
         LOG_DEBUG(__FUNCTION__, "Processing __pds_req");
         PDC_SES_req req;
-        pds_process_manager.popSESRequest(req);
+        activePdsManager().popSESRequest(req);
         process_recv_req_packet(req);
     }
-    else if (pds_process_manager.getQueueStatus().pdc_to_ses_rsp_count != 0){
+    else if (activePdsManager().getQueueStatus().pdc_to_ses_rsp_count != 0){
         // rsp not empty, take it
         LOG_DEBUG(__FUNCTION__, "Processing __pds_rsp");
         PDC_SES_rsp rsp;
-        pds_process_manager.popSESResponse(rsp);
+        activePdsManager().popSESResponse(rsp);
         process_recv_rsp_packet(rsp);
     }
     else{
@@ -481,7 +493,7 @@ void SESManager::process_pdc_2_ses() {
 }
 
 
- 
+
 //
 OperationMetadata SESManager::parse_pdc_2_ses_req(const PDC_SES_req& req){
     // Parse pdc_2_ses_req
@@ -601,23 +613,23 @@ SES_Standard_Header SESManager::initialize_header(const OperationMetadata& metad
     header.eom = 1; // Default last packet
     header.som = 1; // Default first packet
     header.dc = 1;// Unknown, default
-    
-    
+
+
     // Assigning the same message_id to the same message is important
     header.msg_id = get_message_id(metadata, nullptr);
-    
-    
+
+
     header.ri_generation = 0;
     header.job_id = metadata.job_id;
     header.rsvd1 = 0;
     header.PIDonFEP = metadata.t_pid_on_fep;
     header.rsvd0 = 0;
     header.resource_index = metadata.res_index;
-    
+
     header.initiator = 0;
     header.match_bits = metadata.memory.rkey; // Assume match_bits is used to store rkey
     header.diff.som_true.header_data = 0;// Because default som
-    header.request_length = 0;    
+    header.request_length = 0;
     return header;
 }
 
@@ -632,18 +644,18 @@ MemoryRegion SESManager::decode_rkey_to_mr(uint64_t rkey)
         mr.length = 0;
         return mr;
     }
-    else{        
+    else{
         // Parse rkey to get memory region
         MemoryRegion mr;
-        if (rkey & (1ULL << 62)) {  
-            // Optimized format: Extract 12-bit INDEX  
+        if (rkey & (1ULL << 62)) {
+            // Optimized format: Extract 12-bit INDEX
             uint16_t index = rkey & 0xFFF; // Bits 0-11
-            mr = lookup_mr_by_key(index);  
-        } else {  
-            // General format: Extract 48-bit RKEY  
+            mr = lookup_mr_by_key(index);
+        } else {
+            // General format: Extract 48-bit RKEY
             uint64_t extracted_rkey = rkey & 0xFFFFFFFFFFFF; // Bits 0-47
             mr = lookup_mr_by_key(extracted_rkey);
-        }  
+        }
         return mr;
     }
 }
@@ -681,33 +693,33 @@ uint64_t SESManager:: calculate_buffer_offset(uint64_t rkey, uint64_t start_addr
         return UINT64_MAX; // Return maximum value to indicate error
     }
     return start_addr - mr.start_addr;
-    
+
 }
 
 void SESManager::send_packet_to_pds(const SES_Standard_Header& header, const SES_PDS_req& sent_pkt,...) {
     // Simulate send
     LOG_INFO(__FUNCTION__, "send packet to pds manager");
-    LOG_INFO_PARAM(__FUNCTION__, "msg_id: " + std::to_string(header.msg_id) + 
-                   ", opcode: " + std::to_string(header.opcode) + 
-                   ", buffer_offset: " + std::to_string(header.buffer_offset) + 
-                   ", ie: " + std::to_string(int(header.ie)) + 
-                   ", rel: " + std::to_string(int(header.rel)) + 
-                   ", hd: " + std::to_string(int(header.hd)) + 
-                   ", eom: " + std::to_string(int(header.eom)) + 
-                   ", som: " + std::to_string(int(header.som)) + 
-                   ", ri_generation: " + std::to_string(header.ri_generation) + 
-                   ", PIDonFEP: " + std::to_string(header.PIDonFEP) + 
-                   ", resource_index: " + std::to_string(header.resource_index) + 
-                   ", initiator: " + std::to_string(header.initiator) + 
-                   ", match_bits: " + std::to_string(header.match_bits) + 
-                   ", job_id: " + std::to_string(header.job_id) + 
+    LOG_INFO_PARAM(__FUNCTION__, "msg_id: " + std::to_string(header.msg_id) +
+                   ", opcode: " + std::to_string(header.opcode) +
+                   ", buffer_offset: " + std::to_string(header.buffer_offset) +
+                   ", ie: " + std::to_string(int(header.ie)) +
+                   ", rel: " + std::to_string(int(header.rel)) +
+                   ", hd: " + std::to_string(int(header.hd)) +
+                   ", eom: " + std::to_string(int(header.eom)) +
+                   ", som: " + std::to_string(int(header.som)) +
+                   ", ri_generation: " + std::to_string(header.ri_generation) +
+                   ", PIDonFEP: " + std::to_string(header.PIDonFEP) +
+                   ", resource_index: " + std::to_string(header.resource_index) +
+                   ", initiator: " + std::to_string(header.initiator) +
+                   ", match_bits: " + std::to_string(header.match_bits) +
+                   ", job_id: " + std::to_string(header.job_id) +
                    ", request_length: " + std::to_string(header.request_length));
-    
+
     // Actually construct packet
     //SES_PDS_req send_pkt;
     //send_pkt.
-    pds_process_manager.pushSESRequest(sent_pkt);
-    
+    activePdsManager().pushSESRequest(sent_pkt);
+
 }
 
 // rsp returned to PDS
@@ -719,13 +731,28 @@ void SESManager::send_rsp_to_pds(const SES_PDS_rsp& rsp) {
                                  ", opcode: " + std::to_string(int(rsp.rsp.bth_header.Semantic_Response_Header.opcode)) +
                                  ", job_id: " + std::to_string(rsp.rsp.bth_header.Semantic_Response_Header.job_id) +
                                  ", rx_pkt_handle: " + std::to_string(rsp.rx_pkt_handle));
-    
+
     // Push to manager
-    pds_process_manager.pushSESResponse(rsp);
+    activePdsManager().pushSESResponse(rsp);
 }
 
 
 void SESManager::process_send_packet(const OperationMetadata& metadata){
+
+    if (metadata.payload.length > std::numeric_limits<uint32_t>::max()) {
+        LOG_ERROR(__FUNCTION__, "Payload exceeds the 32-bit SES length field");
+        return;
+    }
+    std::vector<uint8_t> source_data = metadata.payload.data;
+    if (source_data.empty() && metadata.payload.length != 0) {
+        // Existing simulation callers provide an address and length only. Keep
+        // them runnable while making the new owned-byte path explicit.
+        source_data.resize(metadata.payload.length, 0);
+    }
+    if (source_data.size() != metadata.payload.length) {
+        LOG_ERROR(__FUNCTION__, "Payload byte count does not match payload.length");
+        return;
+    }
 
     // First parse metadata information to generate standard header
     SES_Standard_Header header = initialize_header(metadata);
@@ -744,12 +771,13 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
     send_pkt.pkt_len = 0;
     send_pkt.pkt = {};
     send_pkt.next_hdr = UET_HDR_NONE;//默认NONE，用于避免未初始化值的引用
-    
+
     if (header.ie){
         // Error packet, send directly
         send_pkt.pkt.bth_type =Standard_Header;
         send_pkt.pkt.bth_header.Standard_Header = header;
-        send_pkt.pkt_len =  44;// 44 is standard header length 44 bytes, because error packet has no data 
+        send_pkt.pkt.payload.clear();
+        send_pkt.pkt_len =  44;// 44 is standard header length 44 bytes, because error packet has no data
         send_packet_to_pds(header,send_pkt);
         return;
     }
@@ -767,6 +795,10 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
                 header.hd = metadata.has_imm_data ? 1 : 0;
                 header.diff.som_true.header_data = metadata.has_imm_data ? metadata.payload.imm_data : 0;
                 header.request_length = metadata.payload.length;
+                const size_t chunk = std::min(source_data.size(),
+                                              static_cast<size_t>(MAX_MTU - sizeof(SES_Standard_Header)));
+                send_pkt.pkt.payload.assign(source_data.begin(),
+                                            source_data.begin() + chunk);
                 LOG_INFO(__FUNCTION__, "First packet data payload length is " + std::to_string(header.request_length));
             }
             else if (i == n - 1){
@@ -777,6 +809,9 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
                 header.diff.som_false.message_offset = i * (MAX_MTU - sizeof(SES_Standard_Header));
                 header.diff.som_false.payload_length = metadata.payload.length - i * (MAX_MTU - sizeof(SES_Standard_Header));
                 header.request_length = metadata.payload.length;// Multi-packet total data length
+                const size_t begin = header.diff.som_false.message_offset;
+                send_pkt.pkt.payload.assign(source_data.begin() + begin,
+                                            source_data.begin() + begin + header.diff.som_false.payload_length);
                 LOG_INFO(__FUNCTION__, "Last packet data payload length is " + std::to_string(header.request_length));
             }
             else{
@@ -787,13 +822,16 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
                 header.diff.som_false.message_offset = i * (MAX_MTU - sizeof(SES_Standard_Header));
                 header.diff.som_false.payload_length = MAX_MTU - sizeof(SES_Standard_Header);
                 header.request_length = metadata.payload.length;// Multi-packet total data length
+                const size_t begin = header.diff.som_false.message_offset;
+                send_pkt.pkt.payload.assign(source_data.begin() + begin,
+                                            source_data.begin() + begin + header.diff.som_false.payload_length);
                 LOG_INFO(__FUNCTION__, "Middle packet number " + std::to_string(i + 1) + " data payload length is " + std::to_string(header.request_length));
             }
             // Send packet
             send_pkt.pkt.bth_type =Standard_Header;
             send_pkt.pkt.bth_header.Standard_Header = header;
-            send_pkt.pkt_len = header.diff.som_false.payload_length/8 + 44;// 44 is standard header length 44 bytes
-            send_packet_to_pds(header,send_pkt);        
+            send_pkt.pkt_len = static_cast<uint16_t>(send_pkt.pkt.payload.size() + sizeof(SES_Standard_Header));
+            send_packet_to_pds(header,send_pkt);
         }
     }
     else {
@@ -805,7 +843,8 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
 
         send_pkt.pkt.bth_type =Standard_Header;
         send_pkt.pkt.bth_header.Standard_Header = header;
-        send_pkt.pkt_len = header.request_length/8 + 44;// 44 is standard header length 44 bytes
+        send_pkt.pkt.payload = source_data;
+        send_pkt.pkt_len = static_cast<uint16_t>(send_pkt.pkt.payload.size() + sizeof(SES_Standard_Header));
         // Send packet
         send_packet_to_pds(header,send_pkt);
     }
@@ -814,7 +853,7 @@ void SESManager::process_send_packet(const OperationMetadata& metadata){
 
 // Implement SESManager::process_recv__req_packet to process received packets
 void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
-    OperationMetadata metadata;   
+    OperationMetadata metadata;
     // Parse header // First parse req information
     metadata=parse_pdc_2_ses_req(req);
     SES_Semantic_Response_Header semantic_rsp;
@@ -863,7 +902,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
         send_rsp_to_pds(ses_pds_rsp);
         return;
     }
-    
+
     // Check if packet header type is valid
     if(!validate_header_type(req.pkt.bth_type)){
 
@@ -876,7 +915,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
     }
 
     // Check if job_id is allowed
-    
+
     if (!validate_job_id(metadata.job_id)) {
         // Not allowed, discard directly
         LOG_ERROR_PARAM(__FUNCTION__, "Job ID %d not authorized. Packet discarded.", metadata.job_id);
@@ -899,7 +938,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
         send_rsp_to_pds(ses_pds_rsp);
         return;
     }
-    
+
     // Verify if opcode is valid
     if (!validate_opcode(metadata.op_type)) {
         LOG_ERROR(__FUNCTION__, "opcode not match");
@@ -918,7 +957,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
             // Generate NACK, discard
             semantic_rsp.opcode = static_cast<uint8_t>(RSP_OP_CODE::UET_NACK);
             semantic_rsp.return_code = static_cast<uint8_t>(RSP_RETURN_CODE::RC_INTEGRITY_CHECK_FAIL);
-            send_rsp_to_pds(ses_pds_rsp);          
+            send_rsp_to_pds(ses_pds_rsp);
         }
         return;
     }
@@ -932,7 +971,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
             LOG_ERROR(__FUNCTION__, "RKEY error. Packet discarded.");
             semantic_rsp.opcode = static_cast<uint8_t>(RSP_OP_CODE::UET_NACK);
             semantic_rsp.return_code = static_cast<uint8_t>(RSP_RETURN_CODE::RC_INVALID_KEY);
-            send_rsp_to_pds(ses_pds_rsp);  
+            send_rsp_to_pds(ses_pds_rsp);
             return;
         }
         LOG_INFO(__FUNCTION__, "access key ok");
@@ -967,7 +1006,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
             return;// No return, cold processing
         }
 
-       
+
         semantic_rsp.return_code = static_cast<uint8_t>(RSP_RETURN_CODE::RC_OK);
         // Simulate return through function
         ses_pds_rsp.rsp.bth_header.Semantic_Response_Header  = semantic_rsp;
@@ -980,7 +1019,7 @@ void SESManager::process_recv_req_packet(const PDC_SES_req& req) {
         // Simulate return through function
         ses_pds_rsp.rsp.bth_header.Semantic_Response_Header  = semantic_rsp;
         send_rsp_to_pds(ses_pds_rsp);
-        return; 
+        return;
     }
     return;
 }

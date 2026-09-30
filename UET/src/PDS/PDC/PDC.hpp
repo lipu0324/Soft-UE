@@ -41,6 +41,7 @@
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <atomic>
 #include <iomanip>
 
 // Retransmission configuration
@@ -392,7 +393,7 @@ public:
     uint32_t dst_fep;       /**< Destination IP address / Destination IP address */
     uint32_t src_fep;       /**< Source IP address / Source IP address */
 
-    pdc_state state;       /**< Current PDC state / Current PDC state */
+    std::atomic<pdc_state> state; /**< Current PDC state, published atomically */
     std::queue<PDStoNET_pkt> tx_pkt_q;        /**< Transmission packet queue / Transmission packet queue */
     std::queue<PDC_SES_req> rx_req_pkt_q;     /**< Received request packet queue / Received request packet queue */
     std::queue<PDC_SES_rsp> rx_rsp_pkt_q;     /**< Response packet queue to SES layer / Response packet queue to SES layer */

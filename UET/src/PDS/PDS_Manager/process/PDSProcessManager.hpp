@@ -43,6 +43,9 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <stdexcept>
+
+namespace UET::NetworkLayer { class PacketChannel; }
 
 /**
  * @class PDSProcessManager
@@ -147,29 +150,29 @@ public:
     bool initialize()
     {
         LOG_DEBUG(__FUNCTION__, "Initializing PDS process manager");
-        
+
         /*
         // 创建默认队列
         if (!pds_to_net_queue) {
             pds_to_net_queue = new ThreadSafeQueue<PDStoNET_pkt>(1024);
             LOG_DEBUG(__FUNCTION__, "Creating PDStoNet queue");
         }
-        
+
         if (!ses_to_pds_req_queue) {
             ses_to_pds_req_queue = new ThreadSafeQueue<SES_PDS_req>(512);
             LOG_DEBUG(__FUNCTION__, "Creating SES to PDS request queue");
         }
-        
+
         if (!ses_to_pds_rsp_queue) {
             ses_to_pds_rsp_queue = new ThreadSafeQueue<SES_PDS_rsp>(512);
             LOG_DEBUG(__FUNCTION__, "Creating SES to PDS response queue");
         }
-        
+
         if (!net_to_pds_pkt_queue) {
             net_to_pds_pkt_queue = new ThreadSafeQueue<PDStoNET_pkt>(1024);
             LOG_DEBUG(__FUNCTION__, "Creating network to PDS packet queue");
         }
-        
+
         if (!pds_error_queue) {
             pds_error_queue = new ThreadSafeQueue<PDS_SES_error>(256);
             LOG_DEBUG(__FUNCTION__, "Creating PDS error queue");
@@ -208,6 +211,9 @@ public:
             LOG_ERROR(__FUNCTION__, "Failed to initialize PDS instance");
             return false;
         }
+
+        if (network_channel_)
+            pds_process_info->pds_instance->attachNetworkChannel(*network_channel_);
 
         manager_running.store(true);
         pds_process_info->state.store(RUNNING);
@@ -310,6 +316,32 @@ public:
 
     // ==================== 队列交互接口 ====================
 
+    // Configure the transport before start(). It must outlive this manager.
+    // The PDS process loop drives progress automatically.
+    void setNetworkChannel(UET::NetworkLayer::PacketChannel& channel)
+    {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (manager_running.load())
+            throw std::logic_error("network channel must be configured before PDS start");
+        network_channel_ = &channel;
+    }
+
+    bool hasNetworkChannel() const
+    {
+        return pds_process_info && pds_process_info->pds_instance &&
+               pds_process_info->pds_instance->hasNetworkChannel();
+    }
+
+    bool hasEstablishedPDC()
+    {
+        // Keep the process object alive while the underlying PDS manager
+        // checks its PDC maps. start() uses the same mutex when replacing the
+        // process object after a stop.
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && pds_process_info->pds_instance &&
+               pds_process_info->pds_instance->hasEstablishedPDC();
+    }
+
     /**
      * @brief Add request to PDS SES request queue
      * @param req Request
@@ -362,6 +394,15 @@ public:
         pds_process_info->pds_instance->Net_rx_pkt_q.push(pkt);
         pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
+    }
+
+    // Queue a packet produced by an external PDS test or integration adapter.
+    // Normal protocol traffic is produced by the PDC workers themselves.
+    bool pushNetworkTxPacket(const PDStoNET_pkt& pkt)
+    {
+        if (!pds_process_info || pds_process_info->state.load() != RUNNING)
+            return false;
+        return pds_process_info->pds_instance->PDStoNet.push(pkt);
     }
 
     /**
@@ -510,6 +551,8 @@ public:
     }
 
 private:
+    UET::NetworkLayer::PacketChannel* network_channel_ = nullptr;
+
     /**
      * @brief PDS process main loop
      */
@@ -535,6 +578,13 @@ private:
             try
             {
                 pds_process_info->pds_instance->mainChk();
+                if (pds_process_info->pds_instance->hasNetworkChannel())
+                {
+                    // Network progress is intentionally in this single PDS
+                    // loop so queue ownership stays deterministic.
+                    pds_process_info->pds_instance->progressNetwork(
+                        std::chrono::milliseconds(10));
+                }
                 pds_process_info->last_activity = std::chrono::steady_clock::now();
                 pds_process_info->state.store(RUNNING);
             }
