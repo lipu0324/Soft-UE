@@ -209,3 +209,35 @@ before the peer is learned. The detailed adaptation notes are in
 The original README content, logos, and architecture diagrams above remain the
 project overview. This section records the additional RDMA/PDS work without
 replacing that overview.
+
+### Interactive terminal chat
+
+For a manual two-host check, `rdma_message_test` also supports a turn-based
+terminal chat. By default the server types the first line, the client replies,
+and the turns continue until either side enters `/quit` or `quit`:
+
+```bash
+# Server A
+./build/rdma_message_test --server --interactive \
+  --first server --device <A verbs device> --port 18515
+
+# Client B
+./build/rdma_message_test --client --interactive \
+  --first server --device <B verbs device> \
+  --peer <A control-plane IPv4> --port 18515
+```
+
+To let the client type first, pass `--first client` on **both** commands. Both
+`/quit` and `quit` close the session.
+
+The `--device` value must be the HCA name shown by `ibv_devices` (for example
+`mlx5_1`), rather than an operating-system network interface name.
+
+All generated binaries, object files, libraries, and test logs are placed in
+the ignored `build/` directory. Run `make clean` before packaging or handing
+off a working tree; source files, test sources, documents, and the design
+images are not affected.
+
+```bash
+make clean
+```
