@@ -53,3 +53,16 @@ make test-pds-udp-queue
 ```
 
 The current test path uses a reliable connected queue pair. It does not validate packet loss, reordering, PDS ACK/NACK recovery, RDMA READ/WRITE, GPU memory registration, NCCL, or multi-host fabric performance. Those capabilities require separate interfaces and acceptance tests.
+
+For a manual two-host smoke test, `rdma_message_test --interactive` provides a
+turn-based terminal chat. By default the server enters the first line, the
+client displays it and enters a reply, and `/quit` or `quit` closes the
+session. Use `--first client` on both commands when the client should enter the
+first line.
+Pass the HCA names shown by `ibv_devices` with `--device`; an OS network
+interface name is not accepted.
+
+Build output and test logs are generated under the ignored `build/` directory.
+Use `make clean` to remove those generated files before sharing a source tree;
+it does not remove protocol sources, tests, documentation, or the architecture
+images.
