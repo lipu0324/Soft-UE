@@ -53,3 +53,53 @@ make test-pds-udp-queue
 ```
 
 The current test path uses a reliable connected queue pair. It does not validate packet loss, reordering, PDS ACK/NACK recovery, RDMA READ/WRITE, GPU memory registration, NCCL, or multi-host fabric performance. Those capabilities require separate interfaces and acceptance tests.
+
+For a manual two-host smoke test, `rdma_message_test --interactive` provides a
+turn-based terminal chat. With RDMA, the server enters the first line by default;
+the client displays it and enters a reply, and `/quit` or `quit` closes the
+session. Use `--first client` on both commands when the client should enter the
+first line.
+Pass the HCA names shown by `ibv_devices` with `--device`; an OS network
+interface name is not accepted.
+
+Build output and test logs are generated under the ignored `build/` directory.
+Use `make clean` to remove those generated files before sharing a source tree;
+it does not remove protocol sources, tests, documentation, or the architecture
+images.
+
+### UDP interactive mode
+
+With `--udp --interactive`, the client is the default and only supported first
+speaker: the server learns its peer address from the first received datagram.
+Both peers may omit `--first` or use `--first client`. An explicit
+`--first server` is rejected before opening sockets or reading terminal input,
+with a message telling both peers to use `--first client`. RDMA retains its
+server-first default and supports either initial speaker.
+
+Start the server and wait for its interactive banner before starting the client:
+
+```bash
+# Terminal A
+./build/rdma_message_test --server --udp --interactive --port 18515
+
+# Terminal B
+./build/rdma_message_test --client --udp --interactive \
+  --peer 127.0.0.1 --port 18515
+```
+
+For two hosts, replace `127.0.0.1` with the server's IPv4 address. Either peer
+can enter `quit` or `/quit` on its own turn; EOF sends `/quit` as well.
+
+Run the loopback regression with:
+
+```bash
+make test-interactive-udp
+```
+
+This uses the existing `rdma_message_test` build and therefore needs its usual
+`libibverbs` build dependencies, but it does not require an active RDMA device.
+The 15 cases cover default and explicit client-first startup, mixed default and
+explicit options, early rejection of server-first in either argument order,
+both close commands, EOF on either peer, empty lines, UTF-8, and fragmentation.
+Logs and test inputs are written to `build/interactive_udp_logs/` and are
+removed by `make clean`.
