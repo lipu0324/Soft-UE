@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
         bool udp = false;
         bool interactive = false;
         std::string first_speaker = "server";
+        bool first_speaker_set = false;
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--server" || arg == "--client") {
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
                 interactive = true;
             } else if (arg == "--first" && i + 1 < argc) {
                 first_speaker = argv[++i];
+                first_speaker_set = true;
                 if (first_speaker != "server" && first_speaker != "client")
                     throw std::invalid_argument("--first must be server or client");
             } else if (arg == "--peer" && i + 1 < argc) {
@@ -81,6 +83,15 @@ int main(int argc, char** argv) {
             }
         }
         if (!role_set) throw std::invalid_argument("select --server or --client");
+        // UDP has no connection handshake: the server learns its peer only
+        // from an inbound packet. Resolve the default after parsing all flags
+        // and reject server-first chat before opening a socket or reading stdin.
+        if (interactive && udp) {
+            if (!first_speaker_set) first_speaker = "client";
+            if (first_speaker != "client")
+                throw std::invalid_argument(
+                    "--udp --interactive requires --first client on both peers");
+        }
         std::unique_ptr<UET::NetworkLayer::PacketChannel> channel;
         if (udp)
             channel = std::make_unique<UET::NetworkLayer::UdpChannel>(
