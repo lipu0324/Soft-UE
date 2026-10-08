@@ -11,7 +11,7 @@ PDS_SOURCES := $(CORE)/Test/PDS_fulltest.cpp \
   $(CORE)/Network_Layer/UDP_Network_Layer.cpp
 CORE_HEADERS := $(shell find $(CORE) -name '*.hpp' -o -name '*.h')
 
-.PHONY: core test-core test-ses-payload test-pds-loopback test-pds-process-loopback test-pds-rdma-queue test-pds-process-rdma-e2e test-pds-udp-queue check-env message-lib rdma-message test-rdma test-udp test-codec clean
+.PHONY: core test-core test-ses-payload test-pds-loopback test-pds-process-loopback test-pds-rdma-queue test-pds-process-rdma-e2e test-pds-udp-queue check-env message-lib rdma-message test-rdma test-udp test-codec test-interactive-udp clean
 core: $(BUILD)/PDS_fulltest
 
 $(BUILD):
@@ -94,6 +94,9 @@ test-rdma: rdma-message
 
 test-udp: rdma-message
 	python3 scripts/test_rdma_message.py --udp
+
+test-interactive-udp: rdma-message
+	python3 scripts/test_interactive_udp.py --binary $(BUILD)/rdma_message_test
 
 $(BUILD)/packet_codec_test: $(CORE)/Test/PacketCodecTest.cpp $(BUILD)/libsoftue_message.a
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) $< $(BUILD)/libsoftue_message.a -o $@ $(LDFLAGS) $(LDLIBS)
