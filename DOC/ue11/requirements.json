@@ -100,13 +100,16 @@
       "summary": "选择 ACK、累计 ACK、重复 ACK 与 PSN 回绕",
       "status": "partial",
       "tests": [
-        "pdc_ack_test"
+        "pdc_ack_test",
+        "peer_sequence_window_test",
+        "pds_mpr_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Selective/cumulative ACK cleanup and wrap plus peer MPR decoding, stale/future CACK rejection, independent local receive capacity and data/retry admission tested. Complete SACK/default-response/control acceptance remains open; see PDS-WINDOWS.md."
     },
     {
       "id": "PDS-ROD",

@@ -290,6 +290,8 @@ This is an M4 increment, with remaining congestion/control acceptance tracked
 explicitly; the default legacy/reference experiments do not silently enable it.
 The [trimming path](TRIMMING.md) documents switch admission, restricted parsing
 of unauthenticated truncated headers, and NACK recovery without PDC allocation.
+The independent [PDS windows](PDS-WINDOWS.md) explain local resources, the peer's
+advertised PSN range and the NSCC nominal-byte window.
 
 The fixed inputs are UE Specification 1.1 (2026-10-12), Soft-UE
 `4a4e6d874909720097b1ae20302a538a97116976`, and uet-ref-prov
@@ -318,6 +320,11 @@ Known specification/reference differences requiring explicit review:
   than hidden as a blanket conformance claim.
 - The pinned reference documents its congestion implementation as partial and
   based on v0.6; it cannot be treated as a complete UE 1.1 oracle.
+- Section 3.5.12.4.3 (page 364) says SACK_Base has three zero low bits, but
+  Figure 3-81 uses SACK_Base=1842 (0x732), which is not eight-aligned. This was
+  checked against the rendered PDF, not just extracted text. SACK transmitter
+  work follows the explicit alignment text; the figure is an unresolved
+  editorial inconsistency, not a reason to reinterpret bitmap bit zero.
 - Native original SES enums/version values and private framing differ from the
   standard. The new wire interface uses explicit standard encodings, and its
   version-zero native endpoint is separate from legacy version-two tests.

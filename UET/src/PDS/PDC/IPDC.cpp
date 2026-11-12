@@ -57,6 +57,7 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
 
     // ==================== PSN Related Initialization ====================
     start_psn = initial_psn;         // Retained per local PDC ID across reuse (§3.5.8.2).
+    peer_sequence_window_.reset();
     tx_cur_psn = start_psn;         // Initialize transmit PSN
     clear_psn = start_psn - 1;      // Initialize clear PSN
     rx_cur_psn = start_psn - 1;     // Initialize receive PSN
@@ -200,7 +201,7 @@ void I_PDC::openChk(){
         rxNack(&p);      // Process negative acknowledgment packet
         }
     }
-    else if(congestionRetryReady()) { retryCongestionDeferred(); }
+    else if(admissionRetryReady()) { retryAdmissionDeferred(); }
     else if(!rto_pkt_q.empty()){
         uint32_t psn = rto_pkt_q.front();
         rto_pkt_q.pop();
@@ -217,7 +218,7 @@ void I_PDC::openChk(){
         sesTxRsp(&tx_rsp_q.front());
         tx_rsp_q.pop();
     }
-    else if(!tx_req_q.empty() && !pause_pdc && congestionReady()){   // PDS and CMS must both admit the send.
+    else if(!tx_req_q.empty() && !pause_pdc && peerWindowAllows(tx_cur_psn) && congestionReady()){
         diagnostics() << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer request transmission");
         sesTxReq(&tx_req_q.front());
@@ -392,6 +393,15 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
     const bool matches_outstanding=tx_pkt_buffer.count(ack_psn)!=0;
     if (runtime_ && SYN && !matches_outstanding) return;
+    if (runtime_ && runtime_->standard_wire) {
+        // §3.5.12.2: an ACK_PSN outside the source's delivery interval must
+        // not update any state, even if its CACK/MPR happen to look plausible.
+        if (tx_cur_psn==start_psn && !peer_sequence_window_) return;
+        const uint32_t lowest=peer_sequence_window_?peer_sequence_window_->cumulative_ack():start_psn-1;
+        const uint32_t span=(tx_cur_psn-1)-lowest;
+        if (span>=0x80000000u || ack_psn-lowest>span || (tx_cur_psn-1)-cack_psn>=0x80000000u) return;
+    }
+    processPeerAcknowledgment(*pkt);
     processCongestionAck(*pkt);
 
     // Record ACK packet information

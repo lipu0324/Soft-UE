@@ -53,6 +53,7 @@ bool T_PDC::initPDC(uint16_t id)
 
     // ==================== PSN Related Initialization
     start_psn = 1000;   // Set starting PSN, actually not used
+    peer_sequence_window_.reset();
     tx_cur_psn = 0;     // Initialize transmit PSN
     clear_psn = 0;      // Initialize clear PSN
     rx_cur_psn = 0;     // Initialize receive PSN
@@ -144,6 +145,7 @@ void T_PDC::processOpen1(PDStoNET_pkt *pkt)
 void T_PDC::establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_mode delivery_mode)
 {
     DPDCID=remote_pdc; start_psn=initial_sequence; mode=delivery_mode;
+    peer_sequence_window_.reset();
     rx_cur_psn=start_psn-1; cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
     tx_cur_psn=start_psn; clear_psn=start_psn-1;
     bad_psn=false; state=ESTABLISHED;
@@ -270,7 +272,7 @@ void T_PDC::openChk()
                 netRxCm(&p); // Handle control packet / Process control packet
             }
         }
-        else if(congestionRetryReady()) { retryCongestionDeferred(); }
+        else if(admissionRetryReady()) { retryAdmissionDeferred(); }
         else if(!rto_pkt_q.empty()){
             uint32_t psn = rto_pkt_q.front();
             rto_pkt_q.pop();
@@ -284,7 +286,7 @@ void T_PDC::openChk()
             sesTxRsp(&tx_rsp_q.front());
             tx_rsp_q.pop();
         }
-        else if (state == ESTABLISHED && pause_pdc == false && !tx_req_q.empty() && congestionReady())
+        else if (state == ESTABLISHED && pause_pdc == false && !tx_req_q.empty() && peerWindowAllows(tx_cur_psn) && congestionReady())
         { // Packet transmission can only be done in established state
             //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] state == ESTABLISHED && pause_pdc == false" << std::endl;
             if (!tx_req_q.empty())
@@ -605,9 +607,16 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
     // FUNCTION_LOG_ENTRY();
 
     if (pkt->PDS_header.RUOD_ack_header.flags.p) return;
-    processCongestionAck(*pkt);
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
+    if (runtime_ && runtime_->standard_wire) {
+        if (tx_cur_psn==start_psn && !peer_sequence_window_) return;
+        const uint32_t lowest=peer_sequence_window_?peer_sequence_window_->cumulative_ack():start_psn-1;
+        const uint32_t span=(tx_cur_psn-1)-lowest;
+        if (span>=0x80000000u || ack_psn-lowest>span || (tx_cur_psn-1)-cack_psn>=0x80000000u) return;
+    }
+    processPeerAcknowledgment(*pkt);
+    processCongestionAck(*pkt);
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx ack,ack_psn:" << ack_psn << ",cack_psn:" << cack_psn << std::endl;
     // Record ACK processing information
     std::stringstream ack_process_info;

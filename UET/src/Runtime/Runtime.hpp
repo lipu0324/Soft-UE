@@ -61,6 +61,7 @@ struct Services {
     bool standard_wire=true;
     std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.
     CMS::ICongestionControl* congestion_control=nullptr; // Optional explicit CMS configuration.
+    uint32_t mpr_zero_override=0; // §3.5.11.13: zero means ignore received MPR=0.
 };
 
 class EventLoop final : public IClock, public ITimerQueue {

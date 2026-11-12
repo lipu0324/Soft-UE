@@ -36,6 +36,7 @@
 #include "process/ThreadSafeQueue.hpp"
 #include "RTOTimer/RTOTimer.hpp"
 #include "../../CMS/CongestionControl.hpp"
+#include "../PeerSequenceWindow.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
@@ -447,7 +448,8 @@ public:
 
     bool hasPendingWork() const {
         const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
-                            (!tx_req_q.empty() && !pause_pdc && congestionReady()) || !tx_rsp_q.empty() || congestionRetryReady();
+                            (!tx_req_q.empty() && !pause_pdc && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
+                            !tx_rsp_q.empty() || admissionRetryReady();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
@@ -479,7 +481,11 @@ public:
 protected:
     mutable bool congestion_engaged_=false;
     mutable std::optional<UET::CMS::Connection> congestion_connection_;
-    std::set<uint32_t> congestion_deferred_retries_;
+    std::set<uint32_t> admission_deferred_retries_;
+    std::optional<UET::PDS::PeerSequenceWindow> peer_sequence_window_;
+    bool peerWindowAllows(uint32_t sequence) const {
+        return !peer_sequence_window_ || peer_sequence_window_->allows(sequence);
+    }
     UET::CMS::Connection congestionConnection() const {
         if (congestion_connection_) return *congestion_connection_;
         // Before the first request is issued, its queued delivery mode has not
@@ -494,11 +500,27 @@ protected:
         congestion_engaged_=true;
         return runtime_->congestion_control->can_send(congestionConnection());
     }
-    bool congestionRetryReady() const { return !congestion_deferred_retries_.empty() && congestionReady(); }
-    void retryCongestionDeferred() {
-        const auto sequence=*congestion_deferred_retries_.begin();
-        congestion_deferred_retries_.erase(sequence); txRto(sequence);
+    std::optional<uint32_t> nextAdmittedRetry() const {
+        std::optional<uint32_t> selected;
+        for (const auto sequence:admission_deferred_retries_) {
+            const auto packet=tx_pkt_buffer.find(sequence);
+            const auto metadata=tx_pkt_map.find(sequence);
+            if (packet==tx_pkt_buffer.end() || metadata==tx_pkt_map.end()) return sequence; // Discard a stale queued retry.
+            const bool data=packet->second.PDS_type==RUOD_req_header;
+            const bool query=data && runtime_ && runtime_->congestion_control && metadata->second.congestion_data_received;
+            if (!data || query || (peerWindowAllows(sequence) && congestionReady())) {
+                if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
+            }
+        }
+        return selected;
     }
+    bool admissionRetryReady() const { return nextAdmittedRetry().has_value(); }
+    void retryAdmissionDeferred() {
+        const auto sequence=nextAdmittedRetry();
+        if (!sequence) return;
+        admission_deferred_retries_.erase(*sequence); txRto(*sequence);
+    }
+    void processPeerAcknowledgment(const PDStoNET_pkt& packet);
     void processCongestionAck(const PDStoNET_pkt& packet);
     void releaseCongestionState();
     void rejectTrimmed(const PDStoNET_pkt& packet);

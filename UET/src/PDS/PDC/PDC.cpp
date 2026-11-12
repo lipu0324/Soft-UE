@@ -163,7 +163,7 @@ void PDC::releaseCongestionState() {
         runtime_->congestion_control->closed(congestionConnection());
     congestion_engaged_=false;
     congestion_connection_.reset();
-    congestion_deferred_retries_.clear();
+    admission_deferred_retries_.clear();
 }
 
 void PDC::rejectTrimmed(const PDStoNET_pkt& packet) {
@@ -194,6 +194,18 @@ void PDC::processCongestionAck(const PDStoNET_pkt& packet) {
             }
         }
     }
+}
+
+void PDC::processPeerAcknowledgment(const PDStoNET_pkt& packet) {
+    const auto& ack=packet.PDS_header.RUOD_ack_header;
+    if (ack.flags.p) return; // Probe's base CACK is not delivery state.
+    if ((tx_cur_psn-1)-ack.cack_psn>=0x80000000u) return; // Never anchor a peer window on unsent future PSNs.
+    if (!peer_sequence_window_) {
+        if (ack.cack_psn-(start_psn-1)>tx_cur_psn-start_psn) return;
+        peer_sequence_window_.emplace(start_psn,runtime_?runtime_->mpr_zero_override:0);
+    }
+    const auto encoding=ack.type==ACK_CC?std::optional<uint8_t>{packet.congestion_ack.mpr}:std::nullopt;
+    peer_sequence_window_->observe(ack.cack_psn,encoding);
 }
 
 /**
@@ -269,7 +281,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
              (valid_cumulative && distance <= cumulative_distance))) {
             const auto sequence = it->first;
             stopPacketTimer(sequence);
-            congestion_deferred_retries_.erase(sequence);
+            admission_deferred_retries_.erase(sequence);
             tx_pkt_map.erase(sequence);
             acknowledged_tx_.insert(sequence);
             it = tx_pkt_buffer.erase(it);
@@ -409,7 +421,11 @@ void PDC::txRto(uint32_t psn){
         // Infer loss once, but do not consume a retry or arm a new RTO until
         // CMS admits the actual retransmission (§3.6.8 / §3.6.13.5).
         stopPacketTimer(psn);
-        if (!congestionReady()) { congestion_deferred_retries_.insert(psn); return; }
+    }
+    const bool data=tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header;
+    const bool semantic_query=data && runtime_ && runtime_->congestion_control && tx_pkt_map.at(psn).congestion_data_received;
+    if (data && !semantic_query && (!peerWindowAllows(psn) || !congestionReady())) {
+        stopPacketTimer(psn); admission_deferred_retries_.insert(psn); return;
     }
     TX_pkt_meta meta = tx_pkt_map.at(psn);
     const auto& lost_packet=tx_pkt_buffer.at(psn);
@@ -511,6 +527,7 @@ void PDC::pauseForResourceNack(uint32_t sequence) {
 void PDC::freePDC()
 {
     releaseCongestionState();
+    peer_sequence_window_.reset();
     resetCloseSafety();
     resetNackPause();
     clearAllPacketTimers();
