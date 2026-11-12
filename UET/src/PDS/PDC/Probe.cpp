@@ -47,8 +47,7 @@ void PDC::sendProbeAttempt() {
     probe.sent_at=runtime_->clock.now();
     if (public_net_queue) public_net_queue->push(packet); else tx_pkt_q.push(std::move(packet));
     // Probe polling/backoff is a bounded simulator policy, not a new PSN RTO.
-    const uint64_t delay_ms=std::min<uint64_t>(10000,uint64_t{std::max<uint16_t>(1,runtime_->rto_ms)}<<probe.retries);
-    if (!waitsForTransmitNotification()) armProbeWake(delay_ms*UET::Runtime::kMillisecond);
+    if (!waitsForTransmitNotification()) armProbeWake(UET::Runtime::retransmission_timeout_ns(runtime_->rto_ns,probe.retries));
 }
 
 void PDC::progressProbe() {
@@ -83,7 +82,7 @@ void PDC::receiveProbeAcknowledgment(const PDStoNET_pkt& packet) {
     processSemanticAcknowledgment(packet);
     updateTxPsnTracker(clear_psn,0,acknowledgment.cack_psn);
     if (needsWindowProbe()) {
-        const auto delay=uint64_t{std::max<uint16_t>(1,runtime_->rto_ms)}*UET::Runtime::kMillisecond;
+        const auto delay=std::max<uint64_t>(1,runtime_->rto_ns);
         next_window_probe_time_=UET::Runtime::add_time(runtime_->clock.now(),delay);
         armProbeWake(delay); // Pace an unchanged window; never poll at zero time.
     }

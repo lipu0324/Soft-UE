@@ -25,7 +25,7 @@ int main() {
             PdsHost host(1,loop,trace,port);
             // Real-time CPU scheduling is outside the simulated network model.
             // A generous RTO avoids inferring loss merely from a descheduled peer.
-            host.services().rto_ms=20;
+            host.services().rto_ns=20*UET::Runtime::kMillisecond;
             // The reference endpoint's negotiated maximum SES payload is 1024.
             // SOM has no explicit payload-length field, so both endpoints use
             // that same configured bound (§3.4.3.3) for multi-packet messages.

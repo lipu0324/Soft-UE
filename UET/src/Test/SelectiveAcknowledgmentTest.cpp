@@ -181,7 +181,7 @@ void end_default_cannot_hide_a_gap(bool permanent,bool congestion) {
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     GapPort gaps(forward,loop,permanent); FeedbackAuditPort feedback(reverse);
     PdsHost source_host(1,loop,trace,gaps),target_host(2,loop,trace,feedback);
-    source_host.services().rto_ms=1;
+    source_host.services().rto_ns=UET::Runtime::kMillisecond;
     if (congestion) {
         const auto config=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,128);
         source_host.enable_nscc(config); target_host.enable_nscc(config);
@@ -210,7 +210,7 @@ void lost_guaranteed_error_is_queried_after_selective_receipt(bool congestion) {
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     RequestAuditPort requests(forward); FeedbackAuditPort feedback(reverse); feedback.drop_first_error=true;
     PdsHost source_host(1,loop,trace,requests),target_host(2,loop,trace,feedback);
-    source_host.services().rto_ms=1;
+    source_host.services().rto_ns=UET::Runtime::kMillisecond;
     if (congestion) {
         const auto config=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,128);
         source_host.enable_nscc(config); target_host.enable_nscc(config);

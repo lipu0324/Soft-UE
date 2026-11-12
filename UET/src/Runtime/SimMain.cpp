@@ -33,6 +33,7 @@ int main(int argc,char** argv) {
         if (!std::getline(input,line) || line!="softue-scenario-v2") throw std::invalid_argument("invalid scenario version");
         uint64_t seed=42,memory_bytes=65536,budget=1000000; Time duration=100000000;
         size_t payload_mtu=1024;
+        Time retransmission_timeout_ns=kMillisecond;
         bool enable_nscc=false,enable_trimming=false;
         UET::CMS::NsccConfig congestion;
         UET::NetworkLayer::WireOptions network;
@@ -47,6 +48,7 @@ int main(int argc,char** argv) {
             else if (key=="memory") row>>memory_bytes;
             else if (key=="budget") row>>budget;
             else if (key=="payload_mtu") row>>payload_mtu;
+            else if (key=="rto") row>>retransmission_timeout_ns;
             else if (key=="trimming") row>>enable_trimming;
             else if (key=="nscc") {
                 uint64_t base_rtt=0,sender_rate=0,receiver_rate=0,initial_window=0; uint32_t nominal_mtu=0;
@@ -123,6 +125,7 @@ int main(int argc,char** argv) {
         std::map<std::pair<uint32_t,uint32_t>,Region> regions;
         for (auto node:nodes) {
             hosts[node]=std::make_unique<PdsHost>(node,loop,trace,*ports.at(node),PdsHost::WireFormat::Uet11,network);
+            hosts.at(node)->configure_retransmission_timeout(retransmission_timeout_ns);
             if (enable_nscc) hosts.at(node)->enable_nscc(congestion);
             if (enable_trimming) hosts.at(node)->configure_trimming({});
             endpoints[node]=std::make_unique<Endpoint>(node,*hosts.at(node),loop,trace,payload_mtu,duration);

@@ -524,7 +524,7 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
         endpoint->port=std::make_unique<Runtime::UdpFramePort>(0,ntohs(endpoint->local_address.sin_port),ip);
         endpoint->local_address.sin_port=htons(endpoint->port->local_port());
         endpoint->host=std::make_unique<Runtime::PdsHost>(endpoint->port->node(),endpoint->runtime.events(),endpoint->trace,*endpoint->port);
-        endpoint->host->services().rto_ms=20;
+        endpoint->host->services().rto_ns=20*UET::Runtime::kMillisecond;
         endpoint->semantic=std::make_unique<SES::Endpoint>(endpoint->port->node(),*endpoint->host,endpoint->runtime.events(),
             endpoint->trace,1024,5*1000*Runtime::kMillisecond,&domain.memory);
         initialize_fid(endpoint->handle.fid,FI_CLASS_EP,context,&endpoint_object_ops);

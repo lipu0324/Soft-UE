@@ -4,6 +4,7 @@
 bool PDC::beginTransmitIncarnation() {
     transmit_incarnation_=0;
     if (!runtime_) return true;
+    if (runtime_->rto_ns>UET::Runtime::kMaximumInitialRtoNs) return false;
     if (runtime_->next_pdc_incarnation==UINT64_MAX) return false;
     transmit_incarnation_=++runtime_->next_pdc_incarnation;
     return true;
@@ -36,8 +37,7 @@ bool PDC::notifyTransmit(const UET::Runtime::TransmitNotification& notification)
             outstanding_probe_->opaque!=identity.opaque || outstanding_probe_->retries!=identity.attempt) return false;
         auto& probe=*outstanding_probe_;
         probe.sent_at=notification.time_ns; probe.transmit_time_valid=started; probe.awaiting_transmission=false;
-        const uint64_t delay_ms=std::min<uint64_t>(10000,uint64_t{std::max<uint16_t>(1,runtime_->rto_ms)}<<probe.retries);
-        armProbeWake(delay_ms*UET::Runtime::kMillisecond);
+        armProbeWake(UET::Runtime::retransmission_timeout_ns(runtime_->rto_ns,probe.retries));
         return true;
     }
     const auto found=tx_pkt_map.find(identity.sequence);
@@ -49,7 +49,7 @@ bool PDC::notifyTransmit(const UET::Runtime::TransmitNotification& notification)
     // A locally rejected frame gets a retry timer but no fabricated RTT sample.
     // Accepted, queued frames consume no RTO before their first-bit departure.
     stopPacketTimer(identity.sequence);
-    if (rtoEnabled()) startPacketTimer(identity.sequence,metadata.retry_cnt);
+    if (rtoEnabled()) startPacketTimer(identity.sequence,metadata.timeout_retry_count);
     // §3.5.8.3 starts SYN safety from the most recent *lost* SYN attempt.
     // Record this attempt's MAC time now; txRto extends safety only if loss
     // is inferred later. A successful retry must not extend the safety wait.

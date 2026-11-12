@@ -65,6 +65,11 @@ public:
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
+    void configure_retransmission_timeout(Time timeout_ns) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure RTO before opening connections");
+        if (timeout_ns>kMaximumInitialRtoNs) throw std::invalid_argument("initial RTO exceeds UE 1.1 eight-second range");
+        services_.rto_ns=timeout_ns;
+    }
     void enable_nscc(const CMS::NsccConfig& config) {
         if (stopped_ || format_!=WireFormat::Uet11 || services_.congestion_control || manager_.getPDSStatus().open_cnt)
             throw std::logic_error("configure NSCC once before opening connections");

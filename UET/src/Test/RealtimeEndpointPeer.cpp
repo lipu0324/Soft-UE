@@ -53,7 +53,7 @@ int main(int argc,char** argv) {
             LossProbe lossy(port,server);
             UET::NetworkLayer::WireOptions wire; wire.ipv6=ipv6_udp; wire.udp=ipv6_udp;
             PdsHost host(local_node,loop,trace,lossy,PdsHost::WireFormat::Uet11,wire);
-            host.services().rto_ms=20;
+            host.services().rto_ns=20*UET::Runtime::kMillisecond;
             Endpoint endpoint(local_node,host,loop,trace,257,2*1000*kMillisecond);
             endpoint.memory().add_job(1);
             auto buffer=std::make_shared<std::vector<uint8_t>>(8192,0);

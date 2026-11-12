@@ -1,5 +1,6 @@
 #pragma once
 #include "PdcEvents.hpp"
+#include "RetryTiming.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -44,7 +45,7 @@ struct Services {
     IClock& clock;
     ITimerQueue& timers;
     std::function<void()> wake;
-    uint16_t rto_ms = 1;
+    Time rto_ns = kMillisecond; // UE 1.1 supports 0..8 s at 128 ns granularity or finer.
     // §3.5.5 / §3.5.8.3: a lost SYN remains potentially live in the network.
     // Plaintext connections wait this long before closing; authenticated
     // anti-replay paths may explicitly configure zero when they are active.

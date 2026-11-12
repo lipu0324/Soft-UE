@@ -33,6 +33,13 @@
 #include <iostream>
 #include <algorithm>
 
+namespace {
+uint16_t diagnostic_milliseconds(uint64_t duration_ns) {
+    const auto rounded=duration_ns/UET::Runtime::kMillisecond+(duration_ns%UET::Runtime::kMillisecond!=0);
+    return static_cast<uint16_t>(std::min<uint64_t>(UINT16_MAX,rounded));
+}
+}
+
 /**
  * @brief Constructor
  * @param timeout_callback Timeout callback function
@@ -56,15 +63,14 @@ RTOTimer::~RTOTimer()
     lifetime_.reset();
 }
 
-void RTOTimer::scheduleVirtual(uint32_t psn, uint16_t rto)
+void RTOTimer::scheduleVirtual(uint32_t psn, uint64_t duration_ns)
 {
+    const auto when = UET::Runtime::add_time(services_->clock.now(),duration_ns);
     auto old = event_ids_.find(psn);
     if (old != event_ids_.end()) services_->timers.cancel(old->second);
     const auto version = ++revision_;
     event_versions_[psn] = version;
     const std::weak_ptr<int> life = lifetime_;
-    const auto when = UET::Runtime::add_time(services_->clock.now(),
-        static_cast<uint64_t>(rto) * UET::Runtime::kMillisecond);
     event_ids_[psn] = services_->timers.at(when, [this, life, psn, version] {
         if (life.expired()) return;
         TimeoutCallback callback;
@@ -93,29 +99,48 @@ void RTOTimer::scheduleVirtual(uint32_t psn, uint16_t rto)
  */
 bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count)
 {
+    if (!base_rto) return false;
+    // Preserve the historical cap only at the explicitly millisecond-based
+    // compatibility API. Standard PDS uses the exact nanosecond API below.
+    const auto duration=UET::Runtime::retransmission_timeout_ns(uint64_t{base_rto}*UET::Runtime::kMillisecond,retry_count);
+    return startDuration(psn,std::min<uint64_t>(10000000000ULL,duration),retry_count);
+}
+
+bool RTOTimer::startTimerNanoseconds(uint32_t psn,uint64_t initial_ns,uint16_t timeout_retries)
+{
+    return startDuration(psn,UET::Runtime::retransmission_timeout_ns(initial_ns,timeout_retries),timeout_retries);
+}
+
+bool RTOTimer::startDuration(uint32_t psn,uint64_t duration_ns,uint16_t timeout_retries)
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ || base_rto == 0) return false;
+    if (!running_) return false;
     
-    // Calculate RTO after exponential backoff
-    uint16_t calculated_rto = calculateExponentialBackoff(base_rto, retry_count);
+    // Check before mutating an existing timer: an unrepresentable deadline
+    // must leave its old valid event intact. No wall-clock read in virtual mode.
+    const auto wall_start=services_?std::chrono::steady_clock::time_point{}:std::chrono::steady_clock::now();
+    if (services_) UET::Runtime::add_time(services_->clock.now(),duration_ns);
+    else if (duration_ns>static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::time_point::max()-wall_start).count()))
+        throw std::overflow_error("wall-clock retransmission deadline overflow");
     
     // Create or update timer item
     TimerItem item;
     item.psn = psn;
-    item.rto = calculated_rto;
-    item.retry_count = retry_count;
-    item.start_time = services_
-        ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(services_->clock.now()))
-        : std::chrono::steady_clock::now();
+    item.duration_ns=duration_ns;
+    item.rto=diagnostic_milliseconds(duration_ns);
+    item.retry_count = timeout_retries;
+    item.start_time_ns=services_?services_->clock.now():0;
+    item.start_time=wall_start;
     item.active = true;
     
     timers_[psn] = item;
-    if (services_) scheduleVirtual(psn, calculated_rto);
+    if (services_) scheduleVirtual(psn,duration_ns);
     
     LOG_DEBUG("RTOTimer::startTimer", 
               "Start timer - PSN: " + std::to_string(psn) + 
-              ", RTO: " + std::to_string(calculated_rto) + "ms" +
-              ", retry count: " + std::to_string(retry_count));
+              ", RTO: " + std::to_string(duration_ns) + "ns" +
+              ", timeout retry count: " + std::to_string(timeout_retries));
     
     // Notify monitoring thread
     cv_.notify_one();
@@ -159,20 +184,31 @@ bool RTOTimer::stopTimer(uint32_t psn)
  */
 bool RTOTimer::updateRTO(uint32_t psn, uint16_t new_rto)
 {
+    if (!new_rto) return false;
+    return updateNanoseconds(psn,uint64_t{new_rto}*UET::Runtime::kMillisecond);
+}
+
+bool RTOTimer::updateNanoseconds(uint32_t psn,uint64_t duration_ns)
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ || new_rto == 0) return false;
+    if (!running_) return false;
     
     auto it = timers_.find(psn);
     if (it != timers_.end() && it->second.active) {
-        it->second.rto = new_rto;
-        it->second.start_time = services_
-            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(services_->clock.now()))
-            : std::chrono::steady_clock::now();
-        if (services_) scheduleVirtual(psn, new_rto);
+        const auto wall_start=services_?std::chrono::steady_clock::time_point{}:std::chrono::steady_clock::now();
+        if (services_) UET::Runtime::add_time(services_->clock.now(),duration_ns);
+        else if (duration_ns>static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::time_point::max()-wall_start).count()))
+            throw std::overflow_error("wall-clock retransmission deadline overflow");
+        it->second.duration_ns=duration_ns;
+        it->second.rto=diagnostic_milliseconds(duration_ns);
+        it->second.start_time_ns=services_?services_->clock.now():0;
+        it->second.start_time=wall_start;
+        if (services_) scheduleVirtual(psn,duration_ns);
         
         LOG_DEBUG("RTOTimer::updateRTO", 
                   "Update RTO - PSN: " + std::to_string(psn) + 
-                  ", new RTO: " + std::to_string(new_rto) + "ms");
+                  ", new RTO: " + std::to_string(duration_ns) + "ns");
         return true;
     }
     
@@ -294,7 +330,7 @@ void RTOTimer::monitorThread()
         for (auto it = timers_.begin(); it != timers_.end(); ++it) {
             if (it->second.active) {
                 auto expire_time = it->second.start_time + 
-                                 std::chrono::milliseconds(it->second.rto);
+                                 std::chrono::nanoseconds(it->second.duration_ns);
                 if (expire_time < earliest_time) {
                     earliest_time = expire_time;
                     earliest_it = it;
@@ -338,19 +374,4 @@ void RTOTimer::monitorThread()
     }
     
     LOG_INFO("RTOTimer::monitorThread", "Monitoring thread stopped");
-}
-
-/**
- * @brief Calculate RTO time after exponential backoff
- * @param base_rto Base RTO
- * @param retry_count Retry count
- * @return Calculated RTO
- */
-uint16_t RTOTimer::calculateExponentialBackoff(uint16_t base_rto, uint16_t retry_count) const
-{
-    // Saturate before shifting: a hostile/long-lived retry count must never
-    // cause an oversized or signed shift.
-    const uint64_t calculated = static_cast<uint64_t>(base_rto)
-        << std::min<uint16_t>(retry_count, 16);
-    return static_cast<uint16_t>(std::min<uint64_t>(calculated, 10000));
 }

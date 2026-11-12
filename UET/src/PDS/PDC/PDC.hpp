@@ -311,9 +311,10 @@ struct RX_pkt_meta;
  */
 struct TX_pkt_meta
 {
-    uint16_t tx_pkt_handle; /**< Sending packet handle */
-    uint16_t rto;           /**< Retransmission timeout time */
-    uint16_t retry_cnt;     /**< Retry count */
+    uint16_t tx_pkt_handle=0; /**< Sending packet handle */
+    UET::Runtime::Time retransmission_timeout_ns=0;
+    uint16_t retry_cnt=0; /**< All retries, including NACKs when no separate NACK limit is configured. */
+    uint16_t timeout_retry_count=0; /**< Only RTO-triggered retries increase exponential backoff (§3.5.12.7). */
     UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
     bool transmit_time_valid=false,awaiting_transmission=false;
     uint32_t congestion_nominal_bytes=0;
@@ -510,7 +511,9 @@ protected:
     void receiveProbe(const PDStoNET_pkt& packet);
     mutable bool congestion_engaged_=false;
     mutable std::optional<UET::CMS::Connection> congestion_connection_;
-    std::set<uint32_t> admission_deferred_retries_;
+    enum class RetryCause { Timeout, NegativeAcknowledgment };
+    std::map<uint32_t,RetryCause> admission_deferred_retries_;
+    void retryPacket(uint32_t sequence,RetryCause cause);
     std::optional<UET::PDS::PeerSequenceWindow> peer_sequence_window_;
     bool peerWindowAllows(uint32_t sequence) const {
         return !peer_sequence_window_ || peer_sequence_window_->allows(sequence);
@@ -531,11 +534,13 @@ protected:
     }
     std::optional<uint32_t> nextAdmittedRetry() const {
         std::optional<uint32_t> selected;
-        for (const auto sequence:admission_deferred_retries_) {
+        for (const auto& deferred:admission_deferred_retries_) {
+            const auto sequence=deferred.first;
             const auto packet=tx_pkt_buffer.find(sequence);
             const auto metadata=tx_pkt_map.find(sequence);
             if (packet==tx_pkt_buffer.end() || metadata==tx_pkt_map.end()) return sequence; // Discard a stale queued retry.
             const bool data=packet->second.PDS_type==RUOD_req_header;
+            if (data && nack_traffic_paused_) continue;
             const bool query=data && runtime_ && runtime_->standard_wire && metadata->second.delivery_confirmed;
             if (!data || query || (peerWindowAllows(sequence) && congestionReady())) {
                 if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
@@ -547,7 +552,8 @@ protected:
     void retryAdmissionDeferred() {
         const auto sequence=nextAdmittedRetry();
         if (!sequence) return;
-        admission_deferred_retries_.erase(*sequence); txRto(*sequence);
+        const auto cause=admission_deferred_retries_.at(*sequence);
+        admission_deferred_retries_.erase(*sequence); retryPacket(*sequence,cause);
     }
     void processPeerAcknowledgment(const PDStoNET_pkt& packet);
     void processCongestionAck(const PDStoNET_pkt& packet);
@@ -590,7 +596,7 @@ protected:
     // §3.5.8.2: a zero-SPDCID NACK pauses data, including retransmits.
     bool nack_traffic_paused_=false;
     UET::Runtime::TimerId nack_retry_wake_=0;
-    std::set<uint32_t> deferred_nack_retransmits_;
+    std::map<uint32_t,RetryCause> deferred_nack_retransmits_;
     void pauseForResourceNack(uint32_t sequence);
     void resumeNackTraffic();
     void resetNackPause();

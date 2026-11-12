@@ -57,7 +57,7 @@ void completion_waits_for_end(bool reject_key) {
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     DelayedEndPort delayed(forward,loop); DefaultResponsePort defaults(reverse);
     PdsHost source_host(1,loop,trace,delayed),target_host(2,loop,trace,defaults);
-    source_host.services().rto_ms=20;
+    source_host.services().rto_ns=20*UET::Runtime::kMillisecond;
     Endpoint source(1,source_host,loop,trace,16),target(2,target_host,loop,trace,16);
     source.memory().add_job(1); target.memory().add_job(1);
     const auto region=target.memory().register_region(1,1,512,7);

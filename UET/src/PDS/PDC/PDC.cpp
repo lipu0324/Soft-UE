@@ -540,10 +540,15 @@ void PDC::reTx(uint32_t psn){
  * @param psn Timeout packet sequence number
  */
 void PDC::txRto(uint32_t psn){
+    retryPacket(psn,RetryCause::Timeout);
+}
+
+void PDC::retryPacket(uint32_t psn,RetryCause cause){
     if (!tx_pkt_map.count(psn) || !tx_pkt_buffer.count(psn)) return;
     if (waitsForTransmitNotification() && tx_pkt_map.at(psn).awaiting_transmission) return;
+    stopPacketTimer(psn); // The replacement attempt starts its timer at its own NIC departure.
     if (nack_traffic_paused_ && tx_pkt_buffer.at(psn).PDS_type!=RUOD_cp_header) {
-        deferred_nack_retransmits_.insert(psn);
+        deferred_nack_retransmits_.emplace(psn,cause);
         return;
     }
     if (runtime_ && runtime_->congestion_control && tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header &&
@@ -560,7 +565,7 @@ void PDC::txRto(uint32_t psn){
     const bool data=tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header;
     const bool semantic_query=data && runtime_ && runtime_->standard_wire && tx_pkt_map.at(psn).delivery_confirmed;
     if (data && !semantic_query && (!peerWindowAllows(psn) || !congestionReady())) {
-        stopPacketTimer(psn); admission_deferred_retries_.insert(psn); return;
+        stopPacketTimer(psn); admission_deferred_retries_.emplace(psn,cause); return;
     }
     TX_pkt_meta meta = tx_pkt_map.at(psn);
     const auto& lost_packet=tx_pkt_buffer.at(psn);
@@ -574,18 +579,22 @@ void PDC::txRto(uint32_t psn){
     }
     if(meta.retry_cnt < Max_RTO_Retx_Cnt){
         meta.retry_cnt++;
-        meta.rto = static_cast<uint16_t>(std::min<uint64_t>(10000, static_cast<uint64_t>(runtime_ ? runtime_->rto_ms : Base_RTO) << std::min<uint16_t>(meta.retry_cnt,16)));
+        if (cause==RetryCause::Timeout) ++meta.timeout_retry_count;
+        // A NACK still counts toward the common retry limit, but restarts the
+        // last timeout duration; it is not a new RTO expiration (§3.5.15.3).
+        meta.retransmission_timeout_ns=UET::Runtime::retransmission_timeout_ns(
+            runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond,meta.timeout_retry_count);
         tx_pkt_map[psn] = meta; 
         diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Packet retransmission - PSN: " << psn
                 << ", retry_cnt: " << meta.retry_cnt
-                << ", new_rto22: " << meta.rto << std::endl;
+                << ", timeout_ns: " << meta.retransmission_timeout_ns << std::endl;
         
-        if (!waitsForTransmitNotification()) startPacketTimer(psn, meta.retry_cnt);
+        if (!waitsForTransmitNotification()) startPacketTimer(psn,meta.timeout_retry_count);
 
         std::stringstream retry_info;
         retry_info << "Retransmit packet - PSN: " << psn
                     << ", retry_cnt: " << meta.retry_cnt
-                    << ", new_rto: " << meta.rto;
+                    << ", timeout_ns: " << meta.retransmission_timeout_ns;
         LOG_INFO(__FUNCTION__, retry_info.str());
 
         reTx(psn);
@@ -638,14 +647,14 @@ void PDC::resumeNackTraffic() {
     nack_retry_wake_=0;
     nack_traffic_paused_=false;
     pause_pdc=unack_cnt>=MPR || tx_cur_psn-clear_psn>MPR;
-    for (const auto sequence:deferred_nack_retransmits_)
-        if (tx_pkt_buffer.count(sequence)) rto_pkt_q.push(sequence);
+    for (const auto& deferred:deferred_nack_retransmits_)
+        if (tx_pkt_buffer.count(deferred.first)) admission_deferred_retries_.emplace(deferred.first,deferred.second);
     deferred_nack_retransmits_.clear();
     if (runtime_ && runtime_->wake) runtime_->wake();
 }
 
 void PDC::pauseForResourceNack(uint32_t sequence) {
-    deferred_nack_retransmits_.insert(sequence);
+    deferred_nack_retransmits_.emplace(sequence,RetryCause::NegativeAcknowledgment);
     stopPacketTimer(sequence);
     if (nack_traffic_paused_) return; // A burst of NACKs must not restart the delay.
     nack_traffic_paused_=true;
@@ -802,7 +811,7 @@ void PDC::txCtrl(){
            p.PDS_header.RUOD_cp_header.ctl_type == Negotiation){
             const auto sequence = p.PDS_header.RUOD_cp_header.psn;
             TX_pkt_meta meta{};
-            meta.rto = runtime_ ? runtime_->rto_ms : Base_RTO;
+            meta.retransmission_timeout_ns=runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond;
             if (runtime_) meta.last_transmit_time=runtime_->clock.now();
             tx_pkt_map.emplace(sequence,meta);
             tagTransmission(p,sequence,UET::Runtime::TransmitKind::NumberedControl,0);
@@ -1277,7 +1286,7 @@ void PDC::rxNack(PDStoNET_pkt* packet)
         std::sort(recovery_sequences.begin(),recovery_sequences.end(),[expected_psn](uint32_t left,uint32_t right) {
             return left - expected_psn < right - expected_psn;
         });
-        for (const auto sequence : recovery_sequences) txRto(sequence);
+        for (const auto sequence : recovery_sequences) retryPacket(sequence,RetryCause::NegativeAcknowledgment);
         return;
     }
 
@@ -1286,7 +1295,7 @@ void PDC::rxNack(PDStoNET_pkt* packet)
     case UET_NO_PKT_BUFFER: case UET_NO_GTD_DEL_AVAIL: case UET_NO_SES_MSG_AVAIL:
     case UET_PSN_OOR_WINDOW: case UET_PKT_NOT_RCVD: case UET_ACK_WITH_DATA:
     case UET_RCVR_INFER_LOSS:
-        txRto(negative_ack.nack_psn);
+        retryPacket(negative_ack.nack_psn,RetryCause::NegativeAcknowledgment);
         break;
     default:
         // Resource/SES-processing notifications retain the existing RTO.
@@ -1340,7 +1349,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     tx_pkt_buffer.insert(std::make_pair(psn,p)); 
 
     TX_pkt_meta meta;
-    meta.rto = Base_RTO;
+    meta.retransmission_timeout_ns=runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond;
     meta.tx_pkt_handle = 0;
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(psn, meta));
@@ -1536,7 +1545,7 @@ void PDC::txReq(PDS_PDC_req *req){
     TX_pkt_meta meta;
     meta.retry_cnt = 0;                         
     meta.tx_pkt_handle = req->tx_pkt_handle;
-    meta.rto = Base_RTO;                        
+    meta.retransmission_timeout_ns=runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond;
     if (runtime_) meta.last_transmit_time=runtime_->clock.now();
     tx_pkt_map.insert(std::make_pair(psn, meta));
     
@@ -1657,7 +1666,9 @@ bool PDC::canSafelyClose(){
  */
 void PDC::startPacketTimer(uint32_t psn, uint16_t retry_count)
 {
-    if (!rto_timer_.startTimer(psn, runtime_ ? runtime_->rto_ms : Base_RTO, retry_count)) {
+    const bool started=runtime_?rto_timer_.startTimerNanoseconds(psn,runtime_->rto_ns,retry_count):
+        rto_timer_.startTimer(psn,Base_RTO,retry_count);
+    if (!started) {
         LOG_ERROR("PDC::startPacketTimer", 
                  formatLogMessage("启动计时器失败 - PSN: " + std::to_string(psn)));
     }

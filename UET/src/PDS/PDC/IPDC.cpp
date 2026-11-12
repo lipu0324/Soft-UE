@@ -636,7 +636,7 @@ void I_PDC::sendClose(){
 
     TX_pkt_meta meta;
     meta.tx_pkt_handle = 0;
-    meta.rto = Base_RTO;
+    meta.retransmission_timeout_ns=runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond;
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
 

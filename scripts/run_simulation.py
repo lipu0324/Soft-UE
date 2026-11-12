@@ -55,7 +55,7 @@ def identifiers(value, name, maximum, minimum=1):
 
 def validate(config):
     mapping(config, {"version", "profile", "seed", "duration_ns", "event_budget", "memory_bytes", "wire",
-                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events"}, "scenario")
+                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events", "rto_ns"}, "scenario")
     if config.get("version") != 1 or type(config.get("version")) is not int:
         raise ValueError("scenario version must be 1")
     if config.get("profile", "experimental") != "experimental":
@@ -74,6 +74,7 @@ def validate(config):
     budget = integer(config.get("event_budget", 1_000_000), 1, 100_000_000, "event_budget")
     memory = integer(config.get("memory_bytes", 65536), 1, 2**64 - 1, "memory_bytes")
     payload_mtu = integer(config.get("payload_mtu", 1024), 1, 8192, "payload_mtu")
+    rto_ns = integer(config.get("rto_ns", 1_000_000), 0, 8_000_000_000, "rto_ns")
     trimming = config.get("trimming", False)
     if type(trimming) is not bool:
         raise ValueError("trimming must be boolean")
@@ -82,7 +83,7 @@ def validate(config):
     if any(type(flag) is not bool for flag in flags):
         raise ValueError("wire ipv6/udp/crc fields must be booleans")
     records = ["softue-scenario-v2", f"seed {seed}", f"duration {duration}", f"budget {budget}",
-               f"memory {memory}", f"payload_mtu {payload_mtu}", f"trimming {int(trimming)}",
+               f"memory {memory}", f"payload_mtu {payload_mtu}", f"rto {rto_ns}", f"trimming {int(trimming)}",
                "wire " + " ".join(str(int(x)) for x in flags)]
     nscc = mapping(config.get("nscc", {}), {"enabled", "base_rtt_ns", "sender_bytes_per_second",
                    "receiver_bytes_per_second", "nominal_mtu", "initial_window_bytes"}, "nscc")

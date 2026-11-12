@@ -305,6 +305,8 @@ explain control timers, peer-window progress and EV/CE/RETX attribution.
 [MAC timing](MAC-TIMING.md) separates NIC queueing, actual first-bit departure,
 ACK service time and source RTT samples, including local rejection and stale
 transmit notifications after PDC reuse.
+[Retry timing](RETRY-TIMING.md) uses nanosecond RTO values, distinguishes NACK
+retries from timeout backoff and preserves their causes while admission is blocked.
 
 The [trimming path](TRIMMING.md) documents switch admission, restricted parsing
 of unauthenticated truncated headers, and NACK recovery without PDC allocation.
@@ -323,7 +325,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 20 are classified and split into obligations
+Profile classification. The first 60 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements

@@ -47,6 +47,7 @@ def main():
                dict(base, profile="AI_BASE"), dict(base, unknown=True), dict(base, seed=True),
                dict(base, nscc={"enabled": 1}), dict(base, nscc={"enabled": True, "nominal_mtu": 100}),
                dict(base, trimming="true"), dict(base, payload_mtu=0),
+               dict(base, rto_ns=True), dict(base, rto_ns=8_000_000_001),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 3, "up": False}]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 2, "up": "false"}])]
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
@@ -148,9 +149,12 @@ def main():
 
         outage = copy.deepcopy(base)
         outage["nscc"] = {"enabled": True}
+        outage["rto_ns"] = 50000
         outage["link_events"] = [{"at_ns": 0, "from": 1, "to": 2, "up": False},
-                                 {"at_ns": 500000, "from": 1, "to": 2, "up": True}]
-        outage_output, _ = run(outage, "temporary-no-route")
+                                 {"at_ns": 40000, "from": 1, "to": 2, "up": True}]
+        outage_output, outage_result = run(outage, "temporary-no-route")
+        check(outage_result["operations"][0]["flow_completion_ns"] < 100000,
+              "configured nanosecond RTO was rounded up to a millisecond")
         outage_events = [json.loads(line)["event"] for line in (outage_output / "trace.jsonl").read_text().splitlines()]
         check("nic_rejected" in outage_events and "link_down" in outage_events and "link_up" in outage_events,
               "timed link events did not exercise local rejection and recovery")
