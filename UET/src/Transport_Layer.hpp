@@ -577,6 +577,7 @@ struct PDC_SES_req
     PDS_next_hdr next_hdr;        /**< Next header type */
     uint16_t orig_pdcid;     /**< DPDCID */
     uint32_t orig_psn;       /**< Original packet sequence number */
+    uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
 };
 /**
  * @struct PDC_SES_rsp
@@ -590,6 +591,7 @@ struct PDC_SES_rsp
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
+    uint32_t source_fep = 0; /**< Peer identity from the PDC */
 };
 
 /**

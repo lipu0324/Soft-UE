@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <queue>
 #include <map>
+#include <set>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -45,7 +46,9 @@
 #include <iomanip>
 
 // Retransmission configuration
+#ifndef USE_RTO
 #define USE_RTO 0
+#endif
 
 /** Maximum PSN range, used to limit the valid range of sequence numbers */ 
 //#define Max_PSN_Range 500
@@ -409,7 +412,7 @@ public:
     ThreadSafeQueue<uint16_t>* public_close_queue = nullptr;
 
     // ==================== Constructors and Destructors ====================
-    PDC();
+    explicit PDC(UET::Runtime::Services* services = nullptr);
     virtual ~PDC();
 
     // ==================== Common Utility Functions ====================
@@ -429,8 +432,9 @@ public:
      * @brief Get current timestamp Get current timestamp Get current timestamp
      * @return Formatted timestamp string Formatted timestamp string
      */
-    static std::string getCurrentTimestamp()
+    std::string getCurrentTimestamp() const
     {
+        if (runtime_) return std::to_string(runtime_->clock.now()) + "ns ";
         auto now = std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -441,6 +445,37 @@ public:
            << '.' << std::setfill('0') << std::setw(3) << now_ms.count() << " ";
         return ss.str();
     }
+
+    bool hasPendingWork() const {
+        const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
+                            (!tx_req_q.empty() && !pause_pdc) || !tx_rsp_q.empty();
+        if (state == CLOSED) return queued;
+        return gen_cm != NONE || close_error ||
+            (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK) || queued;
+    }
+    bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    bool awaitsSemantic(uint32_t psn) const {
+        const auto found = tx_pkt_buffer.find(psn);
+        return runtime_ && found != tx_pkt_buffer.end() &&
+            found->second.PDS_type == RUOD_req_header &&
+            found->second.SESpkt.bth_type == Standard_Header &&
+            found->second.SESpkt.bth_header.Standard_Header.dc &&
+            found->second.SESpkt.bth_header.Standard_Header.eom;
+    }
+    bool replaySemanticAck(uint32_t psn) {
+        const auto found = tx_ack_buffer.find(psn);
+        if (found == tx_ack_buffer.end()) return false;
+        auto ack = found->second;
+        ack.PDS_header.RUOD_ack_header.flags.retx = 1;
+        if (public_net_queue) return public_net_queue->push(ack);
+        tx_pkt_q.push(std::move(ack));
+        return true;
+    }
+
+protected:
+    std::set<uint32_t> acknowledged_tx_;
+    UET::Runtime::Services* runtime_ = nullptr;
+public:
 
     /**
      * @brief Set receive handle Set receive handle Set receive handle

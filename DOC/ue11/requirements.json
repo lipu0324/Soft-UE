@@ -1,0 +1,522 @@
+{
+  "schema_version": 1,
+  "specification": "UE 1.1 (2026-10-12)",
+  "specification_sha256": "4c8436ec7daa627ad6cce0680bea66cfac496dfe4e217631064e68acafe04531",
+  "softue_baseline": "4a4e6d874909720097b1ae20302a538a97116976",
+  "reference_baseline": "5b4e0491329b8e28764bca6847e2f6a0eaa84b9b",
+  "inventory_complete": false,
+  "profile_claims": {
+    "AI_BASE": false,
+    "AI_FULL": false,
+    "HPC": false,
+    "UNIFIED_LOCAL": false
+  },
+  "notes": [
+    "Initial reviewed feature inventory, not an exhaustive normative checklist.",
+    "A verified implementation task does not establish UE profile compliance.",
+    "Optional features must satisfy their applicable requirements when enabled."
+  ],
+  "requirements": [
+    {
+      "id": "SIM-TIME",
+      "reference": "M1 design",
+      "summary": "确定性纳秒事件、取消与对象销毁",
+      "status": "verified",
+      "tests": [
+        "runtime_test"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "SIM-PDS",
+      "reference": "M1 design",
+      "summary": "现有 SES/PDS/IPDC/TPDC 在虚拟时间下运行",
+      "status": "verified",
+      "tests": [
+        "pds_simulation_test"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "SIM-64",
+      "reference": "M1 design",
+      "summary": "64 端点运行与确定性输出",
+      "status": "verified",
+      "tests": [
+        "simulation_scenarios"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "WIRE-IP",
+      "reference": "§3.5.25",
+      "summary": "Ethernet/IPv4/IPv6/原生 UET/UDP 封装",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "WIRE-CRC",
+      "reference": "§3.5.26",
+      "summary": "CRC32C、网络序、UDP checksum 掩码、错误拒绝",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "WIRE-SES",
+      "reference": "§3.4.3",
+      "summary": "标准请求与语义响应编码",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-ACK",
+      "reference": "§3.5.12",
+      "summary": "选择 ACK、累计 ACK、重复 ACK 与 PSN 回绕",
+      "status": "partial",
+      "tests": [
+        "pdc_ack_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-ROD",
+      "reference": "§3.5.21",
+      "summary": "ROD 建连、数据和语义响应",
+      "status": "partial",
+      "tests": [
+        "endpoint_test",
+        "pds_fault_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-RTO",
+      "reference": "§3.5.15",
+      "summary": "数据/ACK 丢失恢复与有限重试",
+      "status": "partial",
+      "tests": [
+        "pds_fault_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-RUD",
+      "reference": "§3.5.20",
+      "summary": "RUD 乱序窗口、重复消除及 SACK",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-UUD",
+      "reference": "§3.5.7.5",
+      "summary": "无连接 UUD 单包发送与本地完成",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-CLOSE",
+      "reference": "§3.5.8; §3.5.16",
+      "summary": "完整 Clear/Close、资源复用与迟到报文",
+      "status": "partial",
+      "tests": [
+        "pds_fault_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "PDS-TRIM",
+      "reference": "§3.5.15.1; §4.1",
+      "summary": "trimming 检测及 NACK 恢复",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-JOB",
+      "reference": "§3.3.3; §3.4.2.4",
+      "summary": "JobID 和 MR/PID 作用域授权",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test",
+        "endpoint_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-MR",
+      "reference": "§2.2.5.3; §3.4.2.3",
+      "summary": "内存键、访问权限、边界与撤销",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-WRITE",
+      "reference": "Table 3-1; §3.4.4",
+      "summary": "多包 WRITE 的真实内存效果及语义完成",
+      "status": "partial",
+      "tests": [
+        "endpoint_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-SEND",
+      "reference": "Table 3-1; §3.4.4",
+      "summary": "预投递缓冲区 SEND 与 NO_OP",
+      "status": "partial",
+      "tests": [
+        "endpoint_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-IMM",
+      "reference": "Table 3-1",
+      "summary": "WRITE IMM 与远端完成数据",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-ATOMIC",
+      "reference": "Table 3-1; §3.4.2.5",
+      "summary": "线上的非取回原子操作",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-SIZE",
+      "reference": "Table 3-1",
+      "summary": "Profile 规定的消息大小及流式接口",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "API-FABRIC",
+      "reference": "§2.2",
+      "summary": "真实 libfabric 2.0 provider",
+      "status": "blocked",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "CMS-NSCC",
+      "reference": "§3.3.7; §3.6.13",
+      "summary": "NSCC 准入、窗口与反馈闭环",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "NET-BASE",
+      "reference": "§1.5; M4 design",
+      "summary": "串行化、队列、丢包、链路故障及 ECMP 行为",
+      "status": "partial",
+      "tests": [
+        "fabric_test",
+        "simulation_scenarios"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "SES-READ",
+      "reference": "Table 3-1",
+      "summary": "多包 READ 与数据响应",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-TAG",
+      "reference": "Tables 3-1 to 3-4",
+      "summary": "精确/通配 tag 与队列匹配",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-DEFER",
+      "reference": "Table 3-1",
+      "summary": "deferrable send 与 restart",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_FULL"
+      ]
+    },
+    {
+      "id": "SES-RNDV",
+      "reference": "Table 3-1",
+      "summary": "rendezvous 与 unexpected 消息",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-FETCH",
+      "reference": "Table 3-1",
+      "summary": "取回原子操作、CAS、数据类型与异常",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-SYNC",
+      "reference": "§3.4; §3.5.8.2",
+      "summary": "Sync Group 状态与完成动作",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "PDS-RUDI",
+      "reference": "§3.5.23",
+      "summary": "RUDI 无连接、逐包响应与幂等限制",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "HPC"
+      ]
+    },
+    {
+      "id": "CMS-RCCC",
+      "reference": "§3.6.14",
+      "summary": "RCCC 接收端信用算法",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "CMS-TFC",
+      "reference": "§3.6.15",
+      "summary": "TFC 信用与重传规则",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "NET-CSIG",
+      "reference": "§4.2",
+      "summary": "CSIG 编码、交换机信号与反馈",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "TSS-CORE",
+      "reference": "§3.7",
+      "summary": "安全域、KDF、AES-GCM、计数器与轮换",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "TSS-REPLAY",
+      "reference": "§3.5.8.2.1; §3.7.9–10",
+      "summary": "安全建连、重放与 epoch 拒绝",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-LLR",
+      "reference": "§5.1",
+      "summary": "LLR 协议与链路重试行为",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-CBFC",
+      "reference": "§5.2",
+      "summary": "CBFC/PFC 信用、停顿及恢复",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-NEG",
+      "reference": "§5.3",
+      "summary": "LLDP 能力协商与不匹配处理",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "PHY-MODEL",
+      "reference": "§6; M7 design",
+      "summary": "速率/延迟、误码、FEC 延迟与统计抽象",
+      "status": "partial",
+      "tests": [
+        "fabric_test"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "MGMT-MODEL",
+      "reference": "§7; M7 design",
+      "summary": "能力、安全域、JobID 与设备统计管理",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test",
+        "simulation_scenarios"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "LOCAL-RODL",
+      "reference": "§3.5.22",
+      "summary": "RODL 双向 PDC、累计确认与错误模型",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "LOCAL-SES",
+      "reference": "§3.4.3.5",
+      "summary": "局部事务头、打包及直接寻址",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "LOCAL-UFH",
+      "reference": "§5.4; §3.7.11",
+      "summary": "UFH_16/32、CRC 与 TSS 路径",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "UEC-INTEROP",
+      "reference": "M2 acceptance",
+      "summary": "官方实现的进程级标准报文互通",
+      "status": "blocked",
+      "tests": [],
+      "profiles": []
+    }
+  ]
+}

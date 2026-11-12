@@ -50,6 +50,8 @@
  */
 class T_PDC : public PDC
 {
+public:
+    using PDC::PDC;
 private:
     bool secure_psn; /**< Enable secure PSN flag  */
     bool bad_psn;    /**< Bad PSN flag  */

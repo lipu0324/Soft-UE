@@ -49,6 +49,8 @@
  */
 class I_PDC : public PDC
 {
+public:
+    using PDC::PDC;
 private:
     bool clr_cm;         /**< Clear control message flag */
     bool close_triger;   /**< Close trigger flag */

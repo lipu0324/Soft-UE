@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Validate a YAML experiment and run the deterministic Soft-UE protocol core."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    raise SystemExit("PyYAML is required: install python3-yaml or PyYAML")
+
+
+class UniqueLoader(yaml.SafeLoader):
+    pass
+
+
+def unique_mapping(loader, node, deep=False):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in result:
+            raise ValueError(f"duplicate YAML key: {key}")
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
+
+
+def mapping(value, allowed, location):
+    if not isinstance(value, dict) or set(value) - set(allowed):
+        raise ValueError(f"invalid or unknown fields in {location}")
+    return value
+
+
+def integer(value, lower, upper, name):
+    if type(value) is not int or not lower <= value <= upper:
+        raise ValueError(f"{name} must be an integer in [{lower}, {upper}]")
+    return value
+
+
+def identifiers(value, name, maximum):
+    if not isinstance(value, list) or any(type(x) is not int for x in value):
+        raise ValueError(f"{name} must be a list of integers")
+    result = [integer(x, 1, maximum, name) for x in value]
+    if len(set(result)) != len(result):
+        raise ValueError(f"duplicate {name}")
+    return result
+
+
+def validate(config):
+    mapping(config, {"version", "profile", "seed", "duration_ns", "event_budget", "memory_bytes", "wire",
+                     "hosts", "switches", "jobs", "links", "operations"}, "scenario")
+    if config.get("version") != 1 or type(config.get("version")) is not int:
+        raise ValueError("scenario version must be 1")
+    if config.get("profile", "experimental") != "experimental":
+        raise ValueError("no complete UE profile is validated yet; use profile: experimental")
+    hosts = identifiers(config.get("hosts"), "hosts", 0xffffffff)
+    if not 2 <= len(hosts) <= 64:
+        raise ValueError("the initial simulator supports 2 to 64 hosts")
+    switches = identifiers(config.get("switches", []), "switches", 0xffffffff)
+    if set(hosts) & set(switches):
+        raise ValueError("host and switch IDs must be disjoint")
+    jobs = identifiers(config.get("jobs", [1]), "jobs", 0xffffff)
+    if not jobs:
+        raise ValueError("at least one JobID is required")
+    seed = integer(config.get("seed", 42), 0, 2**64 - 1, "seed")
+    duration = integer(config.get("duration_ns", 100_000_000), 1, 2**63 - 1, "duration_ns")
+    budget = integer(config.get("event_budget", 1_000_000), 1, 100_000_000, "event_budget")
+    memory = integer(config.get("memory_bytes", 65536), 1, 2**64 - 1, "memory_bytes")
+    wire = mapping(config.get("wire", {}), {"ipv6", "udp", "crc"}, "wire")
+    flags = [wire.get("ipv6", False), wire.get("udp", False), wire.get("crc", True)]
+    if any(type(flag) is not bool for flag in flags):
+        raise ValueError("wire ipv6/udp/crc fields must be booleans")
+    records = ["softue-scenario-v1", f"seed {seed}", f"duration {duration}", f"budget {budget}",
+               f"memory {memory}", "wire " + " ".join(str(int(x)) for x in flags)]
+    records.extend(f"host {x}" for x in sorted(hosts))
+    records.extend(f"switch {x}" for x in sorted(switches))
+    records.extend(f"job {x}" for x in sorted(jobs))
+    nodes = set(hosts + switches)
+    edges = set()
+    links = config.get("links")
+    if not isinstance(links, list) or not links:
+        raise ValueError("links must be a nonempty list")
+    for item in links:
+        mapping(item, {"from", "to", "bidirectional", "rate_bps", "delay_ns", "fec_delay_ns", "mtu",
+                       "buffer_bytes", "drop_ppm", "extra_delay_ns"}, "link")
+        a = integer(item.get("from"), 1, 0xffffffff, "link.from")
+        b = integer(item.get("to"), 1, 0xffffffff, "link.to")
+        if a not in nodes or b not in nodes or a == b:
+            raise ValueError("link endpoints must be distinct declared nodes")
+        bidirectional = item.get("bidirectional", True)
+        if type(bidirectional) is not bool:
+            raise ValueError("bidirectional must be boolean")
+        mtu = integer(item.get("mtu", 9216), 128, 65535, "mtu")
+        values = [integer(item.get("rate_bps", 100_000_000_000), 1, 2**64 - 1, "rate_bps"),
+                  integer(item.get("delay_ns", 1000), 0, 2**63 - 1, "delay_ns"),
+                  integer(item.get("fec_delay_ns", 0), 0, 2**63 - 1, "fec_delay_ns"), mtu,
+                  integer(item.get("buffer_bytes", 65536), mtu, 2**63 - 1, "buffer_bytes"),
+                  integer(item.get("drop_ppm", 0), 0, 1_000_000, "drop_ppm"),
+                  integer(item.get("extra_delay_ns", 0), 0, 2**63 - 1, "extra_delay_ns")]
+        for source, target in [(a, b), (b, a)] if bidirectional else [(a, b)]:
+            if (source, target) in edges:
+                raise ValueError("duplicate directed link")
+            edges.add((source, target))
+            records.append("link " + " ".join(map(str, [source, target, *values])))
+    operations = config.get("operations")
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 4096:
+        raise ValueError("operations must contain 1 to 4096 entries")
+    contexts, send_targets = set(), set()
+    payload_budget = 64 * 1024 * 1024
+    ranges = {}
+    for number, item in enumerate(operations, 1):
+        mapping(item, {"type", "source", "target", "job", "bytes", "offset", "context", "at_ns", "expect"}, "operation")
+        kind = {"noop": 0, "write": 1, "send": 5}.get(item.get("type"))
+        if kind is None:
+            raise ValueError("initial runner operations are noop, write and send")
+        source = integer(item.get("source"), 1, 0xffffffff, "source")
+        target = integer(item.get("target"), 1, 0xffffffff, "target")
+        job = integer(item.get("job", 1), 1, 0xffffff, "job")
+        if source not in hosts or target not in hosts or source == target or job not in jobs:
+            raise ValueError("operation requires distinct declared hosts and a declared JobID")
+        count = integer(item.get("bytes", 0 if kind == 0 else 257), 0, 16 * 1024 * 1024, "bytes")
+        payload_budget -= count
+        if payload_budget < 0:
+            raise ValueError("initial runner payload budget is 64 MiB per scenario")
+        offset = integer(item.get("offset", 0), 0, 2**64 - 1, "offset")
+        if (kind == 0 and count) or offset > memory or count > memory - offset:
+            raise ValueError("operation exceeds registered memory or NO_OP has payload")
+        context = integer(item.get("context", number), 1, 2**64 - 1, "context")
+        if context in contexts:
+            raise ValueError("operation contexts must be unique")
+        contexts.add(context)
+        at = integer(item.get("at_ns", 0), 0, duration - 1, "at_ns")
+        expected = {"success": 0, "remote_error": 3, "timeout": 4}.get(item.get("expect", "success"))
+        if expected is None:
+            raise ValueError("expect must be success, remote_error or timeout")
+        if kind != 0 and count:
+            for begin, end in ranges.setdefault((target, job), []):
+                if offset < end and begin < offset + count:
+                    raise ValueError("runner verification requires disjoint target ranges; use the native API for overlap tests")
+            ranges[target, job].append((offset, offset + count))
+        if kind == 5:
+            if (target, job) in send_targets:
+                raise ValueError("runner supports one posted SEND per target/job; use the native API for receive-queue tests")
+            send_targets.add((target, job))
+        records.append("flow " + " ".join(map(str, [kind, source, target, job, count, offset, context, at, expected])))
+    return "\n".join(records) + "\n"
+
+
+def provenance(root):
+    command = lambda *args: subprocess.check_output(["git", "-C", str(root), *args])
+    paths = command("ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0")
+    digest = hashlib.sha256()
+    for raw in sorted(set(paths)):
+        if raw:
+            path = root / raw.decode()
+            if path.is_file():
+                digest.update(raw + b"\0" + path.read_bytes())
+    return {"baseline_commit": command("rev-parse", "HEAD").decode().strip(),
+            "working_tree_dirty": bool(command("status", "--porcelain")),
+            "source_sha256": digest.hexdigest(),
+            "reference_commit": "5b4e0491329b8e28764bca6847e2f6a0eaa84b9b",
+            "specification": "UE 1.1 (2026-10-12)",
+            "specification_sha256": "4c8436ec7daa627ad6cce0680bea66cfac496dfe4e217631064e68acafe04531"}
+
+
+def main():
+    root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("scenario", type=Path)
+    parser.add_argument("--output", type=Path, default=root / "build" / "simulation")
+    parser.add_argument("--binary", type=Path, default=root / "build" / "softue_sim")
+    args = parser.parse_args()
+    try:
+        original = args.scenario.read_text()
+        config = yaml.load(original, Loader=UniqueLoader)
+        normalized = validate(config)
+        binary = args.binary.resolve()
+        if not binary.is_file():
+            raise ValueError("simulation binary missing; run make simulation first")
+        output = args.output.resolve()
+        if output == root or root.is_relative_to(output):
+            raise ValueError("output must not be the source root or its parent")
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "scenario.yaml").write_text(original)
+        config_path = output / "scenario.config"
+        config_path.write_text(normalized)
+        metadata = provenance(root)
+        metadata["scenario_sha256"] = hashlib.sha256(normalized.encode()).hexdigest()
+        metadata["status_codes"] = {"0": "success", "1": "unsupported", "2": "invalid_request", "3": "remote_error", "4": "timeout", "5": "cancelled", "6": "resource_exhausted"}
+        metadata["run_complete"] = False
+        for artifact in ["result.json", "trace.jsonl", "packets.pcap", "protocol.log"]:
+            (output / artifact).unlink(missing_ok=True)
+        (output / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        result = subprocess.run([str(binary), str(config_path), str(output)], cwd=output, timeout=120)
+        metadata["run_complete"] = result.returncode == 0
+        metadata["exit_code"] = result.returncode
+        (output / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+        if result.returncode < 0:
+            print(f"simulation terminated by signal {-result.returncode}; artifacts: {output}", file=sys.stderr)
+        print(f"{'PASS' if result.returncode == 0 else 'FAIL'}: {output}")
+        return 0 if result.returncode == 0 else 1
+    except (TypeError, ValueError, OSError, yaml.YAMLError, subprocess.SubprocessError) as error:
+        print(f"scenario rejected: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

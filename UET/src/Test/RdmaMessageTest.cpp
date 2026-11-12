@@ -1,4 +1,7 @@
+#include "../Network_Layer/RdmaConfig.hpp"
+#if SOFTUE_HAS_RDMA
 #include "../Network_Layer/RdmaChannel.hpp"
+#endif
 #include "../Network_Layer/PacketCodec.hpp"
 #include "../Network_Layer/UdpChannel.hpp"
 #include "../SES/MessageEndpoint.hpp"
@@ -50,7 +53,7 @@ void interactive_chat(UET::SES::MessageEndpoint& endpoint, bool local_turn) {
 
 int main(int argc, char** argv) {
     try {
-        UET::NetworkLayer::RdmaChannel::Config config;
+        UET::NetworkLayer::RdmaConfig config;
         bool role_set = false;
         bool udp = false;
         bool interactive = false;
@@ -96,8 +99,13 @@ int main(int argc, char** argv) {
         if (udp)
             channel = std::make_unique<UET::NetworkLayer::UdpChannel>(
                 config.server, config.tcp_port, config.peer_ip);
-        else
+        else {
+#if SOFTUE_HAS_RDMA
             channel = std::make_unique<UET::NetworkLayer::RdmaChannel>(config);
+#else
+            throw std::runtime_error("RDMA backend disabled; rebuild with ENABLE_RDMA=1 and libibverbs development files");
+#endif
+        }
         UET::SES::MessageEndpoint endpoint(*channel, config.server ? 2 : 1,
                                            config.server ? 1 : 2);
         if (interactive) {

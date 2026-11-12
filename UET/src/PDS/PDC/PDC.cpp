@@ -34,7 +34,7 @@
  * @brief PDC constructor 
  * @details Initializes PDC with default parameters and sets up timer callback
  */
-PDC::PDC()
+PDC::PDC(UET::Runtime::Services* services)
     : rto_timer_([this](uint32_t psn) {
           
           rto_pkt_q.push(psn);
@@ -44,7 +44,7 @@ PDC::PDC()
 
           std::cout << getCurrentTimestamp() << formatLogMessage("Packet timeout, added to retransmission queue - PSN: ")
                     << psn << std::endl;
-      }),
+      }, services),
       mode(RUD),                    
       SPDCID(0),                    
       DPDCID(0),                    
@@ -75,6 +75,7 @@ PDC::PDC()
       public_ses_rsp_queue(nullptr),
       public_close_queue(nullptr)  
 {
+    runtime_ = services;
     LOG_INFO("PDC::PDC", formatLogMessage("PDC constructor called - initialization completed"));
     std::cout << getCurrentTimestamp() << formatLogMessage("PDC constructor completed initialization") << std::endl;
 }
@@ -180,6 +181,8 @@ void PDC::updateTxPsnTracker(){
         gen_cm = ACK_REQ;
         pause_pdc = true;
     }
+    // Window backpressure is independent of ACK-request heuristics.
+    pause_pdc = unack_cnt >= MPR;
 
     
     std::stringstream after_state;
@@ -197,60 +200,34 @@ void PDC::updateTxPsnTracker(){
  * @param ack_req_flag ACK request flag
  * @param cack_psn Cumulative ACK PSN
  */
-void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cack_psn){
-    //FUNCTION_LOG_ENTRY();
-
-    
-    std::stringstream params;
-    params << "Update TX PSN tracker - psn: " << psn
-            << ", ack_req_flag: " << (int)ack_req_flag
-            << ", cack_psn: " << cack_psn
-            << ", Current clear_psn: " << clear_psn
-            << ", Current unack_cnt: " << unack_cnt;
-    LOG_INFO(__FUNCTION__, params.str());
-
-    std::cout << getCurrentTimestamp() << "I_PDCUpdate TX PSN tracker - psn: " << psn
-            << ", clear_psn: " << clear_psn << ", unack_cnt: " << unack_cnt << std::endl;
-
-    if(psn > clear_psn + 1 && psn > cack_psn + 1) { 
-        gen_cm = ACK_REQ;  
-        std::cout << getCurrentTimestamp() << "Need to send ACK Request, tx_cur_psn: " << tx_cur_psn << ", clear_psn: " << clear_psn << std::endl;
-        LOG_WARN(__FUNCTION__, "Detected ACK loss, set generate ACK Request");
+void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumulative) {
+    const uint32_t outstanding_span = tx_cur_psn - clear_psn;
+    if (outstanding_span >= 0x80000000u) {
+        close_error = true;
+        return;
     }
-    else if(psn > clear_psn){
-        uint32_t old_unack_cnt = unack_cnt;
-        unack_cnt -= psn - clear_psn;
-        
-        for (uint32_t i = clear_psn; i < psn; i++)
-        {
-            if (tx_pkt_map.count(i))
-            {
-                if(USE_RTO) stopPacketTimer(i);  
-                tx_pkt_map.erase(i);
-                tx_pkt_buffer.erase(i);
-            }
-        }   
-        clear_psn = psn;
-        pause_pdc = false;
-        
-        std::stringstream update_info;
-        update_info << "PSN acknowledgment update - old unack_cnt: " << old_unack_cnt
-                    << ", New unack_cnt: " << unack_cnt
-                    << ", New clear_psn: " << clear_psn
-                    << ", pause_pdc: false";
-        LOG_INFO(__FUNCTION__, update_info.str());
-    
-        
-        
-        // 条件：
-        if(tx_pkt_q.empty() && unack_cnt == 0 && (ack_req_flag == 0x01)) {
-            gen_cm = CLR_CMD;  
-            std::cout << getCurrentTimestamp() << ", clear_psn: " << clear_psn << ", ack_req_flag: " << (int)ack_req_flag << std::endl;
-            LOG_INFO(__FUNCTION__, "Clear Command conditions met, set generate Clear Command");
-        }
+    const uint32_t explicit_distance = psn - clear_psn;
+    const uint32_t cumulative_distance = cumulative - clear_psn;
+    const bool valid_explicit = explicit_distance && explicit_distance < outstanding_span;
+    const bool valid_cumulative = cumulative_distance < outstanding_span;
+    for (auto it = tx_pkt_buffer.begin(); it != tx_pkt_buffer.end();) {
+        const uint32_t distance = it->first - clear_psn;
+        if (distance && distance < outstanding_span &&
+            ((valid_explicit && it->first == psn) ||
+             (valid_cumulative && distance <= cumulative_distance))) {
+            const auto sequence = it->first;
+            stopPacketTimer(sequence);
+            tx_pkt_map.erase(sequence);
+            acknowledged_tx_.insert(sequence);
+            it = tx_pkt_buffer.erase(it);
+            if (unack_cnt > 0) --unack_cnt;
+        } else ++it;
     }
-
-    //FUNCTION_LOG_EXIT();
+    while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
+    pause_pdc = unack_cnt >= MPR;
+    if ((ack_req_flag & 1u) && (valid_explicit || valid_cumulative)) gen_cm = CLR_CMD;
+    // Selective ACKs are remembered, so a repeated ACK cannot decrement the
+    // count twice or cause an endless ACK_REQ/cache-reply exchange.
 }
 
 /**
@@ -341,8 +318,12 @@ void PDC::updateRxPsnTracker(RX_pkt_meta *meta, bool gtd_del)
  * @param psn Packet sequence number
  */
 void PDC::reTx(uint32_t psn){
-    PDStoNET_pkt p = tx_pkt_buffer.at(psn);
-    p.PDS_header.RUOD_req_header.flags.retx = 1; 
+    const auto found = tx_pkt_buffer.find(psn);
+    if (found == tx_pkt_buffer.end()) return;
+    PDStoNET_pkt p = found->second;
+    if (p.PDS_type == RUOD_cp_header) p.PDS_header.RUOD_cp_header.flags.retx = 1;
+    else if (p.PDS_type == RUOD_req_header) p.PDS_header.RUOD_req_header.flags.retx = 1;
+    else return;
     if (public_net_queue) {
         public_net_queue->push(p);
     } else {
@@ -355,10 +336,11 @@ void PDC::reTx(uint32_t psn){
  * @param psn Timeout packet sequence number
  */
 void PDC::txRto(uint32_t psn){
+    if (!tx_pkt_map.count(psn) || !tx_pkt_buffer.count(psn)) return;
     TX_pkt_meta meta = tx_pkt_map.at(psn);
     if(meta.retry_cnt < Max_RTO_Retx_Cnt){
         meta.retry_cnt++;
-        meta.rto = Base_RTO * (1 << meta.retry_cnt);
+        meta.rto = static_cast<uint16_t>(std::min<uint64_t>(10000, static_cast<uint64_t>(runtime_ ? runtime_->rto_ms : Base_RTO) << std::min<uint16_t>(meta.retry_cnt,16)));
         tx_pkt_map[psn] = meta; 
         std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Packet retransmission - PSN: " << psn
                 << ", retry_cnt: " << meta.retry_cnt
@@ -372,13 +354,7 @@ void PDC::txRto(uint32_t psn){
                     << ", new_rto: " << meta.rto;
         LOG_INFO(__FUNCTION__, retry_info.str());
 
-        PDStoNET_pkt p = tx_pkt_buffer.at(psn);
-        p.PDS_header.RUOD_req_header.flags.retx = 1; 
-        if (public_net_queue) {
-            public_net_queue->push(p);
-        } else {
-            tx_pkt_q.push(p);
-        }
+        reTx(psn);
     } else {
         LOG_ERROR(__FUNCTION__, "重传次数超限,设置关闭错误标志");
         close_error = true;
@@ -395,6 +371,11 @@ void PDC::txRto(uint32_t psn){
  */
 void PDC::freePDC()
 {
+    clearAllPacketTimers();
+    acknowledged_tx_.clear();
+    closing = false;
+    close_error = false;
+    gen_cm = NONE;
     
     tx_pkt_map.clear();
     rx_pkt_map.clear();
@@ -492,10 +473,17 @@ void PDC::txCtrl(){
         default:
             LOG_ERROR(__FUNCTION__, formatLogMessage("未知控制消息类型"));
         }
-        if(p.PDS_header.RUOD_cp_header.psn!=0){
-            tx_pkt_buffer.insert(std::make_pair(tx_cur_psn,p)); 
-            if(USE_RTO){
-                startPacketTimer(p.PDS_header.RUOD_cp_header.psn, 0); 
+        if(p.PDS_header.RUOD_cp_header.ctl_type == Noop ||
+           p.PDS_header.RUOD_cp_header.ctl_type == Close_cmd ||
+           p.PDS_header.RUOD_cp_header.ctl_type == Close_req ||
+           p.PDS_header.RUOD_cp_header.ctl_type == Negotiation){
+            const auto sequence = p.PDS_header.RUOD_cp_header.psn;
+            tx_pkt_buffer.insert(std::make_pair(sequence,p));
+            TX_pkt_meta meta{};
+            meta.rto = runtime_ ? runtime_->rto_ms : Base_RTO;
+            tx_pkt_map.emplace(sequence,meta);
+            if(rtoEnabled()){
+                startPacketTimer(sequence, 0);
             }
         }
         if (public_net_queue) {
@@ -535,6 +523,7 @@ void PDC::fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt)
     req.next_hdr = meta.next_hdr;
     req.orig_psn = meta.psn;
     req.orig_pdcid = meta.spdcid;
+    req.source_fep = dst_fep;
 
     if (public_ses_req_queue) {
         public_ses_req_queue->push(req);
@@ -559,6 +548,7 @@ void PDC::fwdRsp2SES(SEStoPDS_pkt *pkt)
     rsp.rx_pkt_handle = pkt->bth_header.Semantic_Response_Header.job_id;
     rsp.pkt = *pkt;                         // 响应包内容
     rsp.pkt_len = sizeof(SEStoPDS_pkt);     // 获取结构体大小
+    rsp.source_fep = dst_fep;
     if (public_ses_rsp_queue) {
         LOG_DEBUG(__FUNCTION__, formatLogMessage("加入公共队列"));
         public_ses_rsp_queue->push(rsp);
@@ -681,7 +671,7 @@ void PDC::rxCtrlClearCmd(PDStoNET_pkt *p)
 
     std::cout << getCurrentTimestamp() << formatLogMessage("rx_ctrl_clear_cmd - CLEAR_PSN: ") << clear_psn_cmd << std::endl;
 
-    if (clear_psn_cmd > cack_psn) {
+    if ((clear_psn_cmd - rx_cur_psn) != 0 && (clear_psn_cmd - rx_cur_psn) < 0x80000000u) {
         LOG_ERROR(__FUNCTION__, formatLogMessage("PSN in Clear Command exceeds current cumulative acknowledgment PSN"));
         std::cout << getCurrentTimestamp() << formatLogMessage("Invalid CLEAR_PSN: ") << clear_psn_cmd
                     << ", Current cack_psn: " << cack_psn << std::endl;
@@ -702,6 +692,7 @@ void PDC::rxCtrlClearCmd(PDStoNET_pkt *p)
             ++it;
         }
     }
+    if ((clear_psn_cmd - cack_psn) < 0x80000000u) cack_psn = clear_psn_cmd;
 
     std::stringstream state_info;
     state_info << "Clear Command processing complete - Clear range: 0 到 " << clear_psn_cmd
@@ -770,7 +761,7 @@ void PDC::rxCtrlClearReq(PDStoNET_pkt *p)
         while (buf_it != tx_pkt_buffer.end()) {
             if (buf_it->first <= req_clear_psn) {
                 std::cout << getCurrentTimestamp() << formatLogMessage("清除发送包PSN: ") << buf_it->first << std::endl;
-                if(USE_RTO) stopPacketTimer(buf_it->first);  // 停止计时器
+                if(rtoEnabled()) stopPacketTimer(buf_it->first);  // 停止计时器
                 buf_it = tx_pkt_buffer.erase(buf_it);
             } else {
                 ++buf_it;
@@ -814,9 +805,11 @@ void PDC::rxCtrlClearReq(PDStoNET_pkt *p)
 void PDC::sendCloseReq()
 {
     PDStoNET_pkt pkt = {};  
+    pkt.src_fep = src_fep;
+    pkt.dst_fep = dst_fep;
     pkt.PDS_type = RUOD_cp_header;
     pkt.PDS_header.RUOD_cp_header.type = CP;
-    pkt.PDS_header.RUOD_cp_header.ctl_type = 0x3;
+    pkt.PDS_header.RUOD_cp_header.ctl_type = Close_req;
     pkt.PDS_header.RUOD_cp_header.flags.isrod = 1;
     pkt.PDS_header.RUOD_cp_header.flags.retx = 0;
     pkt.PDS_header.RUOD_cp_header.psn = tx_cur_psn;
@@ -831,7 +824,7 @@ void PDC::sendCloseReq()
     tx_ack_buffer.insert(std::make_pair(tx_cur_psn, pkt));
     tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
 
-    if(USE_RTO){
+    if(rtoEnabled()){
        startPacketTimer(tx_cur_psn, 0);
     }
 
@@ -904,7 +897,9 @@ void PDC::sendCtrlAckReq(PDStoNET_pkt *p){
     p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
     p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;        
-    p->PDS_header.RUOD_cp_header.payload = tx_pkt_buffer.at(clear_psn + 1).SESpkt.bth_header.Standard_Header.msg_id;  //{message_id}
+    const auto original = tx_pkt_buffer.find(clear_psn + 1);
+    p->PDS_header.RUOD_cp_header.payload = original == tx_pkt_buffer.end() ? 0 :
+        static_cast<uint32_t>(original->second.SESpkt.bth_header.Standard_Header.msg_id) << 16;
 }
 
 /**
@@ -1163,7 +1158,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(psn, meta));
 
-    if(USE_RTO){
+    if(rtoEnabled()){
         startPacketTimer(psn, 0); 
     }
 
@@ -1211,7 +1206,7 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
     p.PDS_header.RUOD_ack_header.type = PDS_type::ACK;
     p.PDS_header.RUOD_ack_header.next_hdr = next_hdr;
     p.PDS_header.RUOD_ack_header.flags.retx = retx;
-    p.PDS_header.RUOD_ack_header.flags.req = req;
+    p.PDS_header.RUOD_ack_header.flags.req = gtd_del ? (req | 1u) : req;
     p.PDS_header.RUOD_ack_header.ack_psn_off = psn - cack_psn;
     p.PDS_header.RUOD_ack_header.cack_psn = cack_psn;
     p.PDS_header.RUOD_ack_header.spdcid = SPDCID;
@@ -1471,7 +1466,7 @@ bool PDC::canSafelyClose(){
  */
 void PDC::startPacketTimer(uint32_t psn, uint16_t retry_count)
 {
-    if (!rto_timer_.startTimer(psn, Base_RTO, retry_count)) {
+    if (!rto_timer_.startTimer(psn, runtime_ ? runtime_->rto_ms : Base_RTO, retry_count)) {
         LOG_ERROR("PDC::startPacketTimer", 
                  formatLogMessage("启动计时器失败 - PSN: " + std::to_string(psn)));
     }

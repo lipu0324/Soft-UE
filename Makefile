@@ -1,6 +1,10 @@
 # Build the imported Soft-UE core independently of the legacy provider.
+.DEFAULT_GOAL := core
 CXX = g++
 CXXFLAGS ?= -std=c++17 -O2 -g -pthread
+ENABLE_RDMA ?= $(shell pkg-config --exists libibverbs 2>/dev/null && echo 1 || echo 0)
+CPPFLAGS += -DSOFTUE_HAS_RDMA=$(ENABLE_RDMA)
+RDMA_LIBS = $(if $(filter 1,$(ENABLE_RDMA)),-libverbs,)
 CORE := UET/src
 BUILD := build
 PDS_SOURCES := $(CORE)/Test/PDS_fulltest.cpp \
@@ -10,6 +14,7 @@ PDS_SOURCES := $(CORE)/Test/PDS_fulltest.cpp \
   $(CORE)/PDS/PDC/RTOTimer/RTOTimer.cpp \
   $(CORE)/Network_Layer/UDP_Network_Layer.cpp
 CORE_HEADERS := $(shell find $(CORE) -name '*.hpp' -o -name '*.h')
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 .PHONY: core test-core test-ses-payload test-pds-loopback test-pds-process-loopback test-pds-rdma-queue test-pds-process-rdma-e2e test-pds-udp-queue check-env message-lib rdma-message test-rdma test-udp test-codec test-interactive-udp clean
 core: $(BUILD)/PDS_fulltest
@@ -69,17 +74,19 @@ test-pds-udp-queue: $(BUILD)/pds_udp_queue_loopback_test
 MESSAGE_SOURCES := $(CORE)/Network_Layer/PacketCodec.cpp \
   $(CORE)/Network_Layer/PdsPacketCodec.cpp \
   $(CORE)/Network_Layer/PdsQueueTransport.cpp \
-  $(CORE)/Network_Layer/RdmaChannel.cpp \
   $(CORE)/Network_Layer/UdpChannel.cpp \
   $(CORE)/PDS/MessageStream.cpp \
   $(CORE)/SES/MessageEndpoint.cpp
 MESSAGE_OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(MESSAGE_SOURCES))
+ifeq ($(ENABLE_RDMA),1)
+MESSAGE_OBJECTS += $(BUILD)/$(CORE)/Network_Layer/RdmaChannel.o
+endif
 
 message-lib: $(BUILD)/libsoftue_message.a
 
 $(BUILD)/%.o: %.cpp $(CORE_HEADERS)
 	mkdir -p $(@D)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -I$(CORE) -c $< -o $@
 
 $(BUILD)/libsoftue_message.a: $(MESSAGE_OBJECTS)
 	ar rcs $@ $^
@@ -87,7 +94,7 @@ $(BUILD)/libsoftue_message.a: $(MESSAGE_OBJECTS)
 rdma-message: $(BUILD)/rdma_message_test
 
 $(BUILD)/rdma_message_test: $(CORE)/Test/RdmaMessageTest.cpp $(BUILD)/libsoftue_message.a
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) $< $(BUILD)/libsoftue_message.a -o $@ $(LDFLAGS) -libverbs $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) $< $(BUILD)/libsoftue_message.a -o $@ $(LDFLAGS) $(RDMA_LIBS) $(LDLIBS)
 
 test-rdma: rdma-message
 	python3 scripts/test_rdma_message.py
@@ -109,3 +116,48 @@ check-env:
 
 clean:
 	rm -rf $(BUILD)
+
+# Dependency-light simulation build. No libibverbs, RNIC or privileged sockets
+# are required. CMake provides the equivalent out-of-tree CTest build.
+SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
+  $(CORE)/Network_Layer/PdsQueueTransport.cpp \
+  $(CORE)/Network_Layer/PdsPacketCodec.cpp \
+  $(CORE)/Network_Layer/UetWireCodec.cpp
+SIM_OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(SIM_SOURCES))
+SIM_TESTS := runtime_test memory_registry_test fabric_test uet_wire_test \
+  pdc_ack_test pds_fault_test pds_allocation_test pds_simulation_test endpoint_test
+
+$(BUILD)/libsoftue_protocol.a: $(SIM_OBJECTS)
+	ar rcs $@ $^
+
+define SIM_TEST_RULE
+$(BUILD)/$(1): $(CORE)/Test/$(2) $(CORE_HEADERS) $(BUILD)/libsoftue_protocol.a
+	$$(CXX) $$(CPPFLAGS) $$(CXXFLAGS) -I$$(CORE) $$< $$(BUILD)/libsoftue_protocol.a -o $$@ $$(LDFLAGS) $$(LDLIBS)
+endef
+$(eval $(call SIM_TEST_RULE,runtime_test,RuntimeTest.cpp))
+$(eval $(call SIM_TEST_RULE,memory_registry_test,MemoryRegistryTest.cpp))
+$(eval $(call SIM_TEST_RULE,fabric_test,FabricTest.cpp))
+$(eval $(call SIM_TEST_RULE,uet_wire_test,UetWireCodecTest.cpp))
+$(eval $(call SIM_TEST_RULE,pdc_ack_test,PdcAckTest.cpp))
+$(eval $(call SIM_TEST_RULE,pds_fault_test,PdsFaultTest.cpp))
+$(eval $(call SIM_TEST_RULE,pds_allocation_test,PdsAllocationTest.cpp))
+$(eval $(call SIM_TEST_RULE,pds_simulation_test,PdsSimulationTest.cpp))
+$(eval $(call SIM_TEST_RULE,endpoint_test,EndpointTest.cpp))
+
+.PHONY: simulation test-sim test-scenarios test-requirements test
+$(BUILD)/softue_sim: $(CORE)/Runtime/SimMain.cpp $(CORE_HEADERS) $(BUILD)/libsoftue_protocol.a
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) $< $(BUILD)/libsoftue_protocol.a -o $@ $(LDFLAGS) $(LDLIBS)
+
+simulation: $(BUILD)/softue_sim $(addprefix $(BUILD)/,$(SIM_TESTS))
+test-sim: simulation
+	@set -e; for name in $(SIM_TESTS); do \
+	  ./$(BUILD)/$$name > $(BUILD)/$$name.log 2>&1 || { tail -n 30 $(BUILD)/$$name.log; exit 1; }; \
+	  echo "PASS $$name"; \
+	done
+test-scenarios: $(BUILD)/softue_sim
+	python3 scripts/test_simulation.py --binary $(BUILD)/softue_sim
+
+test-requirements:
+	python3 scripts/check_requirements.py --output $(BUILD)/conformance.json
+
+test: test-sim test-scenarios test-codec test-ses-payload test-pds-loopback test-pds-process-loopback test-interactive-udp test-requirements

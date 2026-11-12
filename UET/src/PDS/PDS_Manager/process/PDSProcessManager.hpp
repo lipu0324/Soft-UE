@@ -75,10 +75,10 @@ public:
         std::condition_variable process_cv;                  // Condition variable
         std::chrono::steady_clock::time_point last_activity; // Last activity time
 
-        PDS_ProcessInfo() : pds_instance(std::make_unique<PDS_Manager>()),
+        explicit PDS_ProcessInfo(UET::Runtime::Services* runtime) : pds_instance(std::make_unique<PDS_Manager>(runtime)),
                             state(STOPPED),
                             should_stop(false),
-                            last_activity(std::chrono::steady_clock::now()) {}
+                            last_activity(runtime ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now()) {}
     };
     // Public queue references (for inter-module communication)
     ThreadSafeQueue<PDStoNET_pkt> *pds_to_net_queue = nullptr;
@@ -128,7 +128,7 @@ public:
     /**
      * @brief Constructor
      */
-    PDSProcessManager() : manager_running(false)
+    explicit PDSProcessManager(UET::Runtime::Services* runtime = nullptr) : manager_running(false), runtime_(runtime)
     {
         LOG_DEBUG(__FUNCTION__, "PDS process manager initialized");
     }
@@ -203,7 +203,7 @@ public:
         }
 
         // Create PDS process information
-        pds_process_info = std::make_unique<PDS_ProcessInfo>();
+        pds_process_info = std::make_unique<PDS_ProcessInfo>(runtime_);
 
         // Initialize PDS instance
         if (!pds_process_info->pds_instance->initPDSM())
@@ -218,11 +218,11 @@ public:
         manager_running.store(true);
         pds_process_info->state.store(RUNNING);
         // Start processing thread
-        pds_process_info->process_thread = std::make_unique<std::thread>(
+        if (!runtime_) pds_process_info->process_thread = std::make_unique<std::thread>(
             &PDSProcessManager::pdsProcessLoop, this);
 
         // Start monitoring thread
-        monitor_thread = std::make_unique<std::thread>(&PDSProcessManager::monitorLoop, this);
+        if (!runtime_) monitor_thread = std::make_unique<std::thread>(&PDSProcessManager::monitorLoop, this);
 
         LOG_DEBUG(__FUNCTION__, "PDS process manager started");
         // Get PDS running status
@@ -260,6 +260,7 @@ public:
         }
 
         LOG_DEBUG(__FUNCTION__, "PDS process manager stopped");
+        if (runtime_) pds_process_info.reset();
     }
 
     /**
@@ -316,10 +317,17 @@ public:
 
     // ==================== 队列交互接口 ====================
 
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        return pds_process_info && pds_process_info->state == RUNNING &&
+               pds_process_info->pds_instance->progressOne();
+    }
+
     // Configure the transport before start(). It must outlive this manager.
     // The PDS process loop drives progress automatically.
     void setNetworkChannel(UET::NetworkLayer::PacketChannel& channel)
     {
+        if (runtime_) throw std::logic_error("blocking legacy channels cannot attach to the event runtime");
         std::lock_guard<std::mutex> lock(manager_mutex);
         if (manager_running.load())
             throw std::logic_error("network channel must be configured before PDS start");
@@ -356,7 +364,7 @@ public:
 
         // Thread-safely add to request queue
         pds_process_info->pds_instance->SES_tx_req_q.push(req);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -374,7 +382,7 @@ public:
 
         // Thread-safely add to response queue
         pds_process_info->pds_instance->SES_tx_rsp_q.push(rsp);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -392,7 +400,7 @@ public:
 
         // Thread-safely add to network layer receive queue
         pds_process_info->pds_instance->Net_rx_pkt_q.push(pkt);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -551,6 +559,7 @@ public:
     }
 
 private:
+    UET::Runtime::Services* runtime_ = nullptr;
     UET::NetworkLayer::PacketChannel* network_channel_ = nullptr;
 
     /**
@@ -585,7 +594,7 @@ private:
                     pds_process_info->pds_instance->progressNetwork(
                         std::chrono::milliseconds(10));
                 }
-                pds_process_info->last_activity = std::chrono::steady_clock::now();
+                if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
                 pds_process_info->state.store(RUNNING);
             }
             catch (const std::exception &e)

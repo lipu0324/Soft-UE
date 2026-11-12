@@ -31,6 +31,8 @@
 
 bool T_PDC::initPDC(uint16_t id)
 {
+    clearAllPacketTimers();
+    acknowledged_tx_.clear();
     // FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -142,7 +144,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     {
         DPDCID = pkt->PDS_header.RUOD_req_header.spdcid; // Set destination PDC ID
         // Determine starting receive PSN based on SYN packet
-        rx_cur_psn = getRxpsn(pkt->PDS_header.RUOD_req_header.psn, pkt->PDS_header.RUOD_req_header.psn_off) - 1;
+        rx_cur_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off - 1;
         cack_psn = rx_cur_psn - 1;
         tx_cur_psn = rx_cur_psn;
         clear_psn = tx_cur_psn - 1;
@@ -310,8 +312,9 @@ void T_PDC::close()
     sendCloseAck();  // Send close acknowledgment
     saveExpectedPSN(); // Save expected PSN
     // Delay 50ms
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!runtime_) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     // Release PDC resources
+    freePDC();
     state = CLOSED;    // Set to closed state
 
     // Add own PDCID to PDC close queue
@@ -525,7 +528,8 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
         {
             std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is ACK_ERROR" << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Duplicate packet, respond with ACK immediately"));
-            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, pkt->PDS_header.RUOD_req_header.psn, nullptr, false); // Duplicate packet, immediately respond with ACK
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn))
+                sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, pkt->PDS_header.RUOD_req_header.psn, nullptr, false);
         }
         else if (error_chk == DROP)
         {
@@ -573,7 +577,9 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
                         << ", unack_cnt: " << unack_cnt;
     LOG_INFO(__FUNCTION__, formatLogMessage(ack_process_info.str()));
 
-    updateTxPsnTracker(ack_psn, pkt->PDS_header.RUOD_ack_header.flags.req,cack_psn); // Update transmit PSN tracker
+    const auto acknowledged = pkt->PDS_header.RUOD_ack_header.next_hdr == UET_HDR_NONE && awaitsSemantic(ack_psn)
+        ? clear_psn : ack_psn;
+    updateTxPsnTracker(acknowledged, pkt->PDS_header.RUOD_ack_header.flags.req,cack_psn);
     LOG_DEBUG(__FUNCTION__, formatLogMessage("Transmit PSN tracker updated"));
 
     if (pkt->PDS_header.RUOD_ack_header.next_hdr != UET_HDR_NONE)

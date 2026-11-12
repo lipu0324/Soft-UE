@@ -106,11 +106,11 @@ private:
         uint16_t pdcid;                                      // PDC identifier
         std::chrono::steady_clock::time_point last_activity; // Last activity time
 
-        IPDC_ProcessInfo(uint16_t id) : ipdc_instance(std::make_unique<I_PDC>()),
+        IPDC_ProcessInfo(uint16_t id, UET::Runtime::Services* services) : ipdc_instance(std::make_unique<I_PDC>(services)),
                                         state(STOPPED),
                                         should_stop(false),
                                         pdcid(id),
-                                        last_activity(std::chrono::steady_clock::now()) {}
+                                        last_activity(services ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now()) {}
     };
 
     // Manager member variables
@@ -118,6 +118,7 @@ private:
     std::mutex manager_mutex;                    // Manager mutex
     std::atomic<bool> manager_running;           // Manager running status
     std::unique_ptr<std::thread> monitor_thread; // Monitoring thread
+    UET::Runtime::Services* runtime_ = nullptr;
 
     // Configuration parameters
     static constexpr std::chrono::milliseconds OPENCHK_INTERVAL{1}; // open_chk call interval
@@ -128,7 +129,7 @@ public:
     /**
      * @brief Constructor
      */
-    IPDCProcessManager() : manager_running(false)
+    explicit IPDCProcessManager(UET::Runtime::Services* runtime = nullptr) : manager_running(false), runtime_(runtime)
     {
         LOG_DEBUG(__FUNCTION__, "IPDC process manager initialized");
     }
@@ -160,7 +161,7 @@ public:
         manager_running.store(true);
 
         // Start monitoring thread
-        monitor_thread = std::make_unique<std::thread>(&IPDCProcessManager::monitorLoop, this);
+        if (!runtime_) monitor_thread = std::make_unique<std::thread>(&IPDCProcessManager::monitorLoop, this);
 
         LOG_DEBUG(__FUNCTION__, "IPDC process manager started");
         return true;
@@ -226,7 +227,7 @@ public:
         }
 
         // Create new process information
-        auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid);
+        auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid, runtime_);
 
         // Initialize IPDC instance
         if (!process_info->ipdc_instance->initPDC(pdcid))
@@ -249,7 +250,7 @@ public:
         LOG_DEBUG_PARAM(__FUNCTION__, "IPDC instance FEP addresses set, PDCID: " << pdcid << ", DST_FEP: " << dst_fep << ", SRC_FEP: " << src_fep);
 
         // Start processing thread
-        process_info->process_thread = std::make_unique<std::thread>(
+        if (!runtime_) process_info->process_thread = std::make_unique<std::thread>(
             &IPDCProcessManager::ipdcProcessLoop, this, process_info.get());
 
         process_info->state.store(RUNNING);
@@ -368,7 +369,7 @@ public:
 
         // Thread-safely add to receive queue - use instance member queue
         process_info->ipdc_instance->rx_pkt_q.push(pkt);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
     /**
@@ -387,7 +388,7 @@ public:
 
         // Use instance member queue
         process_info->ipdc_instance->tx_req_q.push(req);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -407,7 +408,7 @@ public:
 
         // Use instance member queue
         process_info->ipdc_instance->tx_rsp_q.push(rsp);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -604,6 +605,22 @@ public:
         return ipdc->canSafelyClose();
     }
 
+public:
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        std::vector<uint16_t> ids;
+        for (const auto& item : ipdc_processes) ids.push_back(item.first);
+        std::sort(ids.begin(), ids.end());
+        bool worked = false;
+        for (auto id : ids) {
+            auto& info = *ipdc_processes.at(id);
+            if (!info.should_stop && info.state != PAUSED && info.ipdc_instance->hasPendingWork()) {
+                info.ipdc_instance->openChk();
+                worked = true;
+            }
+        }
+        return worked;
+    }
 private:
     /**
      * @brief IPDC process main loop
@@ -631,7 +648,7 @@ private:
             try
             {
                 process_info->ipdc_instance->openChk();
-                process_info->last_activity = std::chrono::steady_clock::now();
+                if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
             }
             catch (const std::exception &e)
             {

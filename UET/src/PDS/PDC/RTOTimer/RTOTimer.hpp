@@ -39,6 +39,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include "../../../Runtime/Runtime.hpp"
 #include "../../../logger/Logger.hpp"
 
 /**
@@ -68,7 +69,8 @@ public:
      * @brief Constructor
      * @param timeout_callback Timeout callback function, parameter is timeout PSN
      */
-    explicit RTOTimer(TimeoutCallback timeout_callback = nullptr);
+    explicit RTOTimer(TimeoutCallback timeout_callback = nullptr,
+                      UET::Runtime::Services* services = nullptr);
 
     /**
      * @brief Destructor
@@ -136,6 +138,12 @@ public:
     void stop();
 
 private:
+    UET::Runtime::Services* services_ = nullptr;
+    std::map<uint32_t, UET::Runtime::TimerId> event_ids_;
+    std::map<uint32_t, uint64_t> event_versions_;
+    uint64_t revision_ = 0;
+    std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
+    void scheduleVirtual(uint32_t psn, uint16_t rto);
     /**
      * @brief Timer monitoring thread function
      */

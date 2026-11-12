@@ -38,6 +38,8 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <tuple>
+#include <limits>
 
 class PDS_Manager
 {
@@ -45,6 +47,8 @@ class PDS_Manager
 private:
 
 public:
+    explicit PDS_Manager(UET::Runtime::Services* runtime = nullptr)
+        : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {}
     TPDCProcessManager TPDC_Processmanager;
     IPDCProcessManager IPDC_Processmanager;
     pdc pdc_list[MAX_PDC * 2];             // PDC list
@@ -67,7 +71,7 @@ public:
     int event_cnt = 0;                         // Event counter
     // PDC queue depth tracking
     int8_t pdc_qdepth[NUM_BANKS][PDCs_PER_BANK] = {0}; // Queue depth counter for each PDC
-    uint8_t BitMap[MAX_PDC] = {0};           // PDC bitmap, each variable represents the number of tasks stored in that PDC
+    uint64_t BitMap[MAX_PDC * 2] = {0}; // Task counters cover both initiator and target ID spaces.
     std::map<uint16_t, uint16_t> msg_map;                     // msgid mapping table
     std::queue<pend_node> pend_q;                             // Pending task queue
 
@@ -128,7 +132,7 @@ public:
         IPDC_Processmanager.setPublicQueues(&PDStoNet, &PDCtoSES_req, &PDCtoSES_rsp, &PDC_close_q);
         LOG_INFO(__FUNCTION__, "Public queue references passed to process managers");
         // Wait 50ms
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!runtime_) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         open_cnt = 0;
         pend_cnt = 0;
@@ -142,9 +146,22 @@ public:
     }
 
 private:
+    UET::Runtime::Services* runtime_ = nullptr;
+    std::map<std::tuple<uint32_t,uint32_t,uint8_t,uint8_t>,uint16_t> tx_contexts_;
+    std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
     std::unique_ptr<UET::NetworkLayer::PdsQueueTransport> network_transport_;
 
 public:
+
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        const bool queued = !SES_tx_rsp_q.empty() || !Net_rx_pkt_q.empty() ||
+                            !SES_tx_req_q.empty() || !PDC_close_q.empty();
+        if (queued) mainChk();
+        const bool initiator = IPDC_Processmanager.progressOne();
+        const bool target = TPDC_Processmanager.progressOne();
+        return queued || initiator || target;
+    }
 
     // IDLE, TX_READY, TX_PROCESSING, PDC and ERROR -> idle
     void mainChk()
@@ -233,7 +250,7 @@ public:
                 else
                     LOG_INFO("rx_pkt", "RX packet type: RUOD establishment request ");
 
-                if (rx->PDS_header.RUOD_req_header.flags.syn == 0 && pdc_list[pdc_id].is_open)
+                if (pdc_id < MAX_PDC * 2 && rx->PDS_header.RUOD_req_header.flags.syn == 0 && pdc_list[pdc_id].is_open)
                 { // If PDC is already open
                     LOG_INFO("rx_pkt", "RX packet target PDC is open");
                     is_fwd_pkt = true; // If packet is valid, can forward
@@ -251,7 +268,8 @@ public:
                         else
                         {
                             uint16_t new_pdcid = muxRx2PDCID(rx->src_fep, rx->dst_fep, rx->PDS_header.RUOD_req_header.spdcid);
-                            allocPDC(new_pdcid, rx->src_fep, rx->dst_fep); // Allocate PDC
+                            if (new_pdcid >= MAX_PDC * 2 ||
+                                (!pdc_list[new_pdcid].is_open && !allocPDC(new_pdcid, rx->src_fep, rx->dst_fep))) return;
                             pdc_id = new_pdcid;
                             LOG_INFO("rx_pkt", "Allocate PDC, ID: " + std::to_string(pdc_id));
                             is_fwd_pkt = true;
@@ -265,7 +283,7 @@ public:
             }
             else if (rx->PDS_type == RUOD_ack_header)
             { // ACK NACK
-                if (pdc_list[rx->PDS_header.RUOD_ack_header.dpdcid].is_open)
+                if (rx->PDS_header.RUOD_ack_header.dpdcid < MAX_PDC * 2 && pdc_list[rx->PDS_header.RUOD_ack_header.dpdcid].is_open)
                 { // If PDC is already open
                     LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(rx->PDS_header.RUOD_ack_header.dpdcid));
                     pdc_id = rx->PDS_header.RUOD_ack_header.dpdcid;
@@ -455,6 +473,7 @@ public:
     {
         // PDC application logic
         // Simple simulation here, actual logic needs implementation based on specific requirements
+        if (pdc_id >= MAX_PDC * 2) return false;
         if (!pdc_list[pdc_id].is_open)
         {
             if (pdc_id >= MAX_PDC)
@@ -514,6 +533,7 @@ public:
             LOG_ERROR("pdc_open", "PDC ID " + std::to_string(pdc_id) + " out of range");
             return false; // PDC not available
         }
+        if (pdc_id >= MAX_PDC * 2) return false;
         if (!pdc_list[pdc_id].is_open)
         {
             LOG_ERROR("pdc_open", "PDC ID " + std::to_string(pdc_id) + " not open");
@@ -561,7 +581,9 @@ public:
     {
         // Create pend_node
         LOG_INFO("create_pend_node", "=====================Creating Wait Node=====================");
-        auto pend_start = std::chrono::steady_clock::now();
+        auto pend_start = runtime_
+            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(runtime_->clock.now()))
+            : std::chrono::steady_clock::now();
         uint32_t pend_start_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_start.time_since_epoch()).count());
         uint32_t pend_time = Pend_Time;
         auto pend_end = pend_start + std::chrono::milliseconds(pend_time);
@@ -604,7 +626,7 @@ public:
             TPDC_Processmanager.pushTxRequest(pdc_id, req);
         }
         // External transmission here, need to interface with actual PDC below
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!runtime_) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         resourceCheck();
         return;
     }
@@ -618,8 +640,8 @@ public:
         // Package as PDS_PDC_rsp
         SES_PDC_rsp rsp = {}; // value-initialize to ensure nack_payload is default-initialized
         rsp.rx_pkt_handle = pkt->rx_pkt_handle;
-        rsp.gtd_del = true;   // Response with payload, guarantee delivery;
-        rsp.ses_nack = false; // Not NACK
+        rsp.gtd_del = pkt->gtd_del;
+        rsp.ses_nack = pkt->ses_nack;
         rsp.pkt = pkt->rsp;
         rsp.rep_len = pkt->rsp_len;
         // TODO: nack_payload
@@ -752,9 +774,11 @@ public:
     bool isPendNodeOverTime(pend_node node)
     {
         // Check if exceeds expected time limit
-        auto pend_end = std::chrono::steady_clock::now();
+        auto pend_end = runtime_
+            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(runtime_->clock.now()))
+            : std::chrono::steady_clock::now();
         uint32_t time_now_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_end.time_since_epoch()).count());
-        return time_now_ms > node.end_time; // Correct logic: current time exceeds end time to be considered timeout
+        return static_cast<int32_t>(time_now_ms - node.end_time) > 0;
     }
 
     /**
@@ -763,6 +787,7 @@ public:
      */
     bool assignPDC(uint16_t msgid, uint16_t pdc_id)
     {
+        if (pdc_id >= MAX_PDC * 2) return false;
         // if (msg_map.find(msgid) == msg_map.end() || msg_map[msgid] != pdc_id) // First is to check existence, second is to check equality
         // {
         //     LOG_ERROR("assign_pdc", "Message ID " + std::to_string(msgid) + " not mapped to PDC");
@@ -796,6 +821,7 @@ public:
         // Simple allocation here for now
         *pdc_id = muxTx2PDCID(job_id, dest_fa, trafficclass, deliverymode); // Calculate tx corresponding pdc_id
         LOG_INFO("assign_pdc", "Allocated PDC ID: " + std::to_string(*pdc_id));
+        if (*pdc_id >= MAX_PDC * 2) return false;
         if (pdc_list[*pdc_id].is_open)
         {
             // If PDC is already open
@@ -838,99 +864,39 @@ public:
     // 4-tuple to PDCID mapping algorithm
     int muxTx2PDCID(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode)
     {
-        LOG_INFO("mux_tx_to_pdc_id", "PDC allocation algorithm - input parameters: " + std::to_string(job_id) +
-                                         ", " + std::to_string(dest_fa) +
-                                         ", " + std::to_string(trafficclass) +
-                                         ", " + std::to_string(deliverymode));
-
-        // 1. Partition by destination FA (banking)
-        uint32_t bank = hash_fa(dest_fa) & BANK_MASK;
-        job_id *= 10;
-        // 2. Construct key and calculate hash once
-        uint64_t key = ((uint64_t)job_id << JOBID_SHIFT) |
-                       ((uint64_t)dest_fa << DEST_FA_SHIFT) |
-                       ((uint64_t)trafficclass << TC_SHIFT) |
-                       ((uint64_t)deliverymode << DM_SHIFT);
-
-        uint16_t h1 = crc16_hash(key, CRC16_POLY1, HASH_SEED1);
-
-        // 3. Map to bank index (use mask, ensure PDCs_PER_BANK is power of 2)
-        uint32_t pick = h1 & (PDCs_PER_BANK - 1);
-
-        // 4. Check selected PDC's queue depth
-        uint8_t q1 = pdc_qdepth[bank][pick];
-        // 5. Check if queue depth exceeds limit
-        if (q1 >= MAX_PDC_QUEUE)
-        {
-            LOG_ERROR("mux_tx_to_pdc_id", "Selected PDC queue depth exceeds limit: " + std::to_string(q1));
-            return -1; // Queue depth out of range
+        const auto key = std::make_tuple(job_id,dest_fa,trafficclass,deliverymode);
+        auto found = tx_contexts_.find(key);
+        if (found != tx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint64_t hash_key = (uint64_t{job_id} << 32) ^ dest_fa ^
+                                 (uint64_t{trafficclass} << 56) ^ (uint64_t{deliverymode} << 48);
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % MAX_PDC;
+        for (uint16_t offset=0;offset<MAX_PDC;++offset) {
+            const uint16_t id = (first+offset)%MAX_PDC;
+            if (!pdc_list[id].is_open) {
+                for (auto old=tx_contexts_.begin();old!=tx_contexts_.end();)
+                    if (old->second==id) old=tx_contexts_.erase(old); else ++old;
+                tx_contexts_[key]=id; return id;
+            }
         }
-
-        // 6. Generate global PDCID
-        uint32_t pdcid = (bank << BANK_SHIFT) | pick;
-
-        // Verify PDCID range
-        if (pdcid >= MAX_PDC)
-        {
-            LOG_ERROR("mux_tx_to_pdc_id", "Generated PDCID out of range: " + std::to_string(pdcid));
-            return -1;
-        }
-
-        // Update selected PDC's queue depth counter (simplified version, should decrement after PDC processing completes)
-        pdc_qdepth[bank][pick]++;
-
-        LOG_INFO("mux_tx_to_pdc_id", "PDC allocation algorithm - Bank: " + std::to_string(bank) +
-                                         ", Selected index: " + std::to_string(pick) + "(depth:" + std::to_string(q1) + ")" +
-                                         ", Final PDCID: " + std::to_string(pdcid));
-        return static_cast<int>(pdcid);
+        return -1;
     }
 
     uint16_t muxRx2PDCID(uint32_t src_addr, uint32_t dest_addr, uint16_t spdcid)
     {
-        LOG_INFO("mux_rx_to_pdc_id", "PDC allocation algorithm - input parameters: " + std::to_string(src_addr) +
-                                         ", " + std::to_string(dest_addr) +
-                                         ", " + std::to_string(spdcid));
-
-        // 1. Partition by destination address (banking)
-        uint32_t bank = hash_fa(dest_addr) & BANK_MASK;
-        spdcid *= 10;
-        // 2. Construct key and calculate hash once
-        uint64_t key = ((uint64_t)src_addr << JOBID_SHIFT) |
-                       ((uint64_t)dest_addr << DEST_FA_SHIFT) |
-                       ((uint64_t)spdcid << TC_SHIFT) |
-                       ((uint64_t)0 << DM_SHIFT); // deliverymode fixed as 0
-
-        uint16_t h1 = crc16_hash(key, CRC16_POLY1, HASH_SEED1);
-
-        // 3. Map to bank index (use mask, ensure PDCs_PER_BANK is power of 2)
-        uint32_t pick = h1 & (PDCs_PER_BANK - 1);
-
-        // 4. Check selected PDC's queue depth
-        uint8_t q1 = pdc_qdepth[bank][pick];
-        // 5. Check if queue depth exceeds limit
-        if (q1 >= MAX_PDC_QUEUE)
-        {
-            LOG_ERROR("mux_rx_to_pdc_id", "Selected PDC queue depth exceeds limit: " + std::to_string(q1));
-            return -1; // Queue depth out of range
+        const auto key = std::make_tuple(src_addr,dest_addr,spdcid);
+        auto found = rx_contexts_.find(key);
+        if (found != rx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint64_t hash_key = (uint64_t{src_addr}<<32) ^ dest_addr ^ (uint64_t{spdcid}<<16);
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1)%MAX_PDC;
+        for (uint16_t offset=0;offset<MAX_PDC;++offset) {
+            const uint16_t id = MAX_PDC+(first+offset)%MAX_PDC;
+            if (!pdc_list[id].is_open) {
+                for (auto old=rx_contexts_.begin();old!=rx_contexts_.end();)
+                    if (old->second==id) old=rx_contexts_.erase(old); else ++old;
+                rx_contexts_[key]=id; return id;
+            }
         }
-
-        // 6. Generate global PDCID
-        uint32_t pdcid = (bank << BANK_SHIFT) | pick;
-
-        // Verify PDCID range
-        if (pdcid >= MAX_PDC + MAX_PDC)
-        {
-            LOG_ERROR("mux_rx_to_pdc_id", "Generated PDCID out of range: " + std::to_string(pdcid));
-            return -1;
-        }
-
-        // Update selected PDC's queue depth counter (simplified version, should decrement after PDC processing completes)
-        pdc_qdepth[bank][pick]++;
-
-        LOG_INFO("mux_rx_to_pdc_id", "PDC allocation algorithm - Bank: " + std::to_string(bank) +
-                                         ", Selected index: " + std::to_string(pick) + "(depth:" + std::to_string(q1) + ")" +
-                                         ", Final PDCID: " + std::to_string(pdcid));
-        return static_cast<int>(pdcid + MAX_PDC);
+        return UINT16_MAX;
     }
 
     int selectPDC2Close()
@@ -986,14 +952,14 @@ public:
                 IPDC_Processmanager.stopIPDCProcess(pdc_id);
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;
-                closing_cnt--;
+                if (closing_cnt > 0) --closing_cnt;
                 break;
             case PDC_TYPE::TPDC:
                 LOG_INFO("pdc_close", "Closing TPDC ID: " + std::to_string(pdc_id));
                 TPDC_Processmanager.stopTPDCProcess(pdc_id);
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;
-                closing_cnt--;
+                if (closing_cnt > 0) --closing_cnt;
                 break;
             default:
                 LOG_ERROR("pdc_close", "Unknown PDC type: " + std::to_string(pdc_id));
@@ -1025,7 +991,7 @@ private:
      */
     PDC_TYPE getPDCType(int pdc_id)
     {
-        if (pdc_id <= MAX_PDC)
+        if (pdc_id < MAX_PDC)
         {
             return PDC_TYPE::IPDC;
         }

@@ -1,0 +1,34 @@
+name: deterministic simulation
+on:
+  push:
+  pull_request:
+
+jobs:
+  simulation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizers: ["OFF", "ON"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: YAML dependency
+        run: python3 -m pip install PyYAML==6.0.2
+      - name: Configure without hardware dependencies
+        run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Debug -DSOFTUE_ENABLE_SANITIZERS=${{ matrix.sanitizers }}
+      - name: Build
+        run: cmake --build build/cmake -j2
+      - name: Test
+        run: ctest --test-dir build/cmake --output-on-failure
+      - name: Check traceability and prevent unsupported profile claims
+        run: python3 scripts/check_requirements.py --output build/conformance.json
+      - name: Preserve experiment and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-evidence-${{ matrix.sanitizers }}
+          path: |
+            build/conformance.json
+            build/cmake/Testing/Temporary/
+            build/simulation-test-*/

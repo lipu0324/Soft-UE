@@ -37,13 +37,14 @@
  * @brief Constructor
  * @param timeout_callback Timeout callback function
  */
-RTOTimer::RTOTimer(TimeoutCallback timeout_callback)
-    : timeout_callback_(std::move(timeout_callback))
+RTOTimer::RTOTimer(TimeoutCallback timeout_callback, UET::Runtime::Services* services)
+    : services_(services)
+    , timeout_callback_(std::move(timeout_callback))
     , running_(false)
 {
     
     running_ = true;
-    monitor_thread_ = std::thread(&RTOTimer::monitorThread, this);
+    if (!services_) monitor_thread_ = std::thread(&RTOTimer::monitorThread, this);
 }
 
 /**
@@ -52,6 +53,35 @@ RTOTimer::RTOTimer(TimeoutCallback timeout_callback)
 RTOTimer::~RTOTimer()
 {
     stop();
+    lifetime_.reset();
+}
+
+void RTOTimer::scheduleVirtual(uint32_t psn, uint16_t rto)
+{
+    auto old = event_ids_.find(psn);
+    if (old != event_ids_.end()) services_->timers.cancel(old->second);
+    const auto version = ++revision_;
+    event_versions_[psn] = version;
+    const std::weak_ptr<int> life = lifetime_;
+    const auto when = UET::Runtime::add_time(services_->clock.now(),
+        static_cast<uint64_t>(rto) * UET::Runtime::kMillisecond);
+    event_ids_[psn] = services_->timers.at(when, [this, life, psn, version] {
+        if (life.expired()) return;
+        TimeoutCallback callback;
+        std::function<void()> wake;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto found = event_versions_.find(psn);
+            if (!running_ || found == event_versions_.end() || found->second != version) return;
+            timers_.erase(psn);
+            event_ids_.erase(psn);
+            event_versions_.erase(found);
+            callback = timeout_callback_;
+            wake = services_->wake;
+        }
+        if (callback) callback(psn);
+        if (wake) wake();
+    });
 }
 
 /**
@@ -64,6 +94,7 @@ RTOTimer::~RTOTimer()
 bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ || base_rto == 0) return false;
     
     // Calculate RTO after exponential backoff
     uint16_t calculated_rto = calculateExponentialBackoff(base_rto, retry_count);
@@ -73,10 +104,13 @@ bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count)
     item.psn = psn;
     item.rto = calculated_rto;
     item.retry_count = retry_count;
-    item.start_time = std::chrono::steady_clock::now();
+    item.start_time = services_
+        ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(services_->clock.now()))
+        : std::chrono::steady_clock::now();
     item.active = true;
     
     timers_[psn] = item;
+    if (services_) scheduleVirtual(psn, calculated_rto);
     
     LOG_DEBUG("RTOTimer::startTimer", 
               "Start timer - PSN: " + std::to_string(psn) + 
@@ -99,6 +133,11 @@ bool RTOTimer::stopTimer(uint32_t psn)
     
     auto it = timers_.find(psn);
     if (it != timers_.end()) {
+        if (services_) {
+            auto event = event_ids_.find(psn);
+            if (event != event_ids_.end()) { services_->timers.cancel(event->second); event_ids_.erase(event); }
+            event_versions_.erase(psn);
+        }
         it->second.active = false;
         timers_.erase(it);
         
@@ -121,11 +160,15 @@ bool RTOTimer::stopTimer(uint32_t psn)
 bool RTOTimer::updateRTO(uint32_t psn, uint16_t new_rto)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_ || new_rto == 0) return false;
     
     auto it = timers_.find(psn);
     if (it != timers_.end() && it->second.active) {
         it->second.rto = new_rto;
-        it->second.start_time = std::chrono::steady_clock::now();
+        it->second.start_time = services_
+            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(services_->clock.now()))
+            : std::chrono::steady_clock::now();
+        if (services_) scheduleVirtual(psn, new_rto);
         
         LOG_DEBUG("RTOTimer::updateRTO", 
                   "Update RTO - PSN: " + std::to_string(psn) + 
@@ -189,6 +232,11 @@ size_t RTOTimer::getActiveTimerCount() const
 void RTOTimer::clearAllTimers()
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (services_) {
+        for (const auto& event : event_ids_) services_->timers.cancel(event.second);
+        event_ids_.clear();
+        event_versions_.clear();
+    }
     
     LOG_INFO("RTOTimer::clearAllTimers", 
              "Clear all timers - total count: " + std::to_string(timers_.size()));
@@ -218,6 +266,7 @@ void RTOTimer::stop()
             monitor_thread_.join();
         }
     }
+    clearAllTimers();
 }
 
 /**
@@ -299,12 +348,9 @@ void RTOTimer::monitorThread()
  */
 uint16_t RTOTimer::calculateExponentialBackoff(uint16_t base_rto, uint16_t retry_count) const
 {
-    if (retry_count == 0) {
-        return base_rto;
-    }
-    
-    // Exponential backoff: RTO = base_rto * (2^retry_count)
-    // Limit maximum RTO to 10 seconds
-    uint32_t calculated_rto = base_rto * (1 << retry_count);
-    return static_cast<uint16_t>(std::min(calculated_rto, 10000u));
+    // Saturate before shifting: a hostile/long-lived retry count must never
+    // cause an oversized or signed shift.
+    const uint64_t calculated = static_cast<uint64_t>(base_rto)
+        << std::min<uint16_t>(retry_count, 16);
+    return static_cast<uint16_t>(std::min<uint64_t>(calculated, 10000));
 }

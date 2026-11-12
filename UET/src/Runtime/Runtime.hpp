@@ -1,0 +1,166 @@
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <map>
+#include <memory>
+#include <queue>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace UET::Runtime {
+
+using Time = uint64_t; // Integer nanoseconds in both runtime implementations.
+using TimerId = uint64_t;
+constexpr Time kMillisecond = 1000000;
+
+inline Time add_time(Time a, Time b) {
+    if (b > std::numeric_limits<Time>::max() - a)
+        throw std::overflow_error("simulation time overflow");
+    return a + b;
+}
+
+struct IClock {
+    virtual ~IClock() = default;
+    virtual Time now() const = 0;
+};
+
+struct ITimerQueue {
+    virtual ~ITimerQueue() = default;
+    virtual TimerId at(Time when, std::function<void()> callback) = 0;
+    virtual bool cancel(TimerId id) = 0;
+};
+
+// Injected per host. It outlives that host and its PDCs. wake must only enqueue
+// work, never re-enter a protocol state machine from a timer callback.
+struct Services {
+    IClock& clock;
+    ITimerQueue& timers;
+    std::function<void()> wake;
+    uint16_t rto_ms = 1;
+};
+
+class EventLoop final : public IClock, public ITimerQueue {
+public:
+    Time now() const override { return now_; }
+    TimerId at(Time when, std::function<void()> callback) override {
+        if (when < now_ || !callback) throw std::invalid_argument("invalid event time or callback");
+        if (next_id_ == std::numeric_limits<TimerId>::max()) throw std::overflow_error("event sequence exhausted");
+        const auto id = ++next_id_;
+        const Key key{when,id};
+        events_.emplace(key,std::move(callback));
+        index_.emplace(id,key);
+        return id;
+    }
+    TimerId after(Time delay, std::function<void()> callback) {
+        return at(add_time(now_,delay),std::move(callback));
+    }
+    bool cancel(TimerId id) override {
+        const auto found = index_.find(id);
+        if (found == index_.end()) return false;
+        events_.erase(found->second);
+        index_.erase(found);
+        return true;
+    }
+    size_t pending() const { return events_.size(); }
+    uint64_t executed() const { return executed_; }
+    size_t run_until(Time limit, size_t budget = 1000000) {
+        if (limit < now_) throw std::invalid_argument("time cannot move backwards");
+        size_t count = 0;
+        while (!events_.empty() && events_.begin()->first.first <= limit) {
+            if (count == budget) throw std::runtime_error("event budget exhausted");
+            auto found = events_.begin();
+            const auto key = found->first;
+            auto callback = std::move(found->second);
+            index_.erase(key.second);
+            events_.erase(found);
+            now_ = key.first;
+            ++count; ++executed_;
+            callback();
+        }
+        now_ = limit;
+        return count;
+    }
+    size_t run(size_t budget = 1000000) {
+        size_t count = 0;
+        while (!events_.empty()) {
+            if (count == budget) throw std::runtime_error("event budget exhausted");
+            count += run_until(events_.begin()->first.first,budget-count);
+        }
+        return count;
+    }
+private:
+    using Key = std::pair<Time,TimerId>;
+    Time now_ = 0;
+    TimerId next_id_ = 0;
+    uint64_t executed_ = 0;
+    std::map<Key,std::function<void()>> events_;
+    std::map<TimerId,Key> index_;
+};
+
+// The same timer engine can be driven explicitly from a real monotonic clock.
+// It never creates a background thread; applications/providers call progress().
+class RealtimeRuntime {
+public:
+    RealtimeRuntime() : epoch_(std::chrono::steady_clock::now()) {}
+    EventLoop& events() { return events_; }
+    void progress(size_t budget = 1000000) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - epoch_).count();
+        events_.run_until(static_cast<Time>(elapsed), budget);
+    }
+private:
+    std::chrono::steady_clock::time_point epoch_;
+    EventLoop events_;
+};
+
+// Stable across standard-library implementations (unlike uniform_distribution).
+class Random {
+public:
+    explicit Random(uint64_t seed) : state_(seed) {}
+    uint64_t next() {
+        auto z = (state_ += 0x9e3779b97f4a7c15ULL);
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+        return z ^ (z >> 31);
+    }
+    bool chance(uint32_t parts_per_million) {
+        if (parts_per_million > 1000000) throw std::invalid_argument("invalid probability");
+        // Rejection avoids modulo bias; decisions remain platform independent.
+        constexpr uint64_t bound = 1000000;
+        constexpr uint64_t threshold = -bound % bound;
+        uint64_t value;
+        do { value = next(); } while (value < threshold);
+        return value % bound < parts_per_million;
+    }
+private:
+    uint64_t state_;
+};
+
+struct TraceEvent {
+    Time time;
+    uint64_t sequence;
+    uint32_t node;
+    std::string event;
+    uint64_t value;
+};
+
+class Trace {
+public:
+    explicit Trace(const IClock& clock, size_t limit = 1000000) : clock_(clock), limit_(limit) {}
+    void record(uint32_t node, std::string event, uint64_t value = 0) {
+        if (events_.size() == limit_) throw std::runtime_error("trace record budget exhausted");
+        events_.push_back({clock_.now(), events_.size(), node, std::move(event), value});
+    }
+    const std::vector<TraceEvent>& events() const { return events_; }
+private:
+    const IClock& clock_;
+    size_t limit_;
+    std::vector<TraceEvent> events_;
+};
+
+} // namespace UET::Runtime

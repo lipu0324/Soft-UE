@@ -35,6 +35,8 @@
  * @return Initialization success status
  */
 bool I_PDC::initPDC(uint16_t id){
+    clearAllPacketTimers();
+    acknowledged_tx_.clear();
     //FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -194,7 +196,7 @@ void I_PDC::openChk(){
         sesTxRsp(&tx_rsp_q.front());
         tx_rsp_q.pop();
     }
-    else if(!tx_req_q.empty()){                 // Process SES layer request transmission
+    else if(!tx_req_q.empty() && !pause_pdc){   // Respect the PDC outstanding-packet window.
         std::cout << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer request transmission");
         sesTxReq(&tx_req_q.front());
@@ -296,7 +298,8 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         else if(error_chk == ACK_ERROR) {
             std::cout << getCurrentTimestamp() << "I_PDC duplicate packet received, sending ACK" << std::endl;
             LOG_INFO(__FUNCTION__, "Duplicate packet, respond with ACK immediately");
-            sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,pkt->PDS_header.RUOD_req_header.psn,nullptr,false);//Immediately respond to duplicate packet
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn))
+                sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,pkt->PDS_header.RUOD_req_header.psn,nullptr,false);
         }
         else if(error_chk == DROP) {
             std::cout << getCurrentTimestamp() << "I_PDC drop packet" << std::endl;
@@ -390,7 +393,9 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
 
         // Pass req flag from ACK packet to update_tx_psn_tracker
         LOG_DEBUG(__FUNCTION__, "Update transmit PSN tracker");
-        updateTxPsnTracker(ack_psn, pkt->PDS_header.RUOD_ack_header.flags.req, cack_psn);
+        const auto acknowledged = pkt->PDS_header.RUOD_ack_header.next_hdr == UET_HDR_NONE && awaitsSemantic(ack_psn)
+            ? clear_psn : ack_psn;
+        updateTxPsnTracker(acknowledged, pkt->PDS_header.RUOD_ack_header.flags.req, cack_psn);
 
         //update_ccc();
         if(pkt->PDS_header.RUOD_ack_header.flags.req == 0x10){//CLOSE_REQ
@@ -509,7 +514,7 @@ void I_PDC::sendClose(){
 
     LOG_INFO(__FUNCTION__, "Construct and send close control packet");
 
-    PDStoNET_pkt ctrl_pkt;
+    PDStoNET_pkt ctrl_pkt{};
     ctrl_pkt.dst_fep = dst_fep;
     ctrl_pkt.src_fep = src_fep;
 
@@ -552,7 +557,7 @@ void I_PDC::sendClose(){
 
     tx_pkt_buffer.insert(std::make_pair(tx_cur_psn, ctrl_pkt));
 
-    if(USE_RTO){
+    if(rtoEnabled()){
         startPacketTimer(tx_cur_psn, 0); 
     }
 
