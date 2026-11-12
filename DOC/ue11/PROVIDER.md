@@ -47,8 +47,11 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 
 READ、取回原子/CAS、浮点原子、tagged、inject、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
-能力。未实现的方法返回明确错误。消息的恢复性 SES 错误重试、接收截断错误的完整
-API 映射和更多 operation flags 仍属于 M3；当前测试不代替 libfabric 全套一致性验收。
+能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
+`olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时
+验证发送端错误、接收端错误 CQ 和后续消息交付。消息的恢复性 SES 错误重试、ordered
+unexpected message 处理和更多 operation flags 仍属于 M3；当前测试不代替 libfabric
+全套一致性验收。
 
 ## 阅读代码的顺序
 

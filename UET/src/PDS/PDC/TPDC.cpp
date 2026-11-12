@@ -178,13 +178,12 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         LOG_DEBUG(__FUNCTION__, formatLogMessage(forward_info.str()));
         fwdReq2SES(handle, meta, &pkt->SESpkt); // Forward to SES layer
         updateRxPsnTracker(&meta);
-        // The final request needs its SES response. Sending a separate plain
-        // ACK first can release the initiator's packet-to-message association
-        // before that response arrives. Intermediate packets may be ACKed here;
-        // the explicit legacy path retains its historical handshake behavior.
+        // Any packet may produce a guaranteed SES error (§3.4.6). Wait for
+        // SES even on an intermediate SYN request: a separate plain ACK would
+        // release its packet-to-message association before the error arrives.
+        // The explicit legacy path retains its historical handshake behavior.
         if (!runtime_ || pkt->SESpkt.bth_type!=Standard_Header ||
-            pkt->SESpkt.bth_header.Standard_Header.version!=0 ||
-            !pkt->SESpkt.bth_header.Standard_Header.eom)
+            pkt->SESpkt.bth_header.Standard_Header.version!=0)
             sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false);
         LOG_INFO(__FUNCTION__, formatLogMessage("Send ACK - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", PSN: " + std::to_string(meta.psn)));
     }

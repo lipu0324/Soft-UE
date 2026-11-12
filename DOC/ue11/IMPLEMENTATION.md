@@ -117,8 +117,10 @@ eager vector. The endpoint reads at most its configurable producer window (eight
 fragments by default) ahead of PDS transmission. PDS retains its own outstanding
 packets and retransmits cached bytes without calling the application reader
 again. `StoragePayload` keeps a local storage object alive; borrowed application
-buffers must remain valid and unchanged until completion, and a timeout alone
-does not retire an outstanding transport operation. Generated payload readers
+buffers must remain valid and unchanged until completion. Error completion stops
+all further application reads and uses one reliable EOM `MSG_ERROR` for an unsent
+tail; a timeout alone does not establish that no remote bytes were placed.
+Generated payload readers
 must be deterministic, nonblocking and nonreentrant. Received adjacent byte
 intervals coalesce; unallocated all-zero sparse pages stay unallocated, while
 writes still clear previously stored bytes.
@@ -146,6 +148,21 @@ regression crosses the full 16-bit message-ID space. An intermediate packet's
 DEFAULT_RESPONSE cannot complete a message; successful completion requires EOM transmission and either an explicit full-length
 response or the default response associated with the EOM PSN. In RUD the explicit
 full-length response may accompany a later gap-filling packet. Early error completion retains the ID while fragments remain.
+
+SES retains the first error through EOM and Clear. Later packets of the rejected
+message cannot consume a new posting or access memory, even when resource state
+changes. Initiator-error and `MSG_ERROR` packets do not access memory; RUD may
+deliver the termination before SOM, and a later SOM still supplies the header
+data for the target error completion. Local payload-reader exceptions generate
+`MSG_ERROR` and a local error completion. SEND truncation consumes its posting,
+places zero bytes, and reports a target `Truncated` completion with the original
+length. The provider maps this to `FI_ETRUNC` and `olen`.
+
+Per-message receive bookkeeping defaults to 4096 records. If it fills, the local
+simulator policy refuses new messages on that PDC until it closes, while existing
+records can finish. This conservative refusal is bounded by the PDC count and
+never silently evicts an error record. It is not the complete ordered unexpected
+message/generation recovery scheme of §3.4.4.7; that scheme remains open.
 
 Simulation addresses are generated deterministically from numeric host IDs.
 `RealtimeRuntime` and `UdpFramePort` provide explicit monotonic and nonblocking

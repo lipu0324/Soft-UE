@@ -31,6 +31,7 @@ int main(int argc,char** argv) {
     CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_TAGGED)) && (info->caps&FI_ATOMIC));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
+    CHECK(info->ep_attr->max_msg_size==UINT32_MAX);
     struct fid_fabric *fabric=NULL; struct fid_domain *domain=NULL;
     struct fid_av *addresses=NULL; struct fid_cq *completions=NULL;
     struct fid_ep *endpoint=NULL; struct fid_mr *region=NULL,*local_only=NULL,*atomic_region=NULL;
@@ -70,7 +71,10 @@ int main(int argc,char** argv) {
     SUCCESS(fi_getname(&endpoint->fid,&local,&local_size));
     CHECK(local.sin_family==AF_INET && local.sin_port);
     SUCCESS(fi_recv(endpoint,buffer+(server?5000:0),32,fi_mr_desc(region),FI_ADDR_UNSPEC,(void*)77));
-    if (server) SUCCESS(fi_recv(endpoint,buffer+5100,8,NULL,FI_ADDR_UNSPEC,(void*)78));
+    if (server) {
+        SUCCESS(fi_recv(endpoint,buffer+5200,1,NULL,FI_ADDR_UNSPEC,(void*)79));
+        SUCCESS(fi_recv(endpoint,buffer+5100,8,NULL,FI_ADDR_UNSPEC,(void*)78));
+    }
     fprintf(stderr,"READY %u %llu %llu %llu\n",ntohs(local.sin_port),(unsigned long long)fi_mr_key(region),
         (unsigned long long)fi_mr_key(local_only),(unsigned long long)fi_mr_key(atomic_region)); fflush(stderr);
     unsigned int peer_port=0; unsigned long long peer_key=0,peer_protected_key=0,peer_atomic_key=0;
@@ -82,11 +86,13 @@ int main(int argc,char** argv) {
     struct sockaddr_in looked_up={0}; size_t lookup_size=sizeof(looked_up);
     SUCCESS(fi_av_lookup(addresses,peer,&looked_up,&lookup_size)); CHECK(looked_up.sin_port==peer_address.sin_port);
     CHECK(fi_read(endpoint,buffer,1,NULL,peer,0,peer_key,NULL)==-FI_ENOSYS);
+    uint8_t oversized_message[1025]; memset(oversized_message,0xaa,sizeof(oversized_message));
     if (!server) {
         for (size_t byte=0;byte<4097;++byte) buffer[16+byte]=(uint8_t)(byte*7);
         SUCCESS(fi_writedata(endpoint,buffer+16,4097,fi_mr_desc(region),123,peer,16,peer_key,(void*)11));
         SUCCESS(fi_atomic(endpoint,increments,512,NULL,peer,0,peer_atomic_key,FI_UINT64,FI_SUM,(void*)17));
         SUCCESS(fi_send(endpoint,"abc",3,NULL,peer,(void*)12));
+        SUCCESS(fi_send(endpoint,oversized_message,sizeof(oversized_message),NULL,peer,(void*)18));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,0,(void*)13));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
     }
@@ -97,8 +103,15 @@ int main(int argc,char** argv) {
         struct fi_cq_data_entry entries[8]; ssize_t count=fi_cq_read(completions,entries,8);
         if (count==-FI_EAVAIL) {
             struct fi_cq_err_entry error={0}; CHECK(fi_cq_readerr(completions,&error,0)==1);
-            CHECK(!server && (error.op_context==(void*)13 || error.op_context==(void*)16));
-            CHECK(error.err==FI_EACCES && (error.prov_errno==0x1c || error.prov_errno==0x18));
+            if (server) {
+                CHECK(error.op_context==(void*)79 && error.err==FI_ETRUNC && error.prov_errno==7);
+                CHECK((error.flags&FI_RECV) && error.len==0 && error.olen==sizeof(oversized_message));
+                CHECK(error.buf==buffer+5200 && buffer[5200]==0);
+            } else if (error.op_context==(void*)18) CHECK(error.prov_errno==7);
+            else {
+                CHECK(error.op_context==(void*)13 || error.op_context==(void*)16);
+                CHECK(error.err==FI_EACCES && (error.prov_errno==0x1c || error.prov_errno==0x18));
+            }
             ++errors;
         } else if (count>0) {
             for (ssize_t index=0;index<count;++index) {
@@ -112,13 +125,13 @@ int main(int argc,char** argv) {
                 } else { CHECK(entry->flags&(FI_SEND|FI_WRITE)); ++send_completions; }
             }
         } else CHECK(count==-FI_EAGAIN);
-        if (server && receives==1 && remote_writes==1 && !reply_started) {
+        if (server && receives==1 && remote_writes==1 && errors==1 && !reply_started) {
             CHECK(!memcmp(buffer+5000,"abc",3));
             for (size_t byte=0;byte<4097;++byte) CHECK(buffer[16+byte]==(uint8_t)(byte*7));
             for (size_t element=0;element<512;++element) CHECK(counters[element]==1);
             SUCCESS(fi_send(endpoint,"reply",5,NULL,peer,(void*)14)); reply_started=1;
         }
-        if (!server && send_completions==3 && errors==2 && receives==1 && !done_started) {
+        if (!server && send_completions==3 && errors==3 && receives==1 && !done_started) {
             CHECK(!memcmp(buffer,"reply",5));
             SUCCESS(fi_send(endpoint,"done",4,NULL,peer,(void*)15)); done_started=1;
         }

@@ -126,7 +126,7 @@ SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
 SIM_OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(SIM_SOURCES))
 SIM_TESTS := runtime_test memory_registry_test fabric_test uet_wire_test \
   pdc_ack_test pds_fault_test pds_recovery_test uud_delivery_test rud_window_test \
-  pdc_lifecycle_test native_atomic_test context_reuse_test message_retirement_test addressing_test resource_lifecycle_test control_ack_test message_completion_test streaming_payload_test \
+  pdc_lifecycle_test native_atomic_test context_reuse_test message_retirement_test addressing_test resource_lifecycle_test control_ack_test message_completion_test streaming_payload_test semantic_error_test \
   pds_allocation_test pds_simulation_test endpoint_test
 
 $(BUILD)/libsoftue_protocol.a: $(SIM_OBJECTS)
@@ -154,6 +154,7 @@ $(eval $(call SIM_TEST_RULE,resource_lifecycle_test,ResourceLifecycleTest.cpp))
 $(eval $(call SIM_TEST_RULE,control_ack_test,ControlAckTest.cpp))
 $(eval $(call SIM_TEST_RULE,message_completion_test,MessageCompletionTest.cpp))
 $(eval $(call SIM_TEST_RULE,streaming_payload_test,StreamingPayloadTest.cpp))
+$(eval $(call SIM_TEST_RULE,semantic_error_test,SemanticErrorTest.cpp))
 $(eval $(call SIM_TEST_RULE,pds_allocation_test,PdsAllocationTest.cpp))
 $(eval $(call SIM_TEST_RULE,pds_simulation_test,PdsSimulationTest.cpp))
 $(eval $(call SIM_TEST_RULE,endpoint_test,EndpointTest.cpp))

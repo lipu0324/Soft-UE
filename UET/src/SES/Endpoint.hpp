@@ -11,7 +11,7 @@
 namespace UET::SES {
 
 enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, Send=5, DatagramSend=7 };
-enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted };
+enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 struct Operation {
     OperationType type = OperationType::Send;
     pdc_mode delivery_mode = ROD; // Reliable ordered by default; RUD permits packet reordering.
@@ -39,6 +39,7 @@ struct Completion {
     bool receive;
     std::optional<uint64_t> immediate_data;
     uint8_t remote_generation=0;
+    uint32_t original_length=0; // Before receive truncation; never a placed-byte count.
 };
 struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
@@ -59,10 +60,11 @@ class Endpoint {
 public:
     Endpoint(uint32_t node, Runtime::PdsHost& host, Runtime::EventLoop& loop,
              Runtime::Trace& trace, size_t payload_mtu=1024,
-             Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr,size_t submission_window=8)
+             Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr,size_t submission_window=8,
+             size_t receive_message_limit=4096)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
-          memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window) {
-        if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_) throw std::invalid_argument("invalid SES configuration");
+          memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit) {
+        if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_) throw std::invalid_argument("invalid SES configuration");
         host_.set_request_handler([this](const PDC_SES_req& request) { receive(request); });
         host_.set_response_handler([this](const PDC_SES_rsp& response) { respond(response); });
         host_.set_context_event_handler([this](const Runtime::PdcEvent& event) { context_event(event); });
@@ -179,7 +181,7 @@ public:
         host_.set_context_event_handler({});
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
-        incoming_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
+        incoming_.clear(); exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
     }
 private:
     struct SourceMessage {
@@ -189,6 +191,7 @@ private:
         uint64_t offset;
         size_t queued;
         bool all_submitted;
+        bool aborting=false;
     };
     struct Pending {
         uint64_t id,context; uint32_t length; Runtime::TimerId timer; uint32_t peer,job;
@@ -215,6 +218,10 @@ private:
         uint32_t completion_psn=0;
         uint16_t resource_index=1,wire_pid=1;
         bool relative_addressing=true;
+        bool initialized=false,matched_receive=false,completion_reported=false,end_seen=false;
+        std::optional<SemanticReturnCode> first_error;
+        uint8_t error_generation=0;
+        CompletionStatus target_error=CompletionStatus::RemoteError;
     };
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
     uint32_t node_;
@@ -236,8 +243,13 @@ private:
     std::map<ConnectionKey,uint32_t> peer_cumulative_acks_;
     std::deque<Posted> posted_;
     std::map<MessageKey,Incoming> incoming_;
+    // Simulator resource policy: if per-message bookkeeping fills up, refuse
+    // new messages on that bounded PDC until close. Never evict an error record
+    // and accidentally place its late fragments into a newly posted receive.
+    std::set<ConnectionKey> exhausted_contexts_;
     std::deque<Completion> completions_;
     size_t submission_window_,queued_fragments_=0;
+    size_t receive_message_limit_;
     std::map<uint16_t,SourceMessage> sources_;
     std::deque<uint16_t> submission_order_;
 
@@ -256,15 +268,15 @@ private:
             const bool atomic=operation.type==OperationType::Atomic;
             const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
             const auto fragment_capacity=mtu_-(mtu_%atomic_width);
-            const auto count=static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
+            auto count=transfer.aborting?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
             SES_PDS_req request{};
             request.src_fep=node_; request.dst_fep=operation.peer;
             request.mode=datagram?UUD:operation.delivery_mode;
             request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
             request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
             auto& header=request.pkt.bth_header.Standard_Header;
-            header.opcode=static_cast<uint8_t>(operation.type); header.version=0;
-            header.som=transfer.offset==0; header.eom=transfer.offset+count==transfer.length;
+            header.opcode=transfer.aborting?0x0f:static_cast<uint8_t>(operation.type); header.version=0;
+            header.som=transfer.offset==0; header.eom=transfer.aborting || transfer.offset+count==transfer.length;
             header.dc=!datagram; header.rel=operation.relative_addressing; header.ri_generation=operation.target_generation;
             header.msg_id=datagram?0:message; header.job_id=operation.job; header.PIDonFEP=operation.target_pid;
             header.resource_index=operation.target_resource; header.buffer_offset=operation.remote_offset;
@@ -273,7 +285,7 @@ private:
                 header.hd=1;
                 if (!transfer.offset) header.diff.som_true.header_data=*operation.immediate_data;
             }
-            if (atomic) {
+            if (atomic && !transfer.aborting) {
                 request.pkt.eth_type=Atomic_Operation_Extension_Header;
                 auto& extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
                 extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
@@ -284,12 +296,23 @@ private:
                 header.diff.som_false.message_offset=static_cast<uint32_t>(transfer.offset);
             }
             request.pkt.payload.resize(count);
-            if (count) transfer.source->read(transfer.offset,request.pkt.payload.data(),count);
-            if (atomic) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
-            request.pkt_len=static_cast<uint16_t>(44+(atomic?4:0)+count);
+            bool read_failed=false;
+            try {
+                if (count) transfer.source->read(transfer.offset,request.pkt.payload.data(),count);
+            } catch (...) {
+                // A local reader failure is an initiator error, not a corrupt
+                // partial payload. Preserve the header and terminate reliably
+                // using MSG_ERROR (§3.4.6.4.1), without exposing these bytes.
+                read_failed=true; transfer.aborting=true; transfer.source.reset();
+                count=0; request.pkt.payload.clear(); header.opcode=0x0f; header.eom=1;
+                if (!header.som) header.diff.som_false.payload_length=0;
+            }
+            if (atomic && !transfer.aborting) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
+            request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:0)+count);
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
             if (header.eom) { transfer.all_submitted=true; submission_order_.pop_front(); }
+            if (read_failed) finish(message,CompletionStatus::LocalError,0,static_cast<uint8_t>(SemanticReturnCode::InitiatorError));
         }
     }
     void fragment_transmitted(uint16_t message) {
@@ -312,6 +335,15 @@ private:
         const auto it=pending_.find(message);
         if (it==pending_.end()) return;
         loop_.cancel(it->second.timer);
+        if (status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess) {
+            if (auto source=sources_.find(message);source!=sources_.end()) {
+                // §3.4.6.4.1: already queued fragments own byte copies. Stop
+                // reading the application before exposing its error completion;
+                // replace the unsent tail by one reliable EOM MSG_ERROR packet.
+                source->second.source.reset();
+                source->second.aborting=!source->second.all_submitted;
+            }
+        }
         completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
         trace_.record(node_,"operation_complete",it->second.id);
         if (!it->second.is_datagram && !closed_) {
@@ -382,6 +414,7 @@ private:
                         discard_source(lease->first); lease=message_leases_.erase(lease);
                     } else ++lease;
                 peer_cumulative_acks_.erase(connection);
+                exhausted_contexts_.erase(connection);
                 feed_submissions();
             }
         }
@@ -437,102 +470,155 @@ private:
         }
         return SemanticReturnCode::Uncorrectable;
     }
+    // First-error state belongs to a whole message, not to its first packet.
+    // §3.4.6.1: arrival order chooses the first error, including in RUD.
+    // Retain it through EOM + PDS Clear so a later posting cannot rescue a
+    // rejected message or receive any of its remaining bytes.
+    void report_receive_error(Incoming& message) {
+        if (!message.first_error || message.completion_reported) return;
+        const bool immediate_completion=message.has_immediate && message.immediate_data.has_value();
+        if (!message.matched_receive && !immediate_completion) return;
+        Completion completion{0,message.context,message.target_error,static_cast<uint32_t>(message.received),
+            static_cast<uint8_t>(*message.first_error),true,
+            immediate_completion?message.immediate_data:std::optional<uint64_t>{},message.error_generation};
+        completion.original_length=message.total;
+        completions_.push_back(completion); message.completion_reported=true;
+    }
+    void reject_message(const PDC_SES_req& request,Incoming& message,SemanticReturnCode code,
+                        std::optional<uint8_t> generation={}) {
+        if (!message.first_error) {
+            message.first_error=code;
+            message.error_generation=generation.value_or(request.pkt.bth_header.Standard_Header.ri_generation);
+        }
+        message.completed=message.end_seen;
+        report_receive_error(message);
+        reply(request,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation);
+    }
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
-        const auto& semantic_header=request.pkt.bth_header.Standard_Header;
-        if (semantic_header.rel && !memory_.has_job(semantic_header.job_id)) { reply(request,SemanticReturnCode::BadJob,0); return; }
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const MessageKey key{request.source_fep,request.PDCID,header.job_id,header.initiator,
+            header.msg_id,request.connection_start_psn};
+        const ConnectionKey connection{request.source_fep,request.PDCID,request.connection_start_psn};
+        auto found=incoming_.find(key);
+        if (found==incoming_.end()) {
+            if (exhausted_contexts_.count(connection) || incoming_.size()>=receive_message_limit_) {
+                exhausted_contexts_.insert(connection);
+                reply(request,SemanticReturnCode::Undeliverable,0); return;
+            }
+            Incoming incoming{static_cast<uint8_t>(header.opcode),static_cast<uint32_t>(header.request_length),
+                header.match_bits,header.buffer_offset,0,0};
+            incoming.has_immediate=header.hd;
+            found=incoming_.emplace(key,std::move(incoming)).first;
+        }
+        auto& message=found->second;
+        if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
+        if (header.som && header.hd) message.immediate_data=header.diff.som_true.header_data;
+        if (message.first_error) {
+            // A RUD EOM/MSG_ERROR may arrive before SOM and before its header
+            // data. Capture that data above, but never perform another lookup
+            // or memory access for an already rejected message.
+            reject_message(request,message,*message.first_error); return;
+        }
+        const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
+            reject_message(request,message,code,generation);
+        };
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        const bool message_error=header.opcode==0x0f;
+        const bool poisoned=header.ie || message_error;
         ResourceSelection selected{};
         try {
-            selected=resources_.resolve(semantic_header.job_id,semantic_header.rel,semantic_header.PIDonFEP,
-                semantic_header.resource_index,semantic_header.opcode==5?ResourceSpace::Send:ResourceSpace::Rma,
-                semantic_header.ri_generation);
-        } catch (const AddressingError& error) { reply(request,error.code,0,true,error.generation); return; }
-        if (semantic_header.version || semantic_header.ie || (semantic_header.hd && semantic_header.opcode!=1) ||
-            (semantic_header.opcode!=0 && semantic_header.opcode!=1 && semantic_header.opcode!=3 && semantic_header.opcode!=5)) {
-            reply(request,SemanticReturnCode::UnsupportedOperation,0); return;
+            const auto original_opcode=message_error?message.opcode:static_cast<uint8_t>(header.opcode);
+            selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                original_opcode==5?ResourceSpace::Send:ResourceSpace::Rma,header.ri_generation);
+        } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
+        if (header.version || (header.hd && header.opcode!=1 && !message_error) ||
+            (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && !message_error) ||
+            (message_error && !header.eom)) {
+            reject(SemanticReturnCode::UnsupportedOperation); return;
         }
-        const auto offset=semantic_header.som?0:semantic_header.diff.som_false.message_offset;
+        const auto offset=header.som?0:header.diff.som_false.message_offset;
         const auto count=request.pkt.payload.size();
         const auto& atomic_extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
-        if (semantic_header.opcode==3) {
-            if (atomic_extension.atomic_datatype>7) { reply(request,SemanticReturnCode::AtomicUnsupportedDatatype,0); return; }
+        if (header.opcode==3 && !poisoned) {
+            if (atomic_extension.atomic_datatype>7) { reject(SemanticReturnCode::AtomicUnsupportedDatatype); return; }
             if (atomic_extension.atomic_opcode>12 || atomic_extension.atomic_opcode==11 ||
-                atomic_extension.semantic_contol || atomic_extension.rsvd) { reply(request,SemanticReturnCode::AtomicUnsupportedOperation,0); return; }
+                atomic_extension.semantic_contol || atomic_extension.rsvd) { reject(SemanticReturnCode::AtomicUnsupportedOperation); return; }
             const auto width=integer_atomic_width(static_cast<IntegerAtomicDatatype>(atomic_extension.atomic_datatype));
-            if (semantic_header.request_length%width || count%width || offset%width) { reply(request,SemanticReturnCode::AtomicUnsupportedSize,0); return; }
-            if (semantic_header.buffer_offset%width) { reply(request,SemanticReturnCode::AtomicUnaligned,0); return; }
+            if (header.request_length%width || count%width || offset%width) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
+            if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
         }
-        if (offset>semantic_header.request_length || count>semantic_header.request_length-offset ||
-            (!semantic_header.som && count!=semantic_header.diff.som_false.payload_length) ||
-            (semantic_header.eom && offset+count!=semantic_header.request_length) || (semantic_header.opcode==0 && semantic_header.request_length)) {
-            reply(request,SemanticReturnCode::UnsupportedSize,0); return;
+        if (offset>header.request_length || count>header.request_length-offset ||
+            (!header.som && count!=header.diff.som_false.payload_length) ||
+            (!message_error && header.eom && offset+count!=header.request_length) ||
+            (header.opcode==0 && header.request_length)) {
+            reject(SemanticReturnCode::UnsupportedSize); return;
         }
-        const MessageKey key{request.source_fep,request.PDCID,semantic_header.job_id,semantic_header.initiator,
-            semantic_header.msg_id,request.connection_start_psn};
         try {
-            auto found=incoming_.find(key);
-            if (found==incoming_.end()) {
-                if (incoming_.size()>=4096) { reply(request,SemanticReturnCode::Undeliverable,0); return; }
-                Incoming incoming{static_cast<uint8_t>(semantic_header.opcode),static_cast<uint32_t>(semantic_header.request_length),semantic_header.match_bits,semantic_header.buffer_offset,
-                                  selected.absolute_pid,0};
-                incoming.resource_index=selected.resource_index; incoming.wire_pid=semantic_header.PIDonFEP;
-                incoming.relative_addressing=semantic_header.rel;
-                if (semantic_header.opcode==1) memory_.authorize(semantic_header.job_id,selected.absolute_pid,semantic_header.match_bits,
-                    semantic_header.buffer_offset,semantic_header.request_length,Access::Write,selected.resource_index);
-                else if (semantic_header.opcode==3) {
-                    const auto& region=memory_.authorize(semantic_header.job_id,selected.absolute_pid,semantic_header.match_bits,
-                        semantic_header.buffer_offset,semantic_header.request_length,Access::Atomic,selected.resource_index);
-                    if ((region.permissions&3u)!=3u) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
-                    incoming.atomic_operation=atomic_extension.atomic_opcode;
-                    incoming.atomic_datatype=atomic_extension.atomic_datatype;
-                }
-                else if (semantic_header.opcode==5) {
-                    auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& posted_receive) {
-                        return (!semantic_header.rel || posted_receive.job==semantic_header.job_id) && posted_receive.pid==selected.absolute_pid &&
-                            posted_receive.resource_index==selected.resource_index;
+            if (!message.initialized) {
+                message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
+                message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
+                if (header.opcode==1 && !poisoned)
+                    memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
+                        header.buffer_offset,header.request_length,Access::Write,selected.resource_index);
+                else if (header.opcode==3 && !poisoned) {
+                    const auto& region=memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
+                        header.buffer_offset,header.request_length,Access::Atomic,selected.resource_index);
+                    if ((region.permissions&3u)!=3u) { reject(SemanticReturnCode::OperationViolation); return; }
+                    message.atomic_operation=atomic_extension.atomic_opcode;
+                    message.atomic_datatype=atomic_extension.atomic_datatype;
+                } else if (header.opcode==5) {
+                    auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+                        return (!header.rel || receive.job==header.job_id) && receive.pid==selected.absolute_pid &&
+                            receive.resource_index==selected.resource_index;
                     });
-                    if (posted==posted_.end()) { reply(request,SemanticReturnCode::NoMatch,0); return; }
-                    if (posted->capacity<semantic_header.request_length) { reply(request,SemanticReturnCode::UnsupportedSize,0); return; }
-                    memory_.authorize(semantic_header.job_id,posted->pid,posted->key,posted->offset,semantic_header.request_length,
-                        Access::Write,selected.resource_index);
-                    incoming.key=posted->key; incoming.base=posted->offset; incoming.context=posted->context;
-                    posted_.erase(posted);
+                    if (posted==posted_.end()) {
+                        reject(poisoned?SemanticReturnCode::InitiatorError:SemanticReturnCode::NoMatch); return;
+                    }
+                    // Bind the posting before reporting truncation or initiator
+                    // failure, so the target gets one error completion too.
+                    const auto receive=*posted; posted_.erase(posted);
+                    message.key=receive.key; message.base=receive.offset; message.context=receive.context;
+                    message.matched_receive=true;
+                    if (!poisoned && receive.capacity<header.request_length) {
+                        message.target_error=CompletionStatus::Truncated;
+                        reject(SemanticReturnCode::UnsupportedSize); return;
+                    }
+                    if (!poisoned) memory_.authorize(header.job_id,receive.pid,receive.key,receive.offset,
+                        header.request_length,Access::Write,selected.resource_index);
                 }
-                incoming.has_immediate=semantic_header.hd;
-                found=incoming_.emplace(key,std::move(incoming)).first;
+                message.initialized=true;
             }
-            auto& message=found->second;
+            if (poisoned) { reject(SemanticReturnCode::InitiatorError); return; }
             if (message.pid!=selected.absolute_pid || message.resource_index!=selected.resource_index ||
-                message.wire_pid!=semantic_header.PIDonFEP || message.relative_addressing!=bool(semantic_header.rel)) {
-                reply(request,SemanticReturnCode::OperationViolation,0); return;
+                message.wire_pid!=header.PIDonFEP || message.relative_addressing!=bool(header.rel) ||
+                message.opcode!=header.opcode || message.total!=header.request_length) {
+                reject(SemanticReturnCode::OperationViolation); return;
             }
-            if (message.opcode!=semantic_header.opcode || message.total!=semantic_header.request_length) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
-            if ((semantic_header.opcode==1 || semantic_header.opcode==3) &&
-                (message.key!=semantic_header.match_bits || message.base!=semantic_header.buffer_offset || message.has_immediate!=bool(semantic_header.hd))) {
-                reply(request,SemanticReturnCode::OperationViolation,0); return;
+            if ((header.opcode==1 || header.opcode==3) &&
+                (message.key!=header.match_bits || message.base!=header.buffer_offset || message.has_immediate!=bool(header.hd))) {
+                reject(SemanticReturnCode::OperationViolation); return;
             }
-            if (semantic_header.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
-                message.atomic_datatype!=atomic_extension.atomic_datatype)) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
-            if (semantic_header.som && semantic_header.hd) message.immediate_data=semantic_header.diff.som_true.header_data;
+            if (header.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
+                message.atomic_datatype!=atomic_extension.atomic_datatype)) { reject(SemanticReturnCode::OperationViolation); return; }
             if (message.completed) { reply(request,SemanticReturnCode::Ok,message.total); return; }
             auto position=message.segments.lower_bound(offset);
             if (position!=message.segments.end() && position->first==offset && position->second==count) return;
             if ((position!=message.segments.end() && offset+count>position->first) ||
                 (position!=message.segments.begin() && std::prev(position)->first+std::prev(position)->second>offset)) {
-                reply(request,SemanticReturnCode::OperationViolation,0); return;
+                reject(SemanticReturnCode::OperationViolation); return;
             }
-            if (semantic_header.opcode==3) {
+            if (header.opcode==3) {
                 auto operands=request.pkt.payload;
                 convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
-                memory_.atomic_elements(semantic_header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
+                memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
                     static_cast<IntegerAtomicOperation>(message.atomic_operation),
                     static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index);
-            } else if (semantic_header.opcode!=0) memory_.write(semantic_header.job_id,message.pid,message.key,
+            } else if (header.opcode!=0) memory_.write(header.job_id,message.pid,message.key,
                 Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
-            // Keep disjoint received intervals rather than one node per packet.
-            // Ordered multi-gigabyte messages then retain one interval; RUD
-            // retains only its actual holes, bounded by the PDS receive window.
+            // Coalesce adjacent intervals: ordered large messages retain one
+            // record; RUD retains only holes allowed by the PDS receive window.
             uint32_t merged_offset=offset,merged_length=static_cast<uint32_t>(count);
             if (position!=message.segments.begin()) {
                 auto previous=std::prev(position);
@@ -546,15 +632,14 @@ private:
             }
             message.segments.emplace(merged_offset,merged_length); message.received+=count;
             if (message.received==message.total) {
-                message.completed=true;
-                message.completion_psn=request.orig_psn;
-                if (semantic_header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
-                if (semantic_header.opcode==1 && message.immediate_data)
+                message.completed=true; message.completion_psn=request.orig_psn;
+                if (header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
+                if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 trace_.record(node_,"memory_delivered",message.total);
                 reply(request,SemanticReturnCode::Ok,message.total);
             } else reply(request,SemanticReturnCode::Ok,0,false);
-        } catch (const MemoryAccessError& error) { reply(request,memory_code(error.code),0); }
+        } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
     void receive_datagram(const PDC_SES_req& request) {
         if (request.pkt.bth_type!=Standard_Header) return;

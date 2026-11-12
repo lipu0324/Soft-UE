@@ -11,6 +11,6 @@ enum class SemanticReturnCode : uint8_t {
     AtomicUnsupportedDatatype=0x10, AtomicUnsupportedSize=0x11, AtomicUnaligned=0x12,
     PermissionViolation=0x17, OperationViolation=0x18, BadIndex=0x19,
     BadPid=0x1a, BadJob=0x1b, BadMemoryKey=0x1c, BadAddress=0x1d,
-    Cancelled=0x1e, Undeliverable=0x1f, Uncorrectable=0x20
+    Cancelled=0x1e, Undeliverable=0x1f, Uncorrectable=0x20, InitiatorError=0x23
 };
 } // namespace UET::SES

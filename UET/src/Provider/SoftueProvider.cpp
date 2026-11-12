@@ -169,6 +169,7 @@ int completion_error(const SES::Completion& completion) {
     case SES::CompletionStatus::Cancelled: return FI_ECANCELED;
     case SES::CompletionStatus::ResourceExhausted: return FI_ENOSPC;
     case SES::CompletionStatus::Unsupported: return FI_EOPNOTSUPP;
+    case SES::CompletionStatus::Truncated: return FI_ETRUNC;
     case SES::CompletionStatus::RemoteError:
         return completion.remote_code==0x1c || completion.remote_code==0x17 || completion.remote_code==0x18?
             FI_EACCES:FI_EIO;
@@ -188,6 +189,8 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
         fi_cq_err_entry error{};
         error.op_context=application.context; error.flags=application.flags; error.buf=application.buffer;
         error.len=completion.length; error.err=completion_error(completion); error.prov_errno=completion.remote_code;
+        if (completion.original_length>completion.length) error.olen=completion.original_length-completion.length;
+        if (completion.immediate_data) { error.flags|=FI_REMOTE_CQ_DATA; error.data=*completion.immediate_data; }
         queue.errors.push_back(error);
     }
 }
