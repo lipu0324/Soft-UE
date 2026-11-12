@@ -232,6 +232,34 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0211-001 | §3.4.2.6.1，use-once 生命周期 | 一条消息独占已匹配 buffer，其他消息不可再用；保留到该消息完成才还给应用。支持 SEND/RECV，支持 tag 时也覆盖 tag。 | native posted receive 绑定 registration identity 并在最终完成前保留，撤销/重复/晚到有回归；tag 与 RMA use-once 仍未实现。 |
 | UE11-p0212-001 | §3.4.2.6.3，HPC tag 匹配 | HPC 目标支持 tagged；使用 match_bits 和 initiator，是否硬件加速不影响要求。 | M5 未实现；后续测试同时验证 tag 与 source criteria，不能只比较 tag。 |
 
-复核进度为上述 160 个候选的分类与义务拆分；其余 569 个候选、表格/算法的额外
+## 第 161～180 个候选
+
+本批检查消息顺序、MTU、标准头和 DS 重启规则。协议配置的标准 Payload MTU
+与教学测试使用的小片段大小要分开记录，不能把任意小整数称为标准 MTU 配置。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0212-002 | §3.4.2.6.4，目标 memory key | RMA 支持把 match_bits 用作 memory key，并遵循 libfabric 定义的结构。 | native/provider 标准头已有 key 映射及授权回归；不把内部容器选择当作线格式要求。 |
+| UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 模式映射仍待修正；M5 初始/后续消息的关联尚未实现，普通分片 WRITE 不代替该条件。 |
+| UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 现有应用 FIFO 可提供保守串行，但 FI_FENCE API flag 仍缺失；需按实际配置分别验收混合模式。 |
+| UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | READ/WAR 及结果缓存未实现；不能用按请求顺序发送 READ 请求证明结果生命周期正确。 |
+| UE11-p0214-001 | §3.4.2.7.1.3，消息内连续性 | SOM 首 PSN 与 offset0；后包 PSN 连续、offset=(N−1)×Payload MTU；最后包 EOM；同 PDC 两条消息不交错。 | native FIFO producer、PDC PSN 及大消息分片已有回归；M5 多消息/重启格式仍需各自测试。 |
+| UE11-p0214-002 | §3.4.2.7.1.3，线端顺序 | ROD 按 PSN 顺序发往线端；RUD 可任意顺序。 | 初始 FIFO、GoBackN 顺序和回绕已测试；不同 NACK 延迟、NIC 背压与重传组合仍须持续覆盖。 |
+| UE11-p0215-001 | §3.4.2.7.3，READ 响应顺序 | 同 PDC 上 ROD/RODL 的带数据 READ 响应按请求接收顺序生成。 | M5/M8 缺失；异步 SES 必须显式维护顺序，不能依赖当前同步 WRITE 实现的回调顺序。 |
+| UE11-p0216-001 | §3.4.2.11，Payload MTU 能力/默认 | 支持 4096；1024/2048/8192 为 SHOULD；规范默认 4096。 | native 可配置并测试 4096/8192；现有入口默认 1024、研究测试还使用非标准小片段，需明确配置策略及后续 Profile 严格模式。 |
+| UE11-p0216-002 | §3.4.2.11，分包/路径限制 | 每个非末包恰好 Payload MTU；包适配全路径 Ethernet MTU；IPv4 DF=1；FEP 不再分片。 | codec DF、原生分片及场景 MTU 校验已有覆盖；动态管理路径变化与所有扩展头的容量校验仍需补全。 |
+| UE11-p0217-001 | §3.4.2.14，message ID | READ 请求携 ID；其他单包有字段时可用有效 ID 或0；DGRAM=0；同目标 PDC 的在途消息 ID 唯一。 | native ID lease、迟到/复用与 DGRAM0 已有回归；READ 未实现，紧凑无 ID 格式另验。 |
+| UE11-p0218-001 | §3.4.3，保留位总规则 | 保留字段发送为零，接收时忽略。 | 复核发现 SES decoder 原先拒绝多处 reserved 值；新 `ses_reserved_fields_test` 覆盖已实现请求/原子/带数据响应的忽略、规范重编码与 CRC，其他格式仍未实现。 |
+| UE11-p0218-002 | §3.4.3.1，标准头/完成数据 | AI Base/Full/HPC 的请求支持标准头；多包和完整 key/match 使用该头；completion data 使用标准或 medium 头。 | 当前标准头和 SEND/WRITE CQ data 有回归；扩展 opcode、medium 头及全部字段尚不全。 |
+| UE11-p0219-001 | 表 3-9，首部字段 | opcode 六位，前两位 reserved 为零；有效 opcode 按表 3-23。 | encoder 显式字段编码；新增 reserved 接收测试；opcode 支持集仍为子集。 |
+| UE11-p0219-002 | 表 3-9，多字段义务 | DC 等到 GO；IE 阻止该包写入并使消息报错；末包 EOM；Job/PID/index/generation 等按位宽解释。 | native IE/错误完成/权限已有测试，完整 DC/所有响应等级和扩展组合仍待完成；不是一个不可拆分的通过项。 |
+| UE11-p0220-001 | 表 3-9 续，地址/DS/长度 | buffer base+offset+消息偏移寻址；初始 DS 的 initiator token 唯一、target 半部0；每包都填 request_length，零长度合法。 | native 受检偏移、零长度和重复长度字段已有测试；DS token 与 FI_MR_VIRT_ADDR 未实现，当前不声明 VIRT_ADDR。 |
+| UE11-p0221-001 | 表 3-10，非 SOM payload | 十八位 reserved 为零，十四位 payload_length 正确，其余字段继承标准头。 | 显式 codec 和多包 WRITE 有覆盖；新增 reserved 忽略/重编码测试保留有效 payload_length/offset。 |
+| UE11-p0222-001 | 表 3-10 续，长度重复 | 非 SOM 也携带完整 request_length 和消息 offset。 | native 分片和 wire 回归覆盖已有操作；READ/重启消息格式另验。 |
+| UE11-p0222-002 | §3.4.3.1，RTR 与重启跨页 | target 不分配 token 时置0，可再次 defer；非零 token 对应重启恰好一次且之后不再 defer；重启 SOM=1，offset 0..2^32−2。 | M5 缺失；已阅读下一页续文，资源耗尽重试不计作 DS deferral。需要区分协议重启和网络重传。 |
+| UE11-p0223-001 | §3.4.3.1，重启字段保持 | 每次 DS 重启保留原请求地址和 header data；request_length 使用 RTR 指定值。 | M5 缺失；重启新 message offset 与目标保留的原始偏移必须分开跟踪。 |
+| UE11-p0226-001 | §3.4.3.3，本地 packing 首消息 | 首个 optimized local 头 ac=0；单消息时 ac=0 且 mm=0。 | M8 未实现；不能把多个标准头直接拼接成 local packing。 |
+
+复核进度为上述 180 个候选的分类与义务拆分；其余 549 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
