@@ -26,6 +26,14 @@ constexpr bool native_atomic_platform=false;
 constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|(native_atomic_platform?FI_ATOMIC:0);
 constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE;
 constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE;
+// §2.2.6 defines two independent ordering predicates. A cross-operation flag
+// can participate in both. The provider's one application FIFO also supplies
+// source-side fencing between ordered operations using different PDC modes.
+constexpr uint64_t send_ordering_modes=FI_ORDER_RAS|FI_ORDER_SAR|FI_ORDER_SAS|FI_ORDER_SAW|FI_ORDER_WAS;
+constexpr uint64_t read_write_ordering_modes=FI_ORDER_ATOMIC_RAR|FI_ORDER_ATOMIC_RAW|FI_ORDER_ATOMIC_WAR|
+    FI_ORDER_ATOMIC_WAW|FI_ORDER_RAR|FI_ORDER_RAS|FI_ORDER_RAW|FI_ORDER_RMA_RAR|FI_ORDER_RMA_RAW|
+    FI_ORDER_RMA_WAR|FI_ORDER_RMA_WAW|FI_ORDER_SAR|FI_ORDER_SAW|FI_ORDER_WAR|FI_ORDER_WAS;
+constexpr uint64_t supported_ordering_modes=send_ordering_modes|read_write_ordering_modes;
 
 template<class Signature> struct Unsupported;
 template<class Result,class... Arguments> struct Unsupported<Result(*)(Arguments...)> {
@@ -98,6 +106,7 @@ struct ProviderEndpoint {
     bool enabled=false;
     bool datagram=false;
     uint64_t next_receive_token=0;
+    uint64_t message_ordering=0;
     uint64_t next_transmit_token=0;
     Runtime::RealtimeRuntime runtime;
     Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
@@ -223,6 +232,10 @@ void drive_transmissions(ProviderEndpoint& endpoint) {
 void enqueue_transmission(ProviderEndpoint& endpoint,SES::Operation request,ApplicationOperation application) {
     if (endpoint.next_transmit_token==UINT64_MAX) throw std::overflow_error("application transmit tokens exhausted");
     const auto token=++endpoint.next_transmit_token;
+    // Table 2-29: SEND ordering chooses SEND's mode; R/W ordering chooses
+    // RMA/ATOMIC's mode. Extra local serialization cannot replace this mapping.
+    const auto ordering=request.type==SES::OperationType::Send?send_ordering_modes:read_write_ordering_modes;
+    request.delivery_mode=endpoint.datagram?UUD:(endpoint.message_ordering&ordering?ROD:RUD);
     request.context=token; application.request=std::move(request);
     endpoint.transmits.emplace(token,std::move(application)); endpoint.transmit_order.push_back(token);
     try { drive_transmissions(endpoint); }
@@ -281,8 +294,8 @@ void progress(ProviderDomain& domain) {
         }
     }
     // Simulator/provider admission policy: serialize application operations.
-    // This conservative FI_ORDER_SAS implementation keeps newer sends behind
-    // a generation retry; the PDC still owns packet windows and reliability.
+    // Keep newer ordered operations behind generation retries and supply
+    // mixed RMA/message fences (§3.4.2.7.1.1). PDS still owns reliability.
     drive_transmissions(*endpoint);
 }
 
@@ -455,6 +468,9 @@ int register_memory(fid* domain_handle,const void* buffer,size_t length,uint64_t
         if (access&FI_ATOMIC) permissions|=static_cast<uint8_t>(SES::Access::Atomic);
         auto region=std::make_unique<ProviderRegion>(); region->domain=&domain;
         SES::RegionOptions options;
+        // §2.2.4.3.3: reg/regv and regattr with auth_key_size=0 authorize
+        // any JobID. The endpoint's selected JobID does not narrow this MR.
+        options.allow_any_job=true;
         // §2.2.5.3.4.1: keep requested metadata even with FI_MR_PROV_KEY.
         // Optimized headers are unavailable, so OPTIMIZED falls back to zero.
         options.idempotent_safe=(requested_key&SES::MemoryKeyFormat::IdempotentSafe)!=0;
@@ -509,9 +525,13 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
         const bool datagram=info->ep_attr->type==FI_EP_DGRAM;
         if (datagram!=domain.datagram) return -FI_EINVAL;
         if (info->caps&~(datagram?datagram_caps:supported_caps)) return -FI_EINVAL;
+        const auto available_ordering=datagram?uint64_t{0}:supported_ordering_modes;
+        if (!info->tx_attr || (info->tx_attr->msg_order&~available_ordering) ||
+            (info->rx_attr && (info->rx_attr->msg_order&~available_ordering))) return -FI_EINVAL;
         if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
         auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
         endpoint->datagram=datagram;
+        endpoint->message_ordering=info->tx_attr->msg_order;
         endpoint->local_address.sin_family=AF_INET;
         endpoint->local_address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
         if (info->src_addr) {
@@ -724,8 +744,8 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
             // rather than rejecting additional modes the application supports.
             if (hints->tx_attr && (hints->tx_attr->op_flags&~(datagram?datagram_operation_flags:supported_operation_flags))) return -FI_ENODATA;
             if (hints->tx_attr && ((datagram && (hints->tx_attr->op_flags&FI_DELIVERY_COMPLETE)) ||
-                (hints->tx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS)))) return -FI_ENODATA;
-            if (hints->rx_attr && (hints->rx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS))) return -FI_ENODATA;
+                (hints->tx_attr->msg_order&~(datagram?uint64_t{0}:supported_ordering_modes)))) return -FI_ENODATA;
+            if (hints->rx_attr && (hints->rx_attr->msg_order&~(datagram?uint64_t{0}:supported_ordering_modes))) return -FI_ENODATA;
         }
         std::unique_ptr<fi_info,decltype(&fi_freeinfo)> information(fi_allocinfo(),fi_freeinfo);
         if (!information) return -FI_ENOMEM;
@@ -733,12 +753,19 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.caps=available_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
         info.ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
         info.ep_attr->max_msg_size=datagram?1024:UINT32_MAX; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
+        // Available RDM operations are WRITE and non-fetching ATOMIC. Their
+        // global completion plus source FIFO supports full-message WAW.
+        // READ/RAW/WAR sizes remain zero while READ is not advertised.
+        info.ep_attr->max_order_waw_size=datagram?0:UINT32_MAX;
         info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;
-        info.tx_attr->msg_order=datagram?FI_ORDER_NONE:FI_ORDER_SAS; info.tx_attr->comp_order=FI_ORDER_NONE;
+        info.tx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->tx_attr?hints->tx_attr->msg_order:uint64_t{FI_ORDER_SAS});
+        info.tx_attr->comp_order=FI_ORDER_NONE;
         info.rx_attr->caps=available_caps&~(FI_SEND|FI_WRITE); info.rx_attr->size=4096;
-        info.rx_attr->iov_limit=1; info.rx_attr->msg_order=datagram?FI_ORDER_NONE:FI_ORDER_SAS; info.rx_attr->comp_order=FI_ORDER_NONE;
+        info.rx_attr->iov_limit=1;
+        info.rx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->rx_attr?hints->rx_attr->msg_order:uint64_t{FI_ORDER_SAS});
+        info.rx_attr->comp_order=FI_ORDER_NONE;
         auto& attributes=*info.domain_attr;
         attributes.name=::strdup("softue"); attributes.threading=FI_THREAD_DOMAIN;
         attributes.control_progress=FI_PROGRESS_MANUAL; attributes.data_progress=FI_PROGRESS_MANUAL;

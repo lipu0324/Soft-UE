@@ -127,6 +127,12 @@ if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   if(SOFTUE_ENABLE_LIBFABRIC)
     enable_language(C)
+    softue_test(libfabric_mode_selection_test LibfabricModeSelectionTest.cpp)
+    target_include_directories(libfabric_mode_selection_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_mode_selection_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_dependencies(libfabric_mode_selection_test softue_fabric)
+    set_tests_properties(libfabric_mode_selection_test PROPERTIES TIMEOUT 40
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
     add_executable(libfabric_provider_peer ${CORE}/Test/LibfabricProviderPeer.c)
     target_include_directories(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_INCLUDE})
     target_link_libraries(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_LIBRARY})
@@ -147,7 +153,11 @@ if(BUILD_TESTING)
     add_test(NAME libfabric_recovery_processes COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
       --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
-    set_tests_properties(libfabric_recovery_processes PROPERTIES TIMEOUT 40)
+    set_tests_properties(libfabric_recovery_processes PROPERTIES TIMEOUT 40 ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=1")
+    add_test(NAME libfabric_unordered_recovery_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_unordered_recovery_processes PROPERTIES TIMEOUT 40 ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=0")
   endif()
   add_test(NAME realtime_endpoint_processes COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_realtime_endpoint.py --binary $<TARGET_FILE:realtime_endpoint_peer>)

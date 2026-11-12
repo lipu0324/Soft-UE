@@ -25,10 +25,14 @@ static double monotonic_seconds(void) {
 
 int main(int argc,char** argv) {
     CHECK(argc==2); const int server=!strcmp(argv[1],"server");
+    const char* ordering_setting=getenv("SOFTUE_RECOVERY_ORDERED");
+    const int ordered=!ordering_setting || strcmp(ordering_setting,"0");
     struct fi_info *hints=fi_allocinfo(),*info=NULL; CHECK(hints);
     hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
     hints->caps=FI_MSG|FI_RMA; hints->addr_format=FI_SOCKADDR_IN;
+    hints->tx_attr->msg_order=hints->rx_attr->msg_order=ordered?FI_ORDER_SAS:FI_ORDER_NONE;
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
+    CHECK(info->tx_attr->msg_order==hints->tx_attr->msg_order);
     struct fid_fabric *fabric; struct fid_domain *domain; struct fid_ep *endpoint;
     struct fid_cq *queue; struct fid_av *addresses; struct fid_mr *control_region;
     SUCCESS(fi_fabric(info->fabric_attr,&fabric,NULL)); SUCCESS(fi_domain(fabric,info,&domain,NULL));
@@ -62,8 +66,8 @@ int main(int argc,char** argv) {
     const double started=monotonic_seconds();
     int finished=0;
     while (!finished && monotonic_seconds()-started<12) {
-        // Deliberately exceed the provider's unexpected-buffer budget before
-        // posting, but keep manual progress running throughout the delay.
+        // ROD exceeds the unexpected-buffer budget; RUD reports NO_MATCH.
+        // Both modes keep manual progress running while the receive is late.
         if (server && !posted && monotonic_seconds()-started>0.080) {
             SUCCESS(fi_recv(endpoint,large_buffer,LARGE_BYTES,NULL,FI_ADDR_UNSPEC,(void*)11));
             SUCCESS(fi_recv(endpoint,small_buffer,sizeof(small_buffer),NULL,FI_ADDR_UNSPEC,(void*)12));
@@ -72,7 +76,7 @@ int main(int argc,char** argv) {
         struct fi_cq_data_entry entries[8]; const ssize_t count=fi_cq_read(queue,entries,8);
         if (count==-FI_EAVAIL) {
             struct fi_cq_err_entry error={0}; CHECK(fi_cq_readerr(queue,&error,0)==1);
-            CHECK(!server && failure_started && error.op_context==(void*)3 && error.prov_errno==4 && !errors);
+            CHECK(!server && failure_started && error.op_context==(void*)3 && error.prov_errno==(ordered?4:5) && !errors);
             ++errors;
         } else if (count>0) for (ssize_t index=0;index<count;++index) {
             const struct fi_cq_data_entry *entry=&entries[index];
@@ -93,8 +97,9 @@ int main(int argc,char** argv) {
             SUCCESS(fi_send(endpoint,"reply",5,NULL,peer,(void*)30)); replied=1;
         }
         if (!server && sends==2 && receives==1 && !failure_started) {
-            // No further receive is posted. The SEND index remains disabled
-            // until the bounded retry policy returns one application error.
+            // No further receive is posted. ROD exhausts its unexpected
+            // budget (DISABLED_GEN); RUD has no matching buffer (NO_MATCH).
+            // Each policy returns exactly one final application error.
             SUCCESS(fi_send(endpoint,large_buffer,LARGE_BYTES,NULL,peer,(void*)3)); failure_started=1;
         }
         if (!server && errors==1 && !done_started) {
@@ -110,6 +115,6 @@ int main(int argc,char** argv) {
     SUCCESS(fi_close(&endpoint->fid)); SUCCESS(fi_close(&control_region->fid));
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&queue->fid)); SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints); free(large_buffer);
-    printf("PASS libfabric recovery %s: late receives, ordered retry, bounded failure and independent RMA\n",server?"server":"client");
+    printf("PASS libfabric %s recovery %s: late receives, bounded failure and independent RMA\n",ordered?"ROD":"RUD",server?"server":"client");
     return 0;
 }

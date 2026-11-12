@@ -45,10 +45,10 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0093-005 | §2.2.4.3.1，AV JobID 方法条件项 | fi_recvmsg 带 FI_AV_AUTH_KEY 时，src_addr 表示插入 AV 得到的源授权键，并限制 SES JobID。 | AV auth key 及带该 flag 的 receive 未实现；与后续 p0093-006 是同一条件分支的两个结果。 |
 | UE11-p0093-006 | §2.2.4.3.1，AV 方法的 else 分支 | 使用 AV JobID 方法但未用上述 fi_recvmsg/flag 组合时，posted buffer 授权 any JobID。 | 不是所有 JobID 方法下的通用 receive 规则。AV 方法未实现；跨页续文的 directed receive 是可选行为。 |
 | UE11-p0094-001 | §2.2.4.3.3，关联 JobID 的条件项 | 需要把 MR 关联到特定 JobID 时使用 fi_mr_regattr。 | 当前 regattr 只接受 auth_key_size=0；特定 JobID 路径未实现。 |
-| UE11-p0094-002 | §2.2.4.3.3，regattr 零长度授权键 | auth_key_size=0 的 MR 授权 any JobID。 | 发现具体差距：当前 provider `register_memory` 把 MR 注册为固定 JobID=1；native 已有显式 `allow_any_job`，仍须正确接入。 |
+| UE11-p0094-002 | §2.2.4.3.3，regattr 零长度授权键 | auth_key_size=0 的 MR 授权 any JobID。 | 现已接入 `allow_any_job`；`libfabric_mode_selection_test` 通过公开 regattr 零 auth key 验证跨 Job 绝对寻址，并验证权限/撤销仍生效。完整特权配置与相对 Job 映射仍缺失。 |
 | UE11-p0094-003 | §2.2.4.3.3，regattr 三字节授权键 | auth_key_size=3 时，MR 关联 endpoint auth_key 中的 JobID。 | 当前拒绝非零 auth_key_size；需要完成分配/验证及对象关联。 |
 | UE11-p0094-004 | §2.2.4.3.3，AV 授权键条件项 | FI_AV_AUTH_KEY 时，attr.auth_key 指向 fi_mr_auth_key，包含 AV 与其中已插入的地址；MR 关联该地址的授权键所代表的 JobID。 | 至少拆成结构解释、AV 归属/有效地址校验和 MR 授权关联三项；均待实现。 |
-| UE11-p0094-005 | §2.2.4.3.3，其他注册方法 | 非上述 regattr 特定授权方法的 MR 注册为 any JobID。 | 与 p0094-002 共享当前固定 JobID=1 的差距；不能因当前发送端也固定为 1 而认为已满足。 |
+| UE11-p0094-005 | §2.2.4.3.3，其他注册方法 | 非上述 regattr 特定授权方法的 MR 注册为 any JobID。 | 现由公开 reg/regv 跨 Job 绝对寻址回归覆盖 any Job 授权；与零 auth key regattr 分开调用验证，完整 JobID 管理链仍待完成。 |
 | UE11-p0094-006 | §2.2.4.3.3，特定 JobID 的 MR | MR 一旦关联特定 JobID，只允许相同 SES JobID 访问。 | native exact/any MR 检查有回归；provider 所有注册方法的授权联合矩阵仍缺失。 |
 | UE11-p0094-007 | §2.2.4.4，direct 发送方法 | SES JobID 从 endpoint auth_key 获取。 | 未实现；当前固定 1 的实验 provider 不满足该映射。 |
 | UE11-p0094-008 | §2.2.4.4，AV 发送方法 | 根据操作 dest_addr 所关联的 AV 授权键选择 SES JobID。 | 未实现。需验证同一 endpoint 向不同 JobID 地址发送及非法/撤销键。 |
@@ -116,7 +116,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0120-002 | §2.2.5.4.5，选定 INC 后的管理条件项 | 支持 INC 时能与 manager 通信，并解释 PRIMARY/SECONDARY URL 配置。 | 当前未选定 INC；后续增强需正向、fallback 与失效测试。 |
 | UE11-p0121-001 | §2.2.5.6，错误 CQ 三项义务 | err 采用相应 libfabric 错误，无对应项时用 FI_EIO；prov_errno 保留 SES 错误码。 | provider 已实现映射、FI_EIO fallback 与 prov_errno；公开错误进程测试仅覆盖部分 SES 错误，完整映射表仍需逐项验证。 |
 | UE11-p0121-002 | §2.2.6，DGRAM 模式 | FI_EP_DGRAM 使用 UUD。 | 已有公开 DGRAM 进程与 wire 路径；不能推断为远端可靠交付。 |
-| UE11-p0121-003 | §2.2.6，RDM 模式跨页续文 | RDM 使用 RUD/ROD，HPC 可使用 RUDI；AI Base/Full 依操作和排序按表 2-29/30 选择，HPC 按表 2-31。 | 当前 provider 默认可靠操作统一使用 ROD；SEND 排序与 R/W 排序须分开接入并按四种组合测试。RUDI 未实现。后续 p0122 候选包含同一段义务的细化。 |
+| UE11-p0121-003 | §2.2.6，RDM 模式跨页续文 | RDM 使用 RUD/ROD，HPC 可使用 RUDI；AI Base/Full 依操作和排序按表 2-29/30 选择，HPC 按表 2-31。 | provider 现按独立 SEND/R/W 谓词选择 ROD/RUD，公开 API 与实际报文检查四种组合；HPC RUDI/rendezvous 未实现。后续 p0122 候选包含同一义务的细化。 |
 
 ## 第 81～100 个候选
 
@@ -126,7 +126,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
 | UE11-p0121-004 | §2.2.6，前段 RDM 选择的细化 | AI Base/Full 只使用 RUD/ROD，按操作和配置的排序选择。 | 与 p0121-003、后续两张表共享实现差距，不重复算已实现功能。 |
-| UE11-p0122-001 | 表 2-29，AI Base 四种组合 | SEND 排序只控制 SEND 的 ROD/RUD；R/W 排序只控制 RMA/ATOMIC 的 ROD/RUD，两者独立。 | provider 统一 ROD 尚不满足；需要四行、两类操作及实际线格式验证。 |
+| UE11-p0122-001 | 表 2-29，AI Base 四种组合 | SEND 排序只控制 SEND 的 ROD/RUD；R/W 排序只控制 RMA/ATOMIC 的 ROD/RUD，两者独立。 | `libfabric_mode_selection_test` 检查四行中的 SEND、WRITE、ATOMIC 及实际 PDS type，另覆盖 RAS/SAR/SAW/WAS 交叉 flags；完整 Profile 仍有其他缺口。 |
 | UE11-p0122-002 | 表 2-30，AI Full 四种组合 | SEND/TAGGED 与 RMA/ATOMIC 分别遵循各自排序；有 SEND 排序的 deferrable tagged 初始/eager 数据用 ROD，后续数据用 RUD。 | 基础模式选择与 M5 延迟恢复均缺失；不能只修改一个 Operation 字段就通过整表。 |
 | UE11-p0122-003 | 表 2-31，HPC 组合与策略 | SEND/TAGGED、rendezvous 初始/后续、RMA、ATOMIC 分别选择表列模式；无 R/W 排序的 RMA 可依策略用 RUD 或 RUDI。 | RUDI 为可选分支而非所有 RMA 强制；当前未实现 HPC/rendezvous/RUDI，未作能力声明。 |
 | UE11-p0124-001 | §2.2.8.1，排序端点条件项 | 配置消息排序的 endpoint 操作约束到一个发送队列。 | provider 当前串行应用队列符合这一局部分支；多队列及流量类别映射是 SHOULD，PDC 内 packet window 不等于多个应用发送队列。 |
@@ -240,7 +240,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
 | UE11-p0212-002 | §3.4.2.6.4，目标 memory key | RMA 支持把 match_bits 用作 memory key，并遵循 libfabric 定义的结构。 | native/provider 标准头已有 key 映射及授权回归；不把内部容器选择当作线格式要求。 |
-| UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 模式映射仍待修正；M5 初始/后续消息的关联尚未实现，普通分片 WRITE 不代替该条件。 |
+| UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 普通 SEND 模式映射已按独立谓词修正并检查实际报文；M5 tagged/rendezvous/DS 初始与后续消息关联尚未实现。 |
 | UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 现有应用 FIFO 可提供保守串行，但 FI_FENCE API flag 仍缺失；需按实际配置分别验收混合模式。 |
 | UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | READ/WAR 及结果缓存未实现；不能用按请求顺序发送 READ 请求证明结果生命周期正确。 |
 | UE11-p0214-001 | §3.4.2.7.1.3，消息内连续性 | SOM 首 PSN 与 offset0；后包 PSN 连续、offset=(N−1)×Payload MTU；最后包 EOM；同 PDC 两条消息不交错。 | native FIFO producer、PDC PSN 及大消息分片已有回归；M5 多消息/重启格式仍需各自测试。 |

@@ -37,11 +37,29 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；支持 SEND CQ data；仅本地发送完成，无 PDC/确认/重传 |
 | 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
 | 访问权限 | 仅 `FI_WRITE` 不授予远端写；`FI_REMOTE_WRITE` 才授予相应 MR 权限；撤销使 key 立即失效 |
-| 地址和 key | `FI_AV_TABLE`、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
+| 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
+| 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
 
 `mr_key_size=6` 表示标准 RKEY 的 48 位范围；`fi_mr_key()` 仍返回完整 64 位 key。
 `FI_MR_PROV_KEY` 模式下会保留请求的 IDEMPOTENT_SAFE 标志，OPTIMIZED 回退为零。
+
+`fi_mr_reg`、`fi_mr_regv` 和 `auth_key_size=0` 的 `fi_mr_regattr` 按 §2.2.4.3.3
+注册为 any JobID。当前 endpoint 选用的 JobID=1 不会把 MR 隐式缩窄为只允许 Job1。
+目标仍逐次校验 key、权限、边界和撤销状态。非零 auth key、AV auth key 与完整
+特权 JobID 配置接口尚未实现。
+
+`fi_getinfo` 保留调用者请求的已支持排序 flags；显式零排序使用 RUD。没有提供
+排序 hints 时保留 SAS 默认。SEND 排序 flags 为 RAS/SAR/SAS/SAW/WAS；R/W
+排序 flags 按 §2.2.6 的单独列表解释，交叉排序 flag 可以同时参与两种判断。
+可用的 WRITE/非取回 ATOMIC 提供完整消息范围的 WAW，`max_order_waw_size` 为
+UINT32_MAX。READ 仍未公布，RAW/WAR 大小保持零。源端应用队列串行等待前操作的
+语义完成，为跨模式的混合操作提供保守的 fence；公开 `FI_FENCE` flag 仍未实现。
+
+`libfabric_mode_selection_test` 通过公开 `fi_*` API 向原生协议对端发起操作，
+独立提取实际帧的 PDS type 和 SES opcode，检查四行排序矩阵及交叉排序 flags。
+同一用例用三个公开 MR 注册入口验证不同 JobID 的绝对寻址授权，同时检查 key 撤销
+和缺少远端写权限时内存不变。它补充现有两个公开 libfabric 进程的测试路径。
 原生应用 key 的作用域和本地撤销身份见 [MR key 说明](MEMORY-KEYS.md)；provider 的
 应用分配 key 模式仍未公布。
 
@@ -76,9 +94,12 @@ provider 对 `BAD_GENERATION`、`DISABLED`、`DISABLED_GEN` 和 `NO_MATCH` 执�
 有序 SEND 不会越过正在重试的最早消息；PDS 仍独立承担包窗口、确认、重传和去重。
 这是一项保守的准入策略，会限制 provider 的并行度；原生多流仿真不使用该策略。
 
-`libfabric_recovery_processes` 使用两个只调用公开 `fi_*` API 的进程，延迟投递接收，
-验证 512 KiB SEND 和后续 SEND 的顺序、隐藏中间恢复错误、重试上限，以及 SEND
-资源持续禁用后仍可完成独立的 RMA。原生测试另验证部分消息已缓冲时投递接收、
+`libfabric_recovery_processes` 显式请求 SAS，使用两个只调用公开 `fi_*` API 的进程，
+验证延迟接收的 512 KiB SEND、后续 SEND 的顺序、隐藏中间恢复错误、重试上限，
+以及 SEND 资源禁用后仍可完成独立的 RMA。`libfabric_unordered_recovery_processes`
+显式使用无排序 hints，验证 RUD 的同一恢复流程；最终错误是 NO_MATCH，ROD 的
+资源耗尽则为 DISABLED_GEN。两个用例保留各自准确的错误码检查。
+原生测试另验证部分消息已缓冲时投递接收、
 generation 返回值、旧尝试的退休约束和 PDC 失败时的部分接收错误 CQ。
 
 ## 阅读代码的顺序
