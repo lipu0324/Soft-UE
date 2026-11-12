@@ -133,6 +133,7 @@ int main(int argc,char** argv) {
         std::map<std::pair<uint32_t,uint32_t>,Region> regions;
         for (auto node:nodes) {
             hosts[node]=std::make_unique<PdsHost>(node,loop,trace,*ports.at(node),PdsHost::WireFormat::Uet11,network);
+            hosts.at(node)->configure_initial_sequence_seed(seed);
             hosts.at(node)->configure_retransmission_timeout(retransmission_timeout_ns);
             hosts.at(node)->configure_retry_limit(maximum_packet_retries);
             if (negative_acknowledgment_delays)

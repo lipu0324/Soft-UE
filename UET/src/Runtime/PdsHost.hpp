@@ -20,6 +20,7 @@ public:
         : node_(node), loop_(loop), trace_(trace), port_(port),
           services_{loop, loop, [this] { wake(); }}, manager_(&services_), format_(format), network_(network) {
         services_.standard_wire=format_==WireFormat::Uet11;
+        services_.initial_sequence_seed=sequence_seed_for_host(42,node_);
         services_.default_wire_entropy=network_.entropy;
         services_.actual_transmit_notifications=port_.provides_transmit_timing();
         services_.pdc_event=[this](const PdcEvent& event) { context_events_.push_back(event); };
@@ -80,6 +81,10 @@ public:
         if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure retry limit before opening connections");
         if (maximum_retries>kInfiniteRetryLimit) throw std::invalid_argument("retry limit must be 0..15");
         services_.maximum_packet_retries=static_cast<uint8_t>(maximum_retries);
+    }
+    void configure_initial_sequence_seed(uint64_t scenario_seed) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure initial sequence seed before opening connections");
+        services_.initial_sequence_seed=sequence_seed_for_host(scenario_seed,node_);
     }
     void enable_nscc(const CMS::NsccConfig& config) {
         if (stopped_ || format_!=WireFormat::Uet11 || services_.congestion_control || manager_.getPDSStatus().open_cnt)
@@ -153,6 +158,10 @@ public:
         trace_.record(node_, "host_closed");
     }
 private:
+    static uint64_t sequence_seed_for_host(uint64_t scenario_seed,uint32_t host) {
+        // Independent deterministic streams for equal-seed simulated hosts.
+        return scenario_seed^(uint64_t{host}<<32)^host;
+    }
     uint32_t node_;
     EventLoop& loop_;
     Trace& trace_;

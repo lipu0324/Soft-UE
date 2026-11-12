@@ -163,14 +163,19 @@ public:
     explicit RequestAuditPort(IPacketPort& lower):lower_(lower) {}
     SendResult try_send(const Frame& frame) override {
         const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
-        if (packet.PDS_type==RUOD_req_header && packet.PDS_header.RUOD_req_header.psn==1000) ++first_data_attempts;
+        if (packet.PDS_type==RUOD_req_header) {
+            const auto sequence=packet.PDS_header.RUOD_req_header.psn;
+            if (!first_sequence) first_sequence=sequence;
+            if (sequence==*first_sequence) ++first_data_attempts;
+        }
         if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==ACK_req &&
-            packet.PDS_header.RUOD_cp_header.psn==1000) ++first_response_queries;
+            first_sequence && packet.PDS_header.RUOD_cp_header.psn==*first_sequence) ++first_response_queries;
         return lower_.try_send(frame);
     }
     void set_receiver(Receiver receiver) override { lower_.set_receiver(std::move(receiver)); }
     void set_writable_handler(Writable callback) override { lower_.set_writable_handler(std::move(callback)); }
     size_t first_data_attempts=0,first_response_queries=0;
+    std::optional<uint32_t> first_sequence;
 private:
     IPacketPort& lower_;
 };

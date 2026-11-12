@@ -34,6 +34,7 @@
 #include "../IPDC.hpp"
 #include "../PDC.hpp"
 #include "../../PDS.hpp"
+#include "../../InitialSequenceAllocator.hpp"
 #include "ThreadSafeQueue.hpp"
 #include "../../../logger/Logger.hpp"
 
@@ -115,9 +116,11 @@ private:
 
     // Manager member variables
     std::unordered_map<uint16_t, std::unique_ptr<IPDC_ProcessInfo>> ipdc_processes;
-    // §3.5.8.2: Start_PSN follows the last transmitted PSN for this local ID,
-    // independently of destination. Destroying a context must not reset it.
-    std::unordered_map<uint16_t,uint32_t> next_start_psns_;
+    // §3.5.8.2: plaintext epochs are pseudorandom, separated by at least
+    // 2^16 from this local ID's previous last-used PSN, independent of peer.
+    UET::PDS::InitialSequenceAllocator initial_sequences_{42};
+    uint64_t initial_sequence_seed_=42;
+    std::unordered_map<uint16_t,uint32_t> next_legacy_start_psns_; // Explicit SUP1/SUE1 compatibility policy.
     std::mutex manager_mutex;                    // Manager mutex
     std::atomic<bool> manager_running;           // Manager running status
     std::unique_ptr<std::thread> monitor_thread; // Monitoring thread
@@ -233,8 +236,14 @@ public:
         auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid, runtime_);
 
         // Initialize IPDC instance
-        const auto retained=next_start_psns_.find(pdcid);
-        const auto initial_psn=retained==next_start_psns_.end()?1000:retained->second;
+        const bool standard_wire=runtime_ && runtime_->standard_wire;
+        if (standard_wire && initial_sequence_seed_!=runtime_->initial_sequence_seed) {
+            initial_sequences_.reseed(runtime_->initial_sequence_seed);
+            initial_sequence_seed_=runtime_->initial_sequence_seed;
+        }
+        const auto retained=next_legacy_start_psns_.find(pdcid);
+        const uint32_t initial_psn=standard_wire?initial_sequences_.reserve(pdcid):
+            retained==next_legacy_start_psns_.end()?1000:retained->second;
         if (!process_info->ipdc_instance->initPDC(pdcid,initial_psn))
         {
             LOG_ERROR(__FUNCTION__, "Failed to initialize IPDC instance, PDCID: " + std::to_string(pdcid));
@@ -294,7 +303,11 @@ public:
         }
 
         process_info->state.store(STOPPED);
-        next_start_psns_[pdcid]=process_info->ipdc_instance->tx_cur_psn;
+        // tx_cur_psn is the next unused number. Retaining its predecessor is
+        // conservative even if a numbered packet was allocated but not sent.
+        if (runtime_ && runtime_->standard_wire)
+            initial_sequences_.observe_last(pdcid,process_info->ipdc_instance->tx_cur_psn-1);
+        else next_legacy_start_psns_[pdcid]=process_info->ipdc_instance->tx_cur_psn;
         ipdc_processes.erase(it);
         LOG_DEBUG(__FUNCTION__, "Successfully stopped IPDC process, PDCID: " + std::to_string(pdcid));
         return true;

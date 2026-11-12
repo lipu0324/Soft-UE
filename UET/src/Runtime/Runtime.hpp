@@ -50,6 +50,7 @@ struct Services {
     // §3.5.5 / §3.5.12.7: 0..14 are finite counts; 15 means infinite.
     // No separate NACK limit is enabled, so this budget counts both causes.
     uint8_t maximum_packet_retries=kDefaultRetryLimit;
+    uint64_t initial_sequence_seed=42; // Injected plaintext PRNG seed; TSS start negotiation is separate.
     // §3.5.5 / §3.5.8.3: a lost SYN remains potentially live in the network.
     // Plaintext connections wait this long before closing; authenticated
     // anti-replay paths may explicitly configure zero when they are active.

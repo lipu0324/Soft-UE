@@ -102,12 +102,18 @@ void probe_retry_lifetime_and_unknown_context() {
     CHECK(manager.PDStoNet.empty() && manager.PDCtoSES_req.empty() && manager.open_cnt==0);
 }
 
-struct ProbeObservation { size_t probes=0,retries=0,acknowledgments=0,dropped=0; bool lose_first=false,lose_all=false; };
+struct ProbeObservation {
+    size_t probes=0,retries=0,acknowledgments=0,dropped=0;
+    bool lose_first=false,lose_all=false;
+    std::optional<uint32_t> initial_sequence;
+};
 class ProbeAuditPort final : public IPacketPort {
 public:
     ProbeAuditPort(IPacketPort& lower,ProbeObservation& observation):lower_(lower),observation_(observation) {}
     SendResult try_send(const Frame& frame) override {
         const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==Noop)
+            observation_.initial_sequence=packet.PDS_header.RUOD_cp_header.psn;
         if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==Probe) {
             ++observation_.probes; observation_.retries+=packet.PDS_header.RUOD_cp_header.flags.retx;
             CHECK(packet.PDS_header.RUOD_cp_header.psn==0 && packet.PDS_header.RUOD_cp_header.flags.ar);
@@ -173,7 +179,9 @@ void probe_reopens_a_peer_window_without_clear_ack(bool lose_probe_ack,bool cong
     } else {
         if (lose_probe_ack) CHECK(observation.dropped==1 && observation.retries>0);
         CHECK(target.memory().read(1,1,region.key,0,192)==std::vector<uint8_t>(192,0x5a));
-        CHECK(source_host.request_connection_probe(connection,0)); loop.run_until(6*kMillisecond,100000);
+        CHECK(observation.initial_sequence);
+        CHECK(source_host.request_connection_probe(connection,uint32_t(*observation.initial_sequence+12)));
+        loop.run_until(6*kMillisecond,100000);
         CHECK(source_host.services().next_probe_opaque>1);
     }
     CHECK(source.leased_message_ids()==0 && source.queued_fragments()==0 && target.retained_receive_messages()==0);

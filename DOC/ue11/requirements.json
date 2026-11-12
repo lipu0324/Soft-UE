@@ -201,14 +201,15 @@
         "context_reuse_test",
         "resource_lifecycle_test",
         "control_ack_test",
-        "target_close_test"
+        "target_close_test",
+        "initial_sequence_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Normal/lossy initiator close, target Close Request with plain ACK, same-PSN retries, idempotent requests, silent-initiator retry exhaustion, required Close Command CP_ACK and context reuse are tested for ROD/RUD. Full control/negotiation/expected-start and wrap matrix remain open."
+      "evidence_note": "Normal/lossy initiator close, target Close Request with plain ACK, same-PSN retries, idempotent requests, silent-initiator retry exhaustion, required Close Command CP_ACK and context reuse are tested for ROD/RUD. Full control/negotiation/expected-start and wrap matrix remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable."
     },
     {
       "id": "PDS-TRIM",
@@ -657,14 +658,15 @@
       "status": "partial",
       "tests": [
         "control_establishment_test",
-        "uet_wire_test"
+        "uet_wire_test",
+        "initial_sequence_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open."
+      "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable."
     },
     {
       "id": "SES-UNEXPECTED-RECOVERY",

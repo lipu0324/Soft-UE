@@ -21,6 +21,7 @@ public:
             negative_ack_codes.push_back(decoded.packet.PDS_header.nack_header.nack_code);
         }
         if (decoded.packet.PDS_type == RUOD_req_header) {
+            if (!initial_sequence) initial_sequence=decoded.packet.PDS_header.RUOD_req_header.psn;
             ++request_count;
             if (decoded.packet.PDS_header.RUOD_req_header.flags.retx) ++retransmit_count;
             if (drop_second_request_ && request_count == 2) return SendResult::Accepted;
@@ -35,6 +36,7 @@ public:
     void set_writable_handler(Writable callback) override { downstream_.set_writable_handler(std::move(callback)); }
     size_t request_count=0, retransmit_count=0, negative_ack_count=0;
     std::vector<PDS_Nack_Codes> negative_ack_codes;
+    std::optional<uint32_t> initial_sequence;
 private:
     IPacketPort& downstream_;
     bool drop_second_request_, duplicate_requests_;
@@ -78,9 +80,10 @@ void recover_missing_middle_packet(bool duplicate_requests, pdc_mode delivery_mo
         std::vector<uint64_t> delivered_sequences;
         for (const auto& event:trace.events())
             if (event.node==2 && event.event=="ses_request") delivered_sequences.push_back(event.value);
-        if (payload_size==64) CHECK(delivered_sequences==std::vector<uint64_t>({1000,1002,1003,1001}));
-        else CHECK(std::find(delivered_sequences.begin(),delivered_sequences.end(),1002)<
-                   std::find(delivered_sequences.begin(),delivered_sequences.end(),1001));
+        CHECK(source_faults.initial_sequence); const auto initial=*source_faults.initial_sequence;
+        if (payload_size==64) CHECK(delivered_sequences==std::vector<uint64_t>({initial,uint32_t(initial+2),uint32_t(initial+3),uint32_t(initial+1)}));
+        else CHECK(std::find(delivered_sequences.begin(),delivered_sequences.end(),uint32_t(initial+2))<
+                   std::find(delivered_sequences.begin(),delivered_sequences.end(),uint32_t(initial+1)));
     }
     CHECK(source_faults.retransmit_count>0);
     source.close(); target.close(); source_host.close(); target_host.close();

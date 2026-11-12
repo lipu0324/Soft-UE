@@ -400,6 +400,34 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；表3-35/36需逐字段验收，参考默认值不是完整符合性证据。 |
 | UE11-p0305-001 | 表3-35续，MPR/SYN及注释 | MPR0 override 0～127；丢SYN后关闭遵守安全时间；启用加密时设0为SHOULD；native IP协议号可配置。 | MPR override/MAC-time SYN safety已有回归；Syn范围表格与正文位宽有冲突须记录。实验253/254不得当作生产默认分配号，当前研究默认仍为显式符合性缺口。 |
 
-复核进度为上述 280 个候选的分类与义务拆分；其余 449 个候选、表格/算法的额外
+## 第 281～300 个候选
+
+本批连读 PDC mapping 的具体列表和建连分支。列表引导段不是空义务；在表格和
+续页中的条件、错误码、PSN 分配与 TSS 分支均需各自验收。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0310-001 | §3.5.8，PDC 单模式/TC | 每PDC仅一种RUD/ROD/RODL及一种请求TC。 | 已实现RUD/ROD及默认TC；完整TC配置与RODL尚未完成。 |
+| UE11-p0310-002 | §3.5.8，双向序号 | 两个独立PSN空间逐包加1；返回数据方向也可靠确认。 | 当前双向控制空间及正向数据有回归；M5 READ反向数据路径未实现。 |
+| UE11-p0310-003 | §3.5.8.1，消息/PDC映射 | 一个消息只用一PDC；同PDC不同消息不交错，前消息完整发送后才发送下条。 | native FIFO producer与manager队列已有回归；所有扩展消息仍待验。 |
+| UE11-p0310-004 | §3.5.8.1，ROD强制同PDC | 同Job/源FA/目标FA/源PID/目标PID/index/TC流使用同PDC。 | 现有manager映射部分覆盖；完整选择策略与配置尚未完成。 |
+| UE11-p0310-005 | §3.5.8.1，最小tuple | 模式独立，所有tuple含目标FA和TC。 | 默认路径有单模式上下文；完整可编程tuple和TC选择未完成。 |
+| UE11-p0311-001 | §3.5.8.1，源tuple列表 | 支持基础FA/TC/mode、TSS时SDI；RUD/ROD可任意组合Job/源目标PID/index，三种模式分别默认tuple。 | 固定内部key不能代替全部可配置组合；M2/M3/M6/M8仍有缺口。多ROD带宽建议不是额外MUST。 |
+| UE11-p0311-002 | §3.5.8.1，目标tuple列表 | 按源FA/目标FA/SPDCID识别，验证源IP；单FEP目标FA常量可省略，TSS加SDI。 | peer binding和源地址核对已有测试；TSS和RODL未启用。 |
+| UE11-p0311-003 | §3.5.8.1，tuple细则 | SPDCID跨mode/TC唯一，不靠mode/TC区分；启用TSS时SDI入key。 | 独立ID池与非法binding过滤部分覆盖，完整TC/TSS组合未完成。 |
+| UE11-p0311-004 | §3.5.8.1，CCC tuple列表 | 支持目标FA/DSCP映射；ROD每PDC独立CCC，不能与RUD混合。 | NSCC已有RUD共享/ROD独立CCC回归；完整DSCP映射配置及reserved pool待补。 |
+| UE11-p0311-005 | §3.5.8.1，READ返回方向 | READ数据使用原请求所在PDC的返回方向。 | M5缺失，不能另开一个无关WRITE消息模拟READ响应。 |
+| UE11-p0312-001 | §3.5.8.1，RUD共享CCC | 同FEP对、同TC的RUD使用同CCC，reserved pool例外。 | NSCC共享状态已实现，保留池未启用；RCCC等其他CMS仍缺失。 |
+| UE11-p0312-002 | §3.5.8.1，多PDC | 单消息同PDC；RUD可跨消息分配不同PDC；ROD同flow固定PDC。 | 当前FIFO和mode映射有回归；多RUD策略与完整flow配置待补。 |
+| UE11-p0312-003 | §3.5.8.2，ID0 | 不以PDCID0建连；无已分配PDC的NACK使用0。 | ID池排除0，资源NACK与无context NACK部分测试；保留池完整路径仍缺。 |
+| UE11-p0312-004 | §3.5.8.2，建立条件 | trim不可建连；NOOP/Negotiation可以建连；源等目标PDCID才established。 | trim无分配、控制建连及peer学习测试已有覆盖，TSS分支未实现。 |
+| UE11-p0312-005 | §3.5.8.2，ID与CCC唯一性 | 本地分配使FA对/PDCID唯一，不能靠mode重复ID；RUD可共享CCC，ROD独立。 | pool/context reuse/NSCC部分覆盖；完整保留池和全部TC未完成。 |
+| UE11-p0312-006 | §3.5.8.2，SYN持续 | 未收到目标回复前全部包SYN=1；限制SYN包数/控制建连建议为SHOULD。 | 当前SYN持续、重传和MAC安全时间有回归；完整失去所有SYN后的优化控制恢复尚待完善。 |
+| UE11-p0312-007 | §3.5.8.2，SYN重载 | SYN时目标PDCID字段编码pdc_info/psn_offset。 | 显式codec、reserved pdc_info和控制建连测试已有覆盖。 |
+| UE11-p0312-008 | §3.5.8.2，起点跨页 | plaintext起点随机/伪随机，距本地ID上次末PSN至少2¹⁶；TSS另遵安全起点规则。 | 已接入种子化allocator并保留本地ID记录，跨peer复用/重新设种子/实际建连在普通和sanitizer定向回归通过；删除不适用于明文的retired-peer起点上界，M6另验。 |
+| UE11-p0313-001 | §3.5.8.2，建连程序跨页 | 逐分支处理buffer/trim/资源/安全起点/ROD首包/无SYN peer与窗口；返回方向同起点；未标重传的重复包丢弃。 | 多项独立义务，现有回归只覆盖子集；资源准入、完整错误事件和TSS仍待补，不整体标通过。 |
+| UE11-p0314-001 | §3.5.8.2，NACK与分配 | 普通NACK不能自行创建PDC；NEW_START_PSN/ROD_OOO仅在原SYN请求触发的规定场景分配。 | 源端不将无context NACK当建连请求，ROD首包乱序已有回归；安全新起点流程缺失。 |
+
+复核进度为上述 300 个候选的分类与义务拆分；其余 429 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

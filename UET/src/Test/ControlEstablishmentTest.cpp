@@ -15,8 +15,10 @@ public:
             const auto& header=packet.PDS_header.RUOD_cp_header;
             if (header.ctl_type==Noop || header.ctl_type==Negotiation) {
                 CHECK(header.flags.ar && header.flags.pdc_type==(mode==ROD));
-                if (!controls++) { CHECK(header.flags.syn && !header.psn_off && !header.flags.retx); first=frame; }
-                else CHECK(header.flags.retx && header.psn==1000);
+                if (!controls++) {
+                    CHECK(header.flags.syn && !header.psn_off && !header.flags.retx);
+                    first=frame; initial_sequence=header.psn;
+                } else CHECK(header.flags.retx && initial_sequence && header.psn==*initial_sequence);
                 if (drop_first && controls==1) return SendResult::Accepted;
             } else if (header.ctl_type==Close_cmd) close_times.push_back(loop_.now());
         }
@@ -25,7 +27,7 @@ public:
         }
         if (packet.PDS_type==RUOD_req_header) {
             const auto& header=packet.PDS_header.RUOD_req_header;
-            CHECK(!header.flags.syn && header.psn==1001 && header.dpdcid>=512);
+            CHECK(initial_sequence && !header.flags.syn && header.psn==uint32_t(*initial_sequence+1) && header.dpdcid>=512);
         }
         return lower_.try_send(frame);
     }
@@ -33,6 +35,7 @@ public:
     void set_writable_handler(Writable callback) override { lower_.set_writable_handler(std::move(callback)); }
     bool drop_first=false; pdc_mode mode=ROD; size_t controls=0;
     std::optional<Frame> first; std::vector<Time> close_times;
+    std::optional<uint32_t> initial_sequence;
 private:
     IPacketPort& lower_; EventLoop& loop_; bool source_,ack_dropped_=false;
 };

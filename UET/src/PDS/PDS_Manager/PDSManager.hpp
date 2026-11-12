@@ -201,9 +201,6 @@ private:
     ConnectionIdentity connection_identities_[MAX_PDC * 2];
     std::map<std::tuple<uint32_t,uint32_t,uint8_t,uint8_t>,uint16_t> tx_contexts_;
     std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
-    using PeerTuple=std::tuple<uint32_t,uint32_t,uint16_t>;
-    struct RetiredReceiveContext { uint32_t final_psn; UET::Runtime::Time expires; };
-    std::map<PeerTuple,RetiredReceiveContext> retired_receive_contexts_;
     using OutgoingMessage=std::tuple<uint32_t,uint32_t,uint8_t,uint8_t,uint16_t>;
     std::set<OutgoingMessage> quiesced_messages_;
     std::map<uint16_t,std::deque<SES_PDS_req>> deferred_close_requests_;
@@ -371,19 +368,11 @@ public:
                 // A SYN must never create a context under that identity.
                 ++event_cnt; sendNack(&received_packet,UET_PDC_HDR_MISMATCH); return;
             }
-            const PeerTuple peer{received_packet.src_fep,received_packet.dst_fep,remote_pdc_id};
-            const auto retired=retired_receive_contexts_.find(peer);
-            if (runtime_ && retired!=retired_receive_contexts_.end()) {
-                if (runtime_->clock.now()>=retired->second.expires) retired_receive_contexts_.erase(retired);
-                else {
-                    const auto sequence=is_request?received_packet.PDS_header.RUOD_req_header.psn:
-                        received_packet.PDS_header.RUOD_cp_header.psn;
-                    if (sequence-retired->second.final_psn==0 || sequence-retired->second.final_psn>=0x80000000u) {
-                        sendNack(&received_packet,UET_CLOSING);
-                        return;
-                    }
-                }
-            }
+            // §3.5.8.2 step 3.d.i: plaintext startup does not validate the
+            // new Start_PSN against a retired peer's sequence floor. Random
+            // local-ID reuse across other peers can cross half the space.
+            // Live-context SYN/identity/window checks still apply below;
+            // authenticated anti-replay belongs to the TSS start methods.
             // SYN carries pdc_info/psn_off in place of dpdcid. Resolve it by
             // {source FEP, destination FEP, source PDCID}, never by that union.
             local_pdc_id = muxRx2PDCID(received_packet.src_fep,
@@ -1051,13 +1040,6 @@ public:
                 break;
             case PDC_TYPE::TPDC:
                 LOG_INFO("pdc_close", "Closing TPDC ID: " + std::to_string(pdc_id));
-                if (runtime_) {
-                    if (const auto sequence=TPDC_Processmanager.receiveSequenceSnapshot(pdc_id)) {
-                        const auto& identity=connection_identities_[pdc_id];
-                        retired_receive_contexts_[{identity.remote_endpoint,identity.local_endpoint,identity.remote_pdc_id}]=
-                            {sequence->second,UET::Runtime::add_time(runtime_->clock.now(),runtime_->syn_retransmission_safety_time)};
-                    }
-                }
                 TPDC_Processmanager.stopTPDCProcess(pdc_id);
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;

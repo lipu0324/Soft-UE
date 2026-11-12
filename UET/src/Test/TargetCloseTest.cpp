@@ -12,6 +12,8 @@ public:
     SendResult try_send(const Frame& frame) override {
         auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
         auto& packet=decoded.packet;
+        if (packet.PDS_type==RUOD_req_header && !initial_sequence)
+            initial_sequence=packet.PDS_header.RUOD_req_header.psn-packet.PDS_header.RUOD_req_header.psn_off;
         if (target_ && packet.PDS_type==RUOD_ack_header) local_pdc=packet.PDS_header.RUOD_ack_header.spdcid;
         if (target_ && packet.PDS_type==RUOD_ack_header &&
             packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_CP_ACK && strip_close_payload) {
@@ -49,6 +51,7 @@ public:
     uint16_t local_pdc=UINT16_MAX;
     size_t plain_acks=0;
     std::vector<uint32_t> requests,commands;
+    std::optional<uint32_t> initial_sequence;
 private:
     IPacketPort& lower_; EventLoop& loop_; bool target_;
 };
@@ -73,7 +76,7 @@ void target_requested_close(pdc_mode mode,bool lose_controls,bool silent_initiat
     CHECK(target_host.request_connection_close(target_port.local_pdc)); // Repeated local request is idempotent.
     loop.run(100000);
     CHECK(target_host.manager().getPDSStatus().open_cnt==0);
-    CHECK(!target_port.requests.empty() && target_port.requests.front()==1000);
+    CHECK(source_port.initial_sequence && !target_port.requests.empty() && target_port.requests.front()==*source_port.initial_sequence);
     if (silent_initiator) {
         CHECK(target_port.requests.size()>1 && source_port.commands.empty());
         source.submit(noop); loop.run(100000);

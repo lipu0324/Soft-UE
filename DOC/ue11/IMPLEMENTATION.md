@@ -13,6 +13,8 @@ The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating
 meaningful codepoints before peer binding; see [PDS reserved fields](PDS-RESERVED-FIELDS.md).
+Plaintext PDC epochs use injected pseudorandom initial sequences with retained
+local-ID separation; see [initial sequences](INITIAL-SEQUENCES.md).
 
 ## What runs
 
@@ -333,7 +335,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 280 are classified and split into obligations
+Profile classification. The first 300 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements

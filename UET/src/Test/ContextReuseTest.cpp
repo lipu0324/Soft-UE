@@ -24,8 +24,10 @@ public:
         } else if (packet.PDS_type==RUOD_ack_header &&
                    packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE && !first_response)
             first_response=frame;
-        else if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==Close_cmd)
+        else if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==Close_cmd) {
             close_times.push_back(loop_.now());
+            close_sequences.push_back(packet.PDS_header.RUOD_cp_header.psn);
+        }
         return lower_.try_send(frame);
     }
     void set_receiver(Receiver receiver) override { lower_.set_receiver(std::move(receiver)); }
@@ -35,6 +37,7 @@ public:
     std::optional<Frame> first_request,first_response;
     std::vector<uint32_t> request_sequences;
     std::vector<Time> close_times;
+    std::vector<uint32_t> close_sequences;
 private:
     IPacketPort& lower_;
     EventLoop& loop_;
@@ -61,7 +64,9 @@ void context_reuse_and_late_packets() {
     loop.run_until(2*kMillisecond);
     CHECK(source.poll_completion(completion) && completion.status==CompletionStatus::Success);
     CHECK(source_port.local_pdc==first_pdc);
-    CHECK(source_port.request_sequences.size()==2 && source_port.request_sequences[1]>source_port.request_sequences[0]);
+    CHECK(source_port.request_sequences.size()==2 && source_port.close_sequences.size()==1);
+    const uint32_t epoch_separation=source_port.request_sequences[1]-source_port.close_sequences.front();
+    CHECK(epoch_separation>=65536 && epoch_separation<0x80000000u);
     CHECK(source_host.manager().getPDSStatus().open_cnt==1);
     CHECK(target_host.manager().getPDSStatus().open_cnt==1);
 
