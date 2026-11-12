@@ -34,6 +34,7 @@ public:
             const auto type=frame.bytes[38]>>3;
             if (type==2 || type==3) {
                 CHECK(frame.bytes.size()>=94);
+                CHECK(frame.bytes[51]&0x20); // The provider explicitly chooses GO for all reliable levels.
                 const unsigned opcode=frame.bytes[50]&0x3f;
                 const auto previous=request_modes.find(opcode);
                 CHECK(previous==request_modes.end() || previous->second==type);
@@ -52,9 +53,9 @@ private:
 };
 
 
-void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,bool late_receive=false) {
+void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,bool late_receive=false,uint64_t completion_level=0) {
     const bool receive_was_late=late_receive;
-    ProviderFixture provider(ordering);
+    ProviderFixture provider(ordering,FI_FENCE|completion_level);
     RealtimeRuntime runtime; Trace trace(runtime.events(),0); UdpFramePort network(0);
     ObservedNativePort observed(network);
     PdsHost host(network.node(),runtime.events(),trace,observed); host.services().rto_ns=20*kMillisecond;
@@ -68,15 +69,15 @@ void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,b
     const uint64_t increment=1;
     iovec send_buffer{const_cast<char*>("hi"),2}; fi_msg send{};
     send.msg_iov=&send_buffer; send.iov_count=1; send.addr=peer; send.context=reinterpret_cast<void*>(1);
-    CHECK(fi_sendmsg(provider.endpoint,&send,FI_FENCE)==0);
+    CHECK(fi_sendmsg(provider.endpoint,&send,FI_FENCE|completion_level)==0);
     iovec write_buffer{const_cast<char*>("data"),4}; fi_rma_iov remote_write{8,4,region.key}; fi_msg_rma write{};
     write.msg_iov=&write_buffer; write.iov_count=1; write.addr=peer; write.rma_iov=&remote_write;
     write.rma_iov_count=1; write.context=reinterpret_cast<void*>(2);
-    CHECK(fi_writemsg(provider.endpoint,&write,FI_FENCE|FI_DELIVERY_COMPLETE)==0);
+    CHECK(fi_writemsg(provider.endpoint,&write,FI_FENCE|(completion_level?completion_level:FI_DELIVERY_COMPLETE))==0);
     fi_ioc atomic_buffer{const_cast<uint64_t*>(&increment),1}; fi_rma_ioc remote_atomic{24,1,region.key}; fi_msg_atomic atomic{};
     atomic.msg_iov=&atomic_buffer; atomic.iov_count=1; atomic.addr=peer; atomic.rma_iov=&remote_atomic;
     atomic.rma_iov_count=1; atomic.datatype=FI_UINT64; atomic.op=FI_SUM; atomic.context=reinterpret_cast<void*>(3);
-    CHECK(fi_atomicmsg(provider.endpoint,&atomic,FI_FENCE|FI_COMPLETION)==0);
+    CHECK(fi_atomicmsg(provider.endpoint,&atomic,FI_FENCE|FI_COMPLETION|completion_level)==0);
     size_t sends=0,receives=0;
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
     while ((sends<3 || receives<1) && std::chrono::steady_clock::now()<deadline) {
@@ -87,6 +88,7 @@ void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,b
             // The first RUD SEND was rejected with NO_MATCH. The provider
             // must retain its fence while hiding that intermediate error.
             CHECK(!observed.request_modes.count(1) && !observed.request_modes.count(3));
+            CHECK(sends==0); // Even weaker requested levels use the documented later GO point.
             target.post_receive(1,1,region.key,0,8,77); late_receive=false;
         }
     }
@@ -166,6 +168,9 @@ int main() {
     try {
         check_delivery_modes(0,false,false);
         check_delivery_modes(0,false,false,true);
+        check_delivery_modes(0,false,false,true,FI_INJECT_COMPLETE);
+        check_delivery_modes(0,false,false,true,FI_TRANSMIT_COMPLETE);
+        check_delivery_modes(FI_ORDER_SAS,true,false,false,FI_DELIVERY_COMPLETE);
         check_delivery_modes(FI_ORDER_SAS,true,false);
         check_delivery_modes(FI_ORDER_RMA_WAW,false,true);
         check_delivery_modes(FI_ORDER_SAS|FI_ORDER_RMA_WAW,true,true);

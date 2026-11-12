@@ -29,8 +29,15 @@ constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|
 // It therefore enforces FI_FENCE for every transmit (§3.4.2.7.1.1), even
 // across peers. This conservative policy trades concurrency for simplicity.
 constexpr size_t maximum_inject_bytes=256; // Advertised local copy bound, not a protocol MTU.
-constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_FENCE|FI_INJECT;
-constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE|FI_FENCE|FI_INJECT;
+constexpr uint64_t completion_levels=FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_DELIVERY_COMPLETE;
+// libfabric completion levels are minimum guarantees (fi_cq(3)). For RDM we
+// choose the stronger globally-observable completion for every level: all PDS
+// receipts plus semantic success, with SES DC requested. This also makes a
+// later DELIVERY_COMPLETE|FENCE cover prior weaker-level operations. No early
+// CQ or early buffer reuse is promised by INJECT_COMPLETE in this policy.
+// UUD uses local transmit acceptance and never promises remote completion.
+constexpr uint64_t supported_operation_flags=FI_COMPLETION|completion_levels|FI_FENCE|FI_INJECT;
+constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_FENCE|FI_INJECT;
 // §2.2.6 defines two independent ordering predicates. A cross-operation flag
 // can participate in both. The provider's one application FIFO also supplies
 // source-side fencing between ordered operations using different PDC modes.
@@ -811,8 +818,10 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->inject_size=maximum_inject_bytes;
-        info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;
-        if (hints && hints->tx_attr) info.tx_attr->op_flags|=hints->tx_attr->op_flags;
+        const auto requested_flags=hints && hints->tx_attr?hints->tx_attr->op_flags:uint64_t{0};
+        const auto requested_level=requested_flags&completion_levels;
+        info.tx_attr->op_flags=(requested_flags&~completion_levels)|
+            (requested_level?requested_level:datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE);
         info.tx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->tx_attr?hints->tx_attr->msg_order:uint64_t{FI_ORDER_SAS});
         info.tx_attr->comp_order=FI_ORDER_NONE;
         info.rx_attr->caps=available_caps&~(FI_SEND|FI_WRITE); info.rx_attr->size=4096;

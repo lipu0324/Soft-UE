@@ -74,16 +74,16 @@ fence 等待先前的本地发送完成。该队列也等待其他 peer 的在�
 端口号必须唯一；相同 ID 映射到不同 socket 地址会被拒绝。通过 `fi_getname` 获取
 实际分配的地址，再加入对端 AV。实验不要求 root 或 raw socket。
 
-READ、取回原子/CAS、浮点原子、tagged、inject、directed receive、
+READ、取回原子/CAS、浮点原子、tagged、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时
 验证发送端错误、接收端错误 CQ 和后续消息交付。更多 operation flags、完整 MR key
 类别和 API 验收仍属于 M3；当前测试不代替 libfabric 全套一致性验收。
 
-RDM 当前使用 `FI_DELIVERY_COMPLETE`；尚未实现独立的 `FI_TRANSMIT_COMPLETE` 完成点，
-因此该选项在 RDM 能力查询和消息 flags 中会被明确拒绝。DGRAM 则使用本地发送完成，
-支持 `FI_TRANSMIT_COMPLETE`。这两条路径不会混用完成含义。
+RDM 支持 INJECT_COMPLETE、TRANSMIT_COMPLETE、DELIVERY_COMPLETE，并选择更强的
+GO 完成点；DGRAM 支持前两种，采用本地发送完成。完成等级、DC 和 fence 的关系
+见 [完成语义](PROVIDER-COMPLETION.md)；完成等级不是最早 CQ 时刻的性能保证。
 
 ## Unexpected message 与恢复
 

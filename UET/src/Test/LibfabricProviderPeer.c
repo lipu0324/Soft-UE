@@ -32,8 +32,11 @@ int main(int argc,char** argv) {
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
     CHECK(info->domain_attr->mr_key_size==6); // RKEY bytes; fi_mr_key still returns all 64 metadata/key bits.
-    struct fi_info *unsupported_completion=NULL;
+    struct fi_info *transmit_information=NULL,*unsupported_completion=NULL;
     hints->tx_attr->op_flags=FI_TRANSMIT_COMPLETE;
+    SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&transmit_information));
+    CHECK(transmit_information->tx_attr->op_flags==FI_TRANSMIT_COMPLETE); fi_freeinfo(transmit_information);
+    hints->tx_attr->op_flags=FI_COMMIT_COMPLETE;
     CHECK(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&unsupported_completion)==-FI_ENODATA);
     CHECK(!unsupported_completion); hints->tx_attr->op_flags=0;
     CHECK(info->ep_attr->max_msg_size==UINT32_MAX);

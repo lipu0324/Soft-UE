@@ -147,8 +147,8 @@ void default_flags_and_override() {
     CHECK(std::all_of(harness.memory.begin()+256,harness.memory.begin()+556,[](auto value) { return value==8; }));
     harness.close();
 }
-void datagram_injection() {
-    InjectHarness harness(0,true); harness.post(0,256,1); harness.post(256,3,2); harness.post(300,1,3);
+void datagram_injection(uint64_t completion_level=0) {
+    InjectHarness harness(completion_level,true); harness.post(0,256,1); harness.post(256,3,2); harness.post(300,1,3);
     std::array<uint8_t,256> bytes{}; bytes.fill(9);
     CHECK(fi_inject(harness.provider.endpoint,bytes.data(),bytes.size(),harness.peer)==0); bytes.fill(0);
     std::array<uint8_t,3> data{{1,2,3}};
@@ -173,9 +173,23 @@ void injection_size_hints() {
     CHECK(fi_endpoint(provider.domain,provider.info,&invalid,nullptr)==-FI_EINVAL && !invalid);
     provider.close();
 }
+void completion_level_is_not_injection_size(uint64_t level) {
+    InjectHarness harness(level); harness.post(0,300,1);
+    CHECK((harness.provider.info->tx_attr->op_flags&(FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_DELIVERY_COMPLETE))==level);
+    std::array<uint8_t,300> ordinary{}; ordinary.fill(42);
+    CHECK(fi_send(harness.provider.endpoint,ordinary.data(),ordinary.size(),nullptr,harness.peer,reinterpret_cast<void*>(1))==0);
+    CHECK(fi_write(harness.provider.endpoint,ordinary.data(),ordinary.size(),nullptr,harness.peer,512,harness.region.key,reinterpret_cast<void*>(2))==0);
+    harness.drain(2,1);
+    CHECK(std::all_of(harness.memory.begin(),harness.memory.begin()+300,[](auto value) { return value==42; }));
+    CHECK(std::all_of(harness.memory.begin()+512,harness.memory.begin()+812,[](auto value) { return value==42; }));
+    harness.close();
+}
 int main() {
     try {
         reliable_injection(); default_flags_and_override(); datagram_injection(); injection_size_hints();
+        datagram_injection(FI_INJECT_COMPLETE);
+        completion_level_is_not_injection_size(FI_INJECT_COMPLETE);
+        completion_level_is_not_injection_size(FI_TRANSMIT_COMPLETE);
         std::cout<<"PASS injection ownership, retry copies, CQ suppression/errors, flags, boundaries and DGRAM\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

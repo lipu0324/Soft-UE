@@ -88,7 +88,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0112-002 | 表 2-21，三个 receive API 与 flag | fi_recv、fi_recvv、fi_recvmsg，至少 vendor 声明的 scatter-gather 大小；FI_COMPLETION 必选；消息边界/FIFO/JobID 条件分别验证。 | 目前支持单 iovec、普通接收与 FI_COMPLETION；authorization 分支未完成。MULTI_RECV 是 SHOULD，不能和强制基础接收混为一个义务。 |
 | UE11-p0112-003 | 表 2-22，fi_send | API 必选；DGRAM 映射 DATAGRAM_SEND，RDM 映射 SEND。 | 已有两种公开进程测试及 wire/CQ 回归。 |
 | UE11-p0112-004 | 表 2-22，fi_sendv 与跨页映射 | fi_sendv 必选，iovec 上限由 vendor 声明；AI Full/HPC 的大消息 opcode 选择在下一页展开。 | 单 iovec 路径存在；deferrable/rendezvous 的源端大小选择仍未实现。 |
-| UE11-p0113-001 | 表 2-22，多个 send/inject 义务 | fi_sendmsg 支持 CQ data、completion、inject、三种完成级别及 fence；fi_inject 成功不生成 CQ，可靠端点交付失败必须生成错误 CQ。 | CQ data/部分完成语义及 FI_FENCE 已实现；inject API/flag 已有所有权、CQ 与重试回归；inject-complete 与 RDM transmit-complete 尚缺。需拆成功抑制、错误报告和每个 flag，不能用 sendmsg 基础通过代替。 |
+| UE11-p0113-001 | 表 2-22，多个 send/inject 义务 | fi_sendmsg 支持 CQ data、completion、inject、三种完成级别及 fence；fi_inject 成功不生成 CQ，可靠端点交付失败必须生成错误 CQ。 | CQ data/部分完成语义及 FI_FENCE 已实现；inject API/flag 已有所有权、CQ 与重试回归；三个可靠完成等级采用更强 GO 完成点，标准地址/授权仍不全。需拆成功抑制、错误报告和每个 flag，不能用 sendmsg 基础通过代替。 |
 
 ## 第 61～80 个候选
 
@@ -107,7 +107,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | M5 缺失；其他地址字段参与 directed receive 属于可选，不能混入基础强制匹配。 |
 | UE11-p0116-002 | §2.2.5.4.2.1，Profile/能力条件项 | AI Full/HPC 支持 UNSPEC；HPC 支持指定源地址。 | 未实现；FI_EXACT_DIRECTED_RECV 例外声明及与前句的关系需在选用该能力时单独复核，当前不宣称该能力。 |
 | UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 与未标记 rendezvous 分开验收；两者当前均缺失。 |
-| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；READ 和其他完成等级仍缺失；inject 已覆盖复制/CQ/边界，FI_FENCE 已覆盖混合模式/重试。不能用 WRITE 成功证明整张表通过。 |
+| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；READ 仍缺失；三个完成等级采用 GO 点，inject 已覆盖复制/CQ/边界，FI_FENCE 已覆盖混合模式/重试。不能用 WRITE 成功证明整张表通过。 |
 | UE11-p0118-001 | §2.2.5.4.4，原子数量约束 | 非取回原子支持 bulk；取回原子限制为所选类型的一个单位。 | 非取回 bulk 已在 native/provider 实现并测试，公开 valid/query 返回类型相关数量；fetching 未实现，未来必须拒绝多单位。 |
 | UE11-p0118-002 | 表 2-26，非取回 API 与 flags | atomic/atomicv/atomicmsg 必选；支持 COMPLETION、INJECT、FENCE，以及下一页续列的 TAGGED。 | bulk 整数操作已有覆盖；FI_FENCE 与 FI_INJECT 已有公开 API 回归；TAGGED 尚缺。“all profiles” 按本章范围解释。 |
 | UE11-p0119-001 | 表 2-26，inject 与 fetching | inject_atomic 为基础要求；AI Full/HPC 支持 fetch_atomic/v/msg，flags 继承 atomicmsg。 | inject_atomic 已有公开 API 所有权、字节上限和成功 CQ 抑制回归；fetching 未实现，单单位约束仍待验收。 |
