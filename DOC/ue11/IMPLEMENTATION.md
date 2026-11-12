@@ -164,6 +164,17 @@ records can finish. This conservative refusal is bounded by the PDC count and
 never silently evicts an error record. It is not the complete ordered unexpected
 message/generation recovery scheme of §3.4.4.7; that scheme remains open.
 
+`PdsHost::request_connection_close()` accepts either local PDC role. An initiator
+quiesces and sends Close Command; a target schedules one Close Request, consumes
+a fresh return-direction PSN and retains it in the PDS TX cache. Lost requests
+and plain ACKs recover with the same PSN and RETX set. An acknowledged request
+waits for the initiator's Close Command; an unacknowledged request eventually
+terminates in error under the configured PDS retry budget. Repeated local
+requests and duplicate wire requests do not restart the handshake. The standard
+initiator requires the Close Command CP_ACK payload, so a plain ACK with the
+same PSN cannot cancel close recovery. ROD/RUD loss, silent-peer and stripped
+CP_ACK tests exercise these transitions; other control variants remain open.
+
 Simulation addresses are generated deterministically from numeric host IDs.
 `RealtimeRuntime` and `UdpFramePort` provide explicit monotonic and nonblocking
 socket progress. The outer UDP tunnel carries unchanged Ethernet/UE frames and

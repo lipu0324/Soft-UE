@@ -317,8 +317,9 @@ void T_PDC::openChk()
 
 void T_PDC::reqClose()
 {
-    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] req close" << std::endl;
-    sendCloseReq();      // Send close request
+    if (req_closing || state!=ESTABLISHED) return;
+    req_closing=true;
+    sendCloseReq(); // Schedule once; ordinary PDS timers own its retransmits.
 }
 
 void T_PDC::beginClose()

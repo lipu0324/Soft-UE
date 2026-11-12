@@ -401,6 +401,12 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
                 << ", cack_psn: " << cack_psn << std::endl;
 
     if(state==CLOSE_ACK_WAIT && ack_psn == close_psn){
+        // §3.5.16.4.1: only the Close Command CP_ACK completes this
+        // handshake. A plain or semantic ACK with the same numeric PSN must
+        // not remove the close packet or cancel its recovery timer.
+        if (runtime_ && runtime_->standard_wire &&
+            (pkt->PDS_header.RUOD_ack_header.next_hdr!=UET_HDR_CP_ACK ||
+             pkt->control_ack.cp_ack_type!=Close_cmd)) return;
         LOG_INFO(__FUNCTION__, "Close confirmation ACK received, execute closure");
         close();
     }
@@ -472,8 +478,28 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
             rxCtrlClearReq(pkt);
             break;
         case Close_req:
-            closeReq();
+        {
+            const auto& control=pkt->PDS_header.RUOD_cp_header;
+            // §3.5.16.4.2: Close Request consumes a PSN in the return
+            // direction and receives a plain ACK. A retransmitted request must
+            // be ACKed again without restarting an in-progress close command.
+            const auto distance=control.psn-rx_cur_psn;
+            const bool duplicate=distance==0 || distance>=0x80000000u || received_rx_psns_.count(control.psn);
+            if (duplicate) {
+                if (control.flags.retx) sendAck(UET_HDR_NONE,0,0,control.psn,nullptr,false);
+                break;
+            }
+            if (mode==ROD && distance!=1) {
+                sendNack(control.flags.retx,control.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr); break;
+            }
+            if (mode==RUD && distance>MPR) break;
+            received_rx_psns_.insert(control.psn); completed_rx_psns_.insert(control.psn);
+            while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
+            advanceCumulativeAck();
+            sendAck(UET_HDR_NONE,0,0,control.psn,nullptr,false);
+            if (!close_req && !closing && state!=CLOSE_ACK_WAIT) closeReq();
             break;
+        }
             // case
         }
     }

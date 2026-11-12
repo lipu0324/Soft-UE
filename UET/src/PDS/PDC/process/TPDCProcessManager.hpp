@@ -529,6 +529,15 @@ public:
                it->second->tpdc_instance->state.load() == ESTABLISHED;
     }
 
+    bool requestConnectionClose(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(pdcid);
+        if (found==tpdc_processes.end() || !found->second->tpdc_instance ||
+            found->second->tpdc_instance->state.load()!=ESTABLISHED) return false;
+        found->second->tpdc_instance->reqClose();
+        return true;
+    }
+
     /**
      * @brief Check if TPDC can be closed using built-in PDC method
      * @param pdcid PDC identifier

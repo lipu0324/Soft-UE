@@ -515,22 +515,22 @@ void PDC::txCtrl(){
         case NOOP:
             sendCtrlNoop(&p);
             break;
-        case ACK_req:
+        case ACK_REQ:
             sendCtrlAckReq(&p);
             break;
-        case Clear_cmd:
+        case CLR_CMD:
             sendCtrlClearCmd(&p);
             break;
-        case Clear_req:
+        case CLR_REQ:
             sendCtrlClearReq(&p);
             break;
-        case Close_req:
+        case CLOSE_REQ:
             sendCtrlCloseReq(&p);
             break;
-        case Credit:
+        case CREDIT:
             sendCtrlCredit(&p);
             break;
-        case Negotiation:
+        case NEGOTIATION:
             sendCtrlNegotiation(&p);
             break;
         default:
@@ -829,40 +829,10 @@ void PDC::rxCtrlClearReq(PDStoNET_pkt *p)
  */
 void PDC::sendCloseReq()
 {
-    PDStoNET_pkt pkt = {};  
-    pkt.src_fep = src_fep;
-    pkt.dst_fep = dst_fep;
-    pkt.PDS_type = RUOD_cp_header;
-    pkt.PDS_header.RUOD_cp_header.type = CP;
-    pkt.PDS_header.RUOD_cp_header.ctl_type = Close_req;
-    pkt.PDS_header.RUOD_cp_header.flags.isrod = 1;
-    pkt.PDS_header.RUOD_cp_header.flags.retx = 0;
-    pkt.PDS_header.RUOD_cp_header.psn = tx_cur_psn;
-    pkt.PDS_header.RUOD_cp_header.spdcid = SPDCID;
-    pkt.PDS_header.RUOD_cp_header.dpdcid = DPDCID;
-
-    TX_pkt_meta meta;
-    meta.tx_pkt_handle = 0;
-    meta.rto = Base_RTO;
-    meta.retry_cnt = 0;
-
-    tx_ack_buffer.insert(std::make_pair(tx_cur_psn, pkt));
-    tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
-
-    if(rtoEnabled()){
-       startPacketTimer(tx_cur_psn, 0);
-    }
-
-    updateTxPsnTracker();
-    
-
-    if (public_net_queue) {
-        public_net_queue->push(pkt);
-    } else {
-        tx_pkt_q.push(pkt);
-    }
-    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Send close request" << std::endl;
-}    
+    // Use the common control builder and TX cache, never the semantic ACK
+    // cache. §3.5.16.4 requires a fresh PSN, AR=1 and reliable retry.
+    gen_cm=CLOSE_REQ;
+}
 /**
  * @brief Send close acknowledgment packet // 发送关闭确认包
  */
@@ -964,7 +934,8 @@ void PDC::sendCtrlCloseReq(PDStoNET_pkt *p)
     LOG_INFO(__FUNCTION__, formatLogMessage("Send Close_req control packet"));
     p->PDS_header.RUOD_cp_header.ctl_type = Close_req;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;
-    p->PDS_header.RUOD_cp_header.psn = tx_cur_psn; 
+    p->PDS_header.RUOD_cp_header.psn = setPsn();
+    p->PDS_header.RUOD_cp_header.flags.isrod = 0; // Reserved in a CP.
     p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
     p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
     p->PDS_header.RUOD_cp_header.pdc_info = 0;

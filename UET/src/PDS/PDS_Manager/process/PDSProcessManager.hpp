@@ -133,12 +133,14 @@ public:
         LOG_DEBUG(__FUNCTION__, "PDS process manager initialized");
     }
 
-    // The initiator owns graceful PDC close (§3.5.8.3). This is a control
-    // request; the owning progress loop performs the actual transition.
+    // The initiator owns graceful close (§3.5.8.3). A target sends a Close
+    // Request CP; it cannot unilaterally perform the successful close handshake.
     bool requestConnectionClose(uint16_t local_pdc_id) {
         std::lock_guard<std::mutex> lock(manager_mutex);
-        return pds_process_info && local_pdc_id<MAX_PDC &&
-            pds_process_info->pds_instance->IPDC_Processmanager.sendCloseReq(local_pdc_id);
+        if (!pds_process_info || local_pdc_id>=MAX_PDC*2) return false;
+        return local_pdc_id<MAX_PDC?
+            pds_process_info->pds_instance->IPDC_Processmanager.sendCloseReq(local_pdc_id):
+            pds_process_info->pds_instance->TPDC_Processmanager.requestConnectionClose(local_pdc_id);
     }
     void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
         std::lock_guard<std::mutex> lock(manager_mutex);

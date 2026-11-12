@@ -179,14 +179,15 @@
         "pds_recovery_test",
         "context_reuse_test",
         "resource_lifecycle_test",
-        "control_ack_test"
+        "control_ack_test",
+        "target_close_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Close/SYN safety, retained per-ID PSNs, late old SYN/ACK rejection, bounded resource queues and reuse tested. Full control/error/sequence-wrap matrix remains open. Reserved PDCID zero is excluded from allocation and rejected on SYN."
+      "evidence_note": "Normal/lossy initiator close, target Close Request with plain ACK, same-PSN retries, idempotent requests, silent-initiator retry exhaustion, required Close Command CP_ACK and context reuse are tested for ROD/RUD. Full control/negotiation/expected-start and wrap matrix remain open."
     },
     {
       "id": "PDS-TRIM",
