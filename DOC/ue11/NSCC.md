@@ -102,6 +102,7 @@ host.enable_nscc(congestion);
 名义 MTU 必须覆盖实验中最大的语义头、扩展头及 payload。UDP、不同 payload MTU 或
 原子扩展头需要重新计算，不能直接复制示例数值。NSCC 当前须显式开启，便于
 与尚未配置 CMS 的旧测试、实时适配器和参考实现分别进行实验。
+YAML 的速率单位、窗口配置和实际逐跳抓包边界见 [网络实验](NETWORK-EXPERIMENTS.md)。
 
 ```sh
 ctest --test-dir build/cmake -R 'nscc|fabric_congestion|uet_wire' --output-on-failure
@@ -120,5 +121,6 @@ NSCC 开启和关闭两种运行的报告。命令和工作流的存在不代替
 无 TSS 的真实截短、NACK 与恢复路径见 [trimming](TRIMMING.md)。
 
 仍需完成：trimming 的完整故障组合与安全扩展、完整 Probe/base RTT 初始化、MPR/SACK 与所有控制路径的
-联合验收、控制路径 entropy 完整覆盖、incast/竞争流/不对称路径
-验收与场景配置输出。RCCC、TFC、CSIG 和其他 Profile 的相关路径在后续阶段实现。
+联合验收、控制路径 entropy 完整覆盖以及更广泛的工作负载验收。当前已提供 incast、
+竞争流、不对称路径和暂时断链的确定性场景及逐跳输出；它们不是完整 M4/Profile
+验收。RCCC、TFC、CSIG 和其他 Profile 的相关路径在后续阶段实现。

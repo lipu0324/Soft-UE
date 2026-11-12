@@ -356,14 +356,15 @@
         "fabric_congestion_test",
         "uet_wire_test",
         "packet_trimming_test",
-        "mac_timing_test"
+        "mac_timing_test",
+        "simulation_scenarios"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, four ECN/delay cases, quick adapt, plaintext trimming, Probe feedback and behavioral MAC timestamps implemented. Complete joint control/fault matrices and incast/profile acceptance remain open; see NSCC.md, TRIMMING.md and MAC-TIMING.md."
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md."
     },
     {
       "id": "NET-BASE",
@@ -378,7 +379,7 @@
         "mac_timing_test"
       ],
       "profiles": [],
-      "evidence_note": "Independent TC buffers, byte-deficit round robin, dequeue ECN, DSCP trim reclassification, first-bit arrival/departure timing, serialization-consuming random loss and link-failure generations tested. Full M4 workload acceptance remains open."
+      "evidence_note": "Independent TC queues, byte-deficit round robin, dequeue ECN, true trimming, first-bit timing, serialized random loss and link generations tested. YAML config, per-hop PCAP/index and incast/competition/asymmetric/outage examples implemented. Full M4/Profile acceptance remains open; see NETWORK-EXPERIMENTS.md."
     },
     {
       "id": "SES-READ",

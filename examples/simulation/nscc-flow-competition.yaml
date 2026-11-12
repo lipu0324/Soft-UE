@@ -1,0 +1,25 @@
+# Two equal, simultaneous flows compete on one shared directed-link queue.
+# The reported Jain index compares per-flow completion goodput, not steady state.
+version: 1
+profile: experimental
+seed: 42
+duration_ns: 50000000
+hosts: [1, 2, 3, 4]
+switches: [10, 20]
+nscc:
+  enabled: true
+  receiver_bytes_per_second: 125000000
+links:
+  - {from: 1, to: 10}
+  - {from: 2, to: 10}
+  - from: 10
+    to: 20
+    rate_bps: 1000000000
+    ecn_threshold_bytes: [4096, null, null, null, null, null, null, null]
+    traffic_class_weights: [1, 2, 1, 1, 1, 1, 1, 1]
+    scheduling_quantum_bytes: 256
+  - {from: 20, to: 3}
+  - {from: 20, to: 4}
+operations:
+  - {type: write, delivery_mode: rod, source: 1, target: 3, bytes: 65536}
+  - {type: write, delivery_mode: rod, source: 2, target: 4, bytes: 65536}

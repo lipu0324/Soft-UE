@@ -1,0 +1,28 @@
+# Three sources share a 1 Gb/s last hop. The tiny data queue forces real
+# trimming; the original PDS recovers, and every WRITE is memory-verified.
+version: 1
+profile: experimental
+seed: 42
+duration_ns: 50000000
+hosts: [1, 2, 3, 4]
+switches: [10]
+trimming: true
+nscc:
+  enabled: true
+  base_rtt_ns: 12000
+  sender_bytes_per_second: 12500000000
+  receiver_bytes_per_second: 125000000
+links:
+  - {from: 1, to: 10}
+  - {from: 2, to: 10}
+  - {from: 3, to: 10}
+  - from: 10
+    to: 4
+    rate_bps: 1000000000
+    mtu: 1500
+    buffer_bytes: 1500
+    ecn_threshold_bytes: [0, null, null, null, null, null, null, null]
+operations:
+  - {type: write, delivery_mode: rud, source: 1, target: 4, bytes: 8192, offset: 0}
+  - {type: write, delivery_mode: rud, source: 2, target: 4, bytes: 8192, offset: 8192}
+  - {type: write, delivery_mode: rud, source: 3, target: 4, bytes: 8192, offset: 16384}

@@ -39,9 +39,11 @@ endpoint. Network atomics support signed/unsigned integer types and min, max,
   and retry admission. RCCC, LLR, CBFC/PFC, negotiated link capabilities and a full
   PHY error model remain open; see [NSCC](NSCC.md) and [trimming](TRIMMING.md).
 - YAML experiments produce memory-verified results, a structured virtual-time
-  trace, an Ethernet nanosecond PCAP, diagnostic protocol logs and source/spec
+  trace, FEP and per-hop Ethernet nanosecond PCAPs, diagnostic protocol logs and source/spec/binary
   provenance. The runner supports 2–64 hosts and NO_OP, SEND and WRITE;
   the other native operations require the native API or their regression fixtures.
+  Explicit NSCC, ECN/trim queues, RUD/ROD and timed link events are documented
+  in [network experiments](NETWORK-EXPERIMENTS.md), including metric definitions.
 
 - PDS processes per-packet SACK independently of CMS, queries confirmed data for
   lost semantic responses, infers DEFAULT only from a strictly-higher CACK, and
