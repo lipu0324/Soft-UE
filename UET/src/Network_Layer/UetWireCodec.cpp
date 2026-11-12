@@ -129,17 +129,18 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
         packet.SESpkt.bth_type = Standard_Header;
         auto& header = packet.SESpkt.bth_header.Standard_Header;
         const auto opcode=reader.take(1), flags=reader.take(1);
-        if ((opcode&0xc0)||(flags&0xc0)) throw std::invalid_argument("reserved SES bits or unsupported version");
-        header.opcode=opcode; header.dc=(flags>>5)&1; header.ie=(flags>>4)&1; header.rel=(flags>>3)&1;
+        // §3.4.3: reserved fields are zero on transmit and ignored on receive.
+        // The version field is meaningful, so an unsupported version remains
+        // an error rather than being silently treated as version zero.
+        if (flags&0xc0) throw std::invalid_argument("unsupported SES version");
+        header.opcode=opcode&0x3f; header.dc=(flags>>5)&1; header.ie=(flags>>4)&1; header.rel=(flags>>3)&1;
         header.hd=(flags>>2)&1; header.eom=(flags>>1)&1; header.som=flags&1;
         header.msg_id=reader.take(2); const auto job=reader.take(4); header.ri_generation=job>>24; header.job_id=job&0xffffff;
         const auto pid=reader.take(2), ri=reader.take(2);
-        if ((pid&0xf000)||(ri&0xf000)) throw std::invalid_argument("reserved address bits");
-        header.PIDonFEP=pid; header.resource_index=ri; header.buffer_offset=reader.take(8);
+        header.PIDonFEP=pid&0xfff; header.resource_index=ri&0xfff; header.buffer_offset=reader.take(8);
         header.initiator=reader.take(4); header.match_bits=reader.take(8); const auto data=reader.take(8);
         if (header.som) header.diff.som_true.header_data=data;
         else {
-            if (data>>46) throw std::invalid_argument("reserved SES payload bits");
             header.diff.som_false.payload_length=(data>>32)&0x3fff;
             header.diff.som_false.message_offset=data&0xffffffff;
         }
@@ -149,7 +150,7 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
             auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
             atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
             atomic.semantic_contol=reader.take(1);
-            if (reader.take(1)) throw std::invalid_argument("reserved atomic extension bits");
+            reader.take(1); // Reserved octet, ignored after integrity validation.
         }
     } else if (next == UET_HDR_RESPONSE) {
         packet.SESpkt.bth_type=Semantic_Response_Header;
@@ -165,10 +166,9 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
         const auto op=reader.take(1), code=reader.take(1);
         if (code&0xc0) throw std::invalid_argument("unsupported SES response version");
         header.list=op>>6; header.opcode=op&0x3f; header.return_code=code; header.response_message_id=reader.take(2);
-        const auto job=reader.take(4); if (job>>24) throw std::invalid_argument("reserved response bits");
-        header.job_id=job; header.read_request_msg_id=reader.take(2); const auto length=reader.take(2);
-        if (length>>14) throw std::invalid_argument("reserved response payload bits");
-        header.payload_length=length; header.modified_length=reader.take(4); header.message_offset=reader.take(4);
+        const auto job=reader.take(4);
+        header.job_id=job&0xffffff; header.read_request_msg_id=reader.take(2); const auto length=reader.take(2);
+        header.payload_length=length&0x3fff; header.modified_length=reader.take(4); header.message_offset=reader.take(4);
     } else throw std::invalid_argument("SES wire format not implemented");
     packet.SESpkt.payload=reader.rest();
 }

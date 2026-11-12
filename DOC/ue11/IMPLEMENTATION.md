@@ -9,6 +9,9 @@ disabled.
 See [the baseline audit](BASELINE-AUDIT.md) for the actual protocol paths exercised
 by each regression, concrete remaining placeholders and the next gated work.
 
+The implemented SES formats ignore reserved receive fields after integrity
+validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
+
 ## What runs
 
 - The original `PDS_Manager`, `I_PDC` and `T_PDC` run with an injected nanosecond
