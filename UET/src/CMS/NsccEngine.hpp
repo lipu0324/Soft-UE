@@ -49,6 +49,7 @@ public:
         ack.newly_received_bytes=state.byte_counter.acknowledge(feedback.received_byte_units);
         ack.congestion_marked=packet.PDS_header.RUOD_ack_header.flags.m;
         ack.packet=sample; ack.service_time_quanta=feedback.service_time;
+        if (packet.has_receive_timestamp) ack.first_bit_arrival_ns=packet.receive_time_ns;
         ack.retransmit_flag=packet.PDS_header.RUOD_ack_header.flags.retx;
         ack.receiver_window_penalty=feedback.receiver_window_penalty; ack.restore_window=feedback.restore_window;
         state.inflight_contribution-=static_cast<int64_t>(ack.newly_received_bytes);

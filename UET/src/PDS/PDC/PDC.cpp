@@ -183,7 +183,7 @@ void PDC::processCongestionAck(const PDStoNET_pkt& packet) {
     const uint32_t sequence=ack.cack_psn+ack.ack_psn_off;
     std::optional<UET::CMS::NsccTransmitSample> sample;
     const auto found=tx_pkt_map.find(sequence);
-    if (found!=tx_pkt_map.end() && found->second.congestion_nominal_bytes && !found->second.delivery_confirmed)
+    if (found!=tx_pkt_map.end() && found->second.congestion_nominal_bytes && !found->second.delivery_confirmed && found->second.transmit_time_valid)
         sample=UET::CMS::NsccTransmitSample{found->second.last_transmit_time,found->second.retry_cnt};
     runtime_->congestion_control->acknowledged(congestionConnection(),packet,sample);
 }
@@ -291,6 +291,7 @@ void PDC::decorateAcknowledgmentNetwork(uint32_t sequence,const PDStoNET_pkt* tr
     // §3.5.12.2 / §3.5.12.7: ACK/NACK reflects the triggering packet, not
     // the original request whose semantic result is being queried/replayed.
     response.wire_entropy=entropy;
+    response.acknowledgment_trigger_arrival_ns=arrival;
     if (response.PDS_type==RUOD_ack_header) {
         response.PDS_header.RUOD_ack_header.flags.m=marked;
         response.PDS_header.RUOD_ack_header.flags.retx=retransmitted;
@@ -497,6 +498,7 @@ void PDC::reTx(uint32_t psn){
         control.psn=psn; control.spdcid=SPDCID; control.dpdcid=DPDCID;
         control.payload=uint32_t{p.SESpkt.bth_header.Standard_Header.msg_id}<<16;
         decorateControl(query);
+        tagTransmission(query,psn,UET::Runtime::TransmitKind::SemanticQuery,tx_pkt_map.at(psn).retry_cnt);
         if (public_net_queue) public_net_queue->push(query); else tx_pkt_q.push(query);
         return;
     }
@@ -524,7 +526,8 @@ void PDC::reTx(uint32_t psn){
         metadata.congestion_inflight=true;
     }
     found->second=p;
-    if (runtime_ && tx_pkt_map.count(psn)) tx_pkt_map.at(psn).last_transmit_time=runtime_->clock.now();
+    tagTransmission(p,psn,p.PDS_type==RUOD_cp_header?UET::Runtime::TransmitKind::NumberedControl:
+        UET::Runtime::TransmitKind::Request,tx_pkt_map.count(psn)?tx_pkt_map.at(psn).retry_cnt:0);
     if (public_net_queue) {
         public_net_queue->push(p);
     } else {
@@ -538,6 +541,7 @@ void PDC::reTx(uint32_t psn){
  */
 void PDC::txRto(uint32_t psn){
     if (!tx_pkt_map.count(psn) || !tx_pkt_buffer.count(psn)) return;
+    if (waitsForTransmitNotification() && tx_pkt_map.at(psn).awaiting_transmission) return;
     if (nack_traffic_paused_ && tx_pkt_buffer.at(psn).PDS_type!=RUOD_cp_header) {
         deferred_nack_retransmits_.insert(psn);
         return;
@@ -563,7 +567,7 @@ void PDC::txRto(uint32_t psn){
     const bool lost_syn=lost_packet.PDS_type==RUOD_req_header?
         lost_packet.PDS_header.RUOD_req_header.flags.syn:
         lost_packet.PDS_type==RUOD_cp_header && lost_packet.PDS_header.RUOD_cp_header.flags.syn;
-    if (runtime_ && lost_syn) {
+    if (runtime_ && lost_syn && !semantic_query && meta.transmit_time_valid) {
         syn_safety_deadline_=std::max(syn_safety_deadline_,
             UET::Runtime::add_time(meta.last_transmit_time,runtime_->syn_retransmission_safety_time));
         if (closing) armCloseSafetyWake();
@@ -576,7 +580,7 @@ void PDC::txRto(uint32_t psn){
                 << ", retry_cnt: " << meta.retry_cnt
                 << ", new_rto22: " << meta.rto << std::endl;
         
-        startPacketTimer(psn, meta.retry_cnt);
+        if (!waitsForTransmitNotification()) startPacketTimer(psn, meta.retry_cnt);
 
         std::stringstream retry_info;
         retry_info << "Retransmit packet - PSN: " << psn
@@ -671,6 +675,7 @@ void PDC::freePDC()
         }
         tx_req_q.pop();
     }
+    transmit_incarnation_=0;
     releaseCongestionState();
     peer_sequence_window_.reset();
     resetCloseSafety();
@@ -796,12 +801,13 @@ void PDC::txCtrl(){
            p.PDS_header.RUOD_cp_header.ctl_type == Close_req ||
            p.PDS_header.RUOD_cp_header.ctl_type == Negotiation){
             const auto sequence = p.PDS_header.RUOD_cp_header.psn;
-            tx_pkt_buffer.insert(std::make_pair(sequence,p));
             TX_pkt_meta meta{};
             meta.rto = runtime_ ? runtime_->rto_ms : Base_RTO;
             if (runtime_) meta.last_transmit_time=runtime_->clock.now();
             tx_pkt_map.emplace(sequence,meta);
-            if(rtoEnabled()){
+            tagTransmission(p,sequence,UET::Runtime::TransmitKind::NumberedControl,0);
+            tx_pkt_buffer.insert(std::make_pair(sequence,p));
+            if(rtoEnabled() && !waitsForTransmitNotification()){
                 startPacketTimer(sequence, 0);
             }
         }
@@ -1236,9 +1242,9 @@ void PDC::rxNack(PDStoNET_pkt* packet)
     if (!tx_pkt_buffer.count(negative_ack.nack_psn)) return;
     if (runtime_ && runtime_->congestion_control) {
         auto& metadata=tx_pkt_map.at(negative_ack.nack_psn);
-        if (metadata.congestion_inflight) {
+        if (metadata.congestion_inflight && !metadata.awaiting_transmission) {
             runtime_->congestion_control->negative_acknowledged(congestionConnection(),metadata.congestion_nominal_bytes,
-                *packet,UET::CMS::NsccTransmitSample{metadata.last_transmit_time,metadata.retry_cnt});
+                *packet,metadata.transmit_time_valid?std::optional<UET::CMS::NsccTransmitSample>{{metadata.last_transmit_time,metadata.retry_cnt}}:std::nullopt);
             metadata.congestion_inflight=false;
         }
     }
@@ -1330,6 +1336,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
         emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
             pkt->bth_header.Standard_Header.job_id,pkt->bth_header.Standard_Header.msg_id,
             pkt->bth_header.Standard_Header.eom);
+    tagTransmission(p,psn,UET::Runtime::TransmitKind::Request,0);
     tx_pkt_buffer.insert(std::make_pair(psn,p)); 
 
     TX_pkt_meta meta;
@@ -1338,7 +1345,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(psn, meta));
 
-    if(rtoEnabled()){
+    if(rtoEnabled() && !waitsForTransmitNotification()){
         startPacketTimer(psn, 0); 
     }
 

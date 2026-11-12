@@ -36,6 +36,7 @@
  * @return Initialization success status
  */
 bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
+    if (!beginTransmitIncarnation()) return false;
     resetCloseSafety();
     resetProbe();
     clearAllPacketTimers();
@@ -640,9 +641,10 @@ void I_PDC::sendClose(){
     tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
 
     decorateControl(ctrl_pkt);
+    tagTransmission(ctrl_pkt,tx_cur_psn,UET::Runtime::TransmitKind::NumberedControl,0);
     tx_pkt_buffer.insert(std::make_pair(tx_cur_psn, ctrl_pkt));
 
-    if(rtoEnabled()){
+    if(rtoEnabled() && !waitsForTransmitNotification()){
         startPacketTimer(tx_cur_psn, 0); 
     }
 

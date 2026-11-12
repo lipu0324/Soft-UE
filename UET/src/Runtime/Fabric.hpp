@@ -40,6 +40,7 @@ class Fabric {
 public:
     class Port final : public IPacketPort {
     public:
+        bool provides_transmit_timing() const override { return true; }
         SendResult try_send(const Frame& frame) override {
             if (frame.source != node_) throw std::invalid_argument("frame source does not own port");
             return fabric_.send(frame);
@@ -89,6 +90,7 @@ public:
     }
     const LinkStats& stats(uint32_t from, uint32_t to) const { return edges_.at({from,to}).stats; }
     void set_capture(std::function<void(Time,const Frame&)> capture) { capture_=std::move(capture); }
+    void set_link_capture(std::function<void(Time,uint32_t,uint32_t,const Frame&)> capture) { link_capture_=std::move(capture); }
 
 private:
     struct QueuedFrame {
@@ -116,6 +118,7 @@ private:
     std::set<TimerId> timers_;
     std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
     std::function<void(Time,const Frame&)> capture_;
+    std::function<void(Time,uint32_t,uint32_t,const Frame&)> link_capture_;
 
     void schedule(Time when, std::function<void()> callback) {
         auto id = std::make_shared<TimerId>(0);
@@ -162,7 +165,9 @@ private:
         trace_.record(frame.source, "fabric_tx", frame.bytes.size());
         if (capture_) capture_(loop_.now(),frame);
         if (path.size() == 1) {
-            schedule(loop_.now(), [this, frame] { deliver(frame); });
+            auto local_frame=frame; prepare_first_transmission(local_frame,loop_.now());
+            local_frame.first_byte_arrival_ns=loop_.now(); local_frame.has_arrival_timestamp=true;
+            schedule(loop_.now(), [this, local_frame] { deliver(local_frame); });
         } else forward(std::make_shared<Frame>(frame), std::make_shared<std::vector<uint32_t>>(path), 1);
         return SendResult::Accepted;
     }
@@ -192,6 +197,7 @@ private:
         }
         auto traffic_class=frame->traffic_class;
         const auto drop=[&] {
+            reject_before_transmission(*frame,loop_.now());
             ++stats.dropped;
             trace_.record(key.first, "link_drop", key.second);
         };
@@ -213,7 +219,6 @@ private:
             // and still drops normally if that queue has insufficient space.
             if (size>edge.config.buffer_bytes-stats.queued_by_class[traffic_class]) { drop(); return; }
         }
-        if (random_.chance(edge.config.drop_ppm)) { drop(); return; }
         stats.queued_bytes+=size; stats.queued_by_class[traffic_class]+=size;
         stats.peak_queue_bytes=std::max(stats.peak_queue_bytes,stats.queued_bytes);
         stats.peak_by_class[traffic_class]=std::max(stats.peak_by_class[traffic_class],stats.queued_by_class[traffic_class]);
@@ -225,7 +230,8 @@ private:
         for (size_t traffic_class=0;traffic_class<8;++traffic_class) {
             auto& queue=edge.queues[traffic_class];
             while (!queue.empty()) {
-                const auto size=queue.front().frame->bytes.size(); queue.pop_front();
+                const auto size=queue.front().frame->bytes.size();
+                reject_before_transmission(*queue.front().frame,loop_.now()); queue.pop_front();
                 edge.stats.queued_bytes-=size; edge.stats.queued_by_class[traffic_class]-=size;
                 ++edge.stats.dropped; trace_.record(key.first,"link_drop",key.second);
             }
@@ -277,6 +283,11 @@ private:
                 }
             } catch (const std::invalid_argument&) { /* Non-IP test frames are not ECN-capable. */ }
         }
+        prepare_first_transmission(*frame,loop_.now());
+        if (link_capture_) link_capture_(loop_.now(),key.first,key.second,*frame);
+        // Random link loss still consumes serialization and wire capacity.
+        // Queue rejection above has its separate pre-transmission outcome.
+        const bool lost_on_wire=random_.chance(edge.config.drop_ppm);
         const auto numerator = static_cast<unsigned __int128>(size) * 8 * 1000000000ULL;
         const auto serial = (numerator + edge.config.rate_bps - 1) / edge.config.rate_bps;
         if (serial > UINT64_MAX) throw std::overflow_error("serialization time overflow");
@@ -289,9 +300,9 @@ private:
             auto& edge=edges_.at(key); edge.stats.queued_bytes-=size; edge.stats.queued_by_class[traffic_class]-=size;
             edge.transmitting=false; serialize_next(key);
         });
-        schedule(arrival, [this, key, frame, path, hop, generation, first_byte_arrival] {
+        schedule(arrival, [this, key, frame, path, hop, generation, first_byte_arrival, lost_on_wire] {
             auto& edge = edges_.at(key);
-            if (!edge.up || edge.generation!=generation) { ++edge.stats.dropped; trace_.record(key.first,"link_drop",key.second); return; }
+            if (lost_on_wire || !edge.up || edge.generation!=generation) { ++edge.stats.dropped; trace_.record(key.first,"link_drop",key.second); return; }
             ++edge.stats.delivered;
             frame->first_byte_arrival_ns=first_byte_arrival; frame->has_arrival_timestamp=true;
             if (hop + 1 == path->size()) deliver(*frame);

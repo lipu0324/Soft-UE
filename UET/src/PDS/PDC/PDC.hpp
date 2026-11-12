@@ -315,6 +315,7 @@ struct TX_pkt_meta
     uint16_t rto;           /**< Retransmission timeout time */
     uint16_t retry_cnt;     /**< Retry count */
     UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
+    bool transmit_time_valid=false,awaiting_transmission=false;
     uint32_t congestion_nominal_bytes=0;
     bool congestion_inflight=false; // One debit per attempt, released by ACK counter/NACK/loss.
     // PDS delivery knowledge is independent of whether CMS is enabled. SACK
@@ -462,6 +463,7 @@ public:
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
     bool requestProbe(uint32_t selective_base);
     bool probePending() const { return outstanding_probe_.has_value(); }
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification);
     bool awaitsSemantic(uint32_t psn) const {
         // The explicit legacy SES path uses version 2 and omits DC. Preserve
         // its semantic-response contract; standard wire requests use version 0.
@@ -488,9 +490,13 @@ public:
     }
 
 protected:
+    uint64_t transmit_incarnation_=0;
+    bool beginTransmitIncarnation();
+    bool waitsForTransmitNotification() const { return runtime_ && runtime_->actual_transmit_notifications && transmit_incarnation_; }
+    void tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,uint16_t attempt,uint16_t opaque=0);
     // Probe has an opaque identifier and its own timer. PSN zero remains
     // available to real data at wrap; Probe never occupies a TX data slot.
-    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint16_t retries=0; };
+    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint16_t retries=0; bool transmit_time_valid=false,awaiting_transmission=false; };
     std::optional<ProbeAttempt> outstanding_probe_;
     UET::Runtime::TimerId probe_timer_=0;
     UET::Runtime::Time next_window_probe_time_=0;

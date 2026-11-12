@@ -529,6 +529,12 @@ public:
                it->second->tpdc_instance->state.load() == ESTABLISHED;
     }
 
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(notification.identity.local_pdc);
+        return found!=tpdc_processes.end() && found->second->tpdc_instance->notifyTransmit(notification);
+    }
+
     bool requestConnectionClose(uint16_t pdcid) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=tpdc_processes.find(pdcid);

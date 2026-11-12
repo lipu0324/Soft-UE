@@ -507,3 +507,38 @@ std::optional<uint8_t> UetWireCodec::packet_dscp(const std::vector<uint8_t>& fra
     return {};
 }
 } // namespace UET::NetworkLayer
+
+namespace UET::NetworkLayer {
+bool UetWireCodec::stamp_service_time(std::vector<uint8_t>& frame,uint64_t departure_ns,uint64_t arrival_ns,
+                                     bool crc_enabled,uint8_t native_ip_protocol) {
+    if (departure_ns<arrival_ns) return false;
+    DecodedPacket decoded;
+    try { decoded=decode(frame.data(),frame.size(),crc_enabled,native_ip_protocol); }
+    catch (const std::invalid_argument&) { return false; }
+    if (decoded.packet.PDS_type!=RUOD_ack_header || decoded.packet.PDS_header.RUOD_ack_header.type!=ACK_CC ||
+        decoded.packet.congestion_ack.type!=0) return false;
+    const size_t ip_start=14,ip_size=decoded.network.ipv6?40:20;
+    const size_t transport_start=ip_start+ip_size;
+    const size_t pds_start=transport_start+(decoded.network.udp?8:4);
+    const uint64_t elapsed=departure_ns-arrival_ns;
+    // Zero is reserved for an invalid measurement. A known sub-quantum delay
+    // uses one 128 ns quantum; source-side near-zero RTT policy remains explicit.
+    const uint64_t quanta=std::max<uint64_t>(1,elapsed/128+(elapsed%128!=0));
+    const uint16_t encoded=static_cast<uint16_t>(std::min<uint64_t>(0xffff,quanta));
+    frame[pds_start+24]=static_cast<uint8_t>(encoded>>8);
+    frame[pds_start+25]=static_cast<uint8_t>(encoded);
+    if (crc_enabled) {
+        const size_t wire_end=decoded.network.ipv6?ip_start+40+get(frame.data()+ip_start+4,2):
+            ip_start+get(frame.data()+ip_start+2,2);
+        const size_t crc_start=ip_start+(decoded.network.ipv6?8:12);
+        Bytes protected_bytes(frame.begin()+crc_start,frame.begin()+wire_end-4);
+        if (decoded.network.udp) {
+            protected_bytes[transport_start+6-crc_start]=0;
+            protected_bytes[transport_start+7-crc_start]=0;
+        }
+        const auto crc=crc32c(protected_bytes.data(),protected_bytes.size());
+        for (size_t byte=0;byte<4;++byte) frame[wire_end-4+byte]=static_cast<uint8_t>(crc>>(24-8*byte));
+    }
+    return true;
+}
+}

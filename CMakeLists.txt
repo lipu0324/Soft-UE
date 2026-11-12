@@ -22,6 +22,7 @@ set(CORE ${CMAKE_CURRENT_SOURCE_DIR}/UET/src)
 add_library(softue_protocol STATIC
   ${CORE}/PDS/PDC/PDC.cpp
   ${CORE}/PDS/PDC/Probe.cpp
+  ${CORE}/PDS/PDC/TransmitTiming.cpp
   ${CORE}/PDS/PDC/IPDC.cpp
   ${CORE}/PDS/PDC/TPDC.cpp
   ${CORE}/PDS/PDC/RTOTimer/RTOTimer.cpp
@@ -89,6 +90,7 @@ if(BUILD_TESTING)
   softue_test(selective_acknowledgment_test SelectiveAcknowledgmentTest.cpp)
   softue_test(pds_feedback_test PdsFeedbackTest.cpp)
   softue_test(pds_probe_test PdsProbeTest.cpp)
+  softue_test(mac_timing_test MacTimingTest.cpp)
   softue_test(pds_fault_test PdsFaultTest.cpp)
   softue_test(pds_recovery_test PdsRecoveryTest.cpp)
   softue_test(uud_delivery_test UudDeliveryTest.cpp)

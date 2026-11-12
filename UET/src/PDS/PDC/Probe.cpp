@@ -41,11 +41,14 @@ void PDC::sendProbeAttempt() {
     control.psn=0; control.spdcid=SPDCID; control.dpdcid=DPDCID;
     control.probe_opaque=probe.opaque; control.payload=probe.selective_base;
     decorateControl(packet);
+    tagTransmission(packet,0,UET::Runtime::TransmitKind::Probe,probe.retries,probe.opaque);
+    probe.awaiting_transmission=waitsForTransmitNotification();
+    probe.transmit_time_valid=!probe.awaiting_transmission;
     probe.sent_at=runtime_->clock.now();
     if (public_net_queue) public_net_queue->push(packet); else tx_pkt_q.push(std::move(packet));
     // Probe polling/backoff is a bounded simulator policy, not a new PSN RTO.
     const uint64_t delay_ms=std::min<uint64_t>(10000,uint64_t{std::max<uint16_t>(1,runtime_->rto_ms)}<<probe.retries);
-    armProbeWake(delay_ms*UET::Runtime::kMillisecond);
+    if (!waitsForTransmitNotification()) armProbeWake(delay_ms*UET::Runtime::kMillisecond);
 }
 
 void PDC::progressProbe() {
@@ -73,7 +76,7 @@ void PDC::receiveProbeAcknowledgment(const PDStoNET_pkt& packet) {
     processPeerAcknowledgment(packet);
     if (runtime_->congestion_control)
         runtime_->congestion_control->acknowledged(congestionConnection(),packet,
-            UET::CMS::NsccTransmitSample{probe.sent_at,probe.retries});
+            probe.transmit_time_valid?std::optional<UET::CMS::NsccTransmitSample>{{probe.sent_at,probe.retries}}:std::nullopt);
     // §3.5.11.8.7: only ACK_PSN is invalid in a Probe reply. CACK, SACK,
     // MP_RANGE and recognized congestion state still describe real data.
     processDeliveryAcknowledgment(packet);

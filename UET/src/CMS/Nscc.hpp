@@ -91,6 +91,7 @@ struct NsccAck {
     bool retransmit_flag=false;
     uint8_t receiver_window_penalty=0; // Seven-bit Rcv_Cwnd_Pend.
     bool restore_window=false;
+    std::optional<uint64_t> first_bit_arrival_ns; // Separate from the later protocol-progress time.
 };
 enum class NsccNackReason { Other, Trimmed, TrimmedLastHop };
 
@@ -148,7 +149,8 @@ public:
         state_.received_bytes+=ack.newly_received_bytes;
         state_.achieved_bytes+=ack.newly_received_bytes;
         const bool receiver_limited=apply_receiver_penalty(ack);
-        const auto rtt=rtt_sample(ack.packet,now_ns,ack.service_time_quanta,ack.retransmit_flag);
+        const auto arrival=std::min(now_ns,ack.first_bit_arrival_ns.value_or(now_ns));
+        const auto rtt=rtt_sample(ack.packet,arrival,ack.service_time_quanta,ack.retransmit_flag);
         if (!rtt) return; // Byte accounting still applies when Karn's ambiguity rule rejects RTT.
         update_base_rtt(*rtt);
         const auto delay=*rtt-state_.base_rtt_ns;

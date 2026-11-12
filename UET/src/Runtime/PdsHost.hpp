@@ -21,6 +21,7 @@ public:
           services_{loop, loop, [this] { wake(); }}, manager_(&services_), format_(format), network_(network) {
         services_.standard_wire=format_==WireFormat::Uet11;
         services_.default_wire_entropy=network_.entropy;
+        services_.actual_transmit_notifications=port_.provides_transmit_timing();
         services_.pdc_event=[this](const PdcEvent& event) { context_events_.push_back(event); };
         if (!manager_.start()) throw std::runtime_error("PDS initialization failed");
         std::weak_ptr<int> life = lifetime_;
@@ -41,6 +42,7 @@ public:
                     packet = std::move(decoded.packet);
                     packet.wire_entropy=decoded.network.entropy; packet.network_ecn=decoded.network.ecn;
                     packet.receive_time_ns=frame.has_arrival_timestamp?frame.first_byte_arrival_ns:loop_.now();
+                    packet.has_receive_timestamp=true;
                     packet.nominal_packet_size=decoded.nominal_packet_size;
                     packet.src_fep=frame.source; packet.dst_fep=frame.destination;
                 }
@@ -131,6 +133,7 @@ public:
         manager_.stop(); // Destroys PDCs and cancels their virtual timers.
         outbound_.clear();
         context_events_.clear();
+        transmit_notifications_.clear();
         trace_.record(node_, "host_closed");
     }
 private:
@@ -148,8 +151,10 @@ private:
         Frame frame;
         bool is_datagram;
         uint16_t local_tx_handle;
+        std::optional<TransmitIdentity> identity;
     };
     std::deque<OutboundFrame> outbound_;
+    std::deque<TransmitNotification> transmit_notifications_;
     std::function<void(uint16_t,SendResult)> datagram_transmit_handler_;
     std::deque<PdcEvent> context_events_;
     std::function<void(const PdcEvent&)> context_event_handler_;
@@ -173,7 +178,14 @@ private:
 
     void pump() {
         for (size_t step=0; step<256; ++step) {
-            bool worked = manager_.progressOne();
+            bool worked=false;
+            while (!transmit_notifications_.empty()) {
+                const auto notification=transmit_notifications_.front(); transmit_notifications_.pop_front();
+                if (manager_.notifyTransmit(notification))
+                    trace_.record(node_,notification.outcome==TransmitOutcome::Started?"mac_tx":"nic_rejected",notification.identity.sequence);
+                worked=true;
+            }
+            worked=manager_.progressOne() || worked;
             // Retire old semantic state before delivering requests that may
             // reuse an identifier cleared by the same PDS progress step.
             while (!context_events_.empty()) {
@@ -205,20 +217,49 @@ private:
                         options.dscp=trimming_?trimming_->control_dscp:48;
                     }
                     frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
+                    if (services_.congestion_control && packet.PDS_type==RUOD_ack_header &&
+                        packet.PDS_header.RUOD_ack_header.type==ACK_CC && packet.acknowledgment_trigger_arrival_ns) {
+                        const auto arrival=*packet.acknowledgment_trigger_arrival_ns;
+                        frame.prepare_transmission=[arrival,crc=options.crc,protocol=options.native_ip_protocol](uint64_t departure,std::vector<uint8_t>& bytes) {
+                            NetworkLayer::UetWireCodec::stamp_service_time(bytes,departure,arrival,crc,protocol);
+                        };
+                    }
                 }
-                outbound_.push_back({std::move(frame),packet.PDS_type==UUD_req_header,packet.local_tx_handle});
+                if (packet.transmit_identity) {
+                    const auto identity=*packet.transmit_identity;
+                    std::weak_ptr<int> lifetime=lifetime_;
+                    frame.transmission_event=[this,lifetime,identity](uint64_t time,TransmitOutcome outcome) {
+                        if (lifetime.expired() || stopped_) return;
+                        transmit_notifications_.push_back({identity,time,outcome});
+                        wake(); // The NIC never re-enters a PDC state machine.
+                    };
+                }
+                outbound_.push_back({std::move(frame),packet.PDS_type==UUD_req_header,packet.local_tx_handle,packet.transmit_identity});
                 trace_.record(node_, "pds_tx", static_cast<uint64_t>(packet.PDS_type));
                 if (packet.PDS_type==RUOD_cp_header)
                     trace_.record(node_,"pds_control",packet.PDS_header.RUOD_cp_header.ctl_type);
                 worked = true;
             }
             while (!outbound_.empty()) {
-                const auto result = port_.try_send(outbound_.front().frame);
+                auto& queued=outbound_.front();
+                std::optional<Frame> submission_frame;
+                if (!services_.actual_transmit_notifications && queued.frame.prepare_transmission) {
+                    // Unsupported adapters expose the send-submission boundary.
+                    // Keep the original hook if WouldBlock requires a later try.
+                    submission_frame=queued.frame; prepare_first_transmission(*submission_frame,loop_.now());
+                }
+                const auto result=port_.try_send(submission_frame?*submission_frame:queued.frame);
                 if (result == SendResult::WouldBlock) {
                     // No busy polling: external adapters call wake() when writable.
                     return;
                 }
-                if (result != SendResult::Accepted) trace_.record(node_, "port_drop", static_cast<uint64_t>(result));
+                if (result != SendResult::Accepted) {
+                    trace_.record(node_, "port_drop", static_cast<uint64_t>(result));
+                    if (queued.identity) {
+                        transmit_notifications_.push_back({*queued.identity,loop_.now(),TransmitOutcome::Rejected});
+                        wake();
+                    }
+                }
                 const auto transmitted=std::move(outbound_.front());
                 outbound_.pop_front();
                 if (transmitted.is_datagram && datagram_transmit_handler_)

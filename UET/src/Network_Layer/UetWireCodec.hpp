@@ -40,5 +40,9 @@ public:
     static bool mark_ecn(std::vector<uint8_t>& frame); // Only ECT(0/1) transitions to CE.
     static bool trim_packet(std::vector<uint8_t>& frame,const TrimmingOptions& options,bool last_hop=false);
     static std::optional<uint8_t> packet_dscp(const std::vector<uint8_t>& frame);
+    // NIC-only plaintext ACK_CC stamp. Preserves all unrelated bytes, including
+    // UDP checksum/padding; an invalid or trimmed packet is never reconstituted.
+    static bool stamp_service_time(std::vector<uint8_t>& frame,uint64_t departure_ns,uint64_t arrival_ns,
+                                   bool crc_enabled,uint8_t native_ip_protocol=253);
 };
 } // namespace UET::NetworkLayer

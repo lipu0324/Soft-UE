@@ -40,7 +40,8 @@ endpoint. Network atomics support signed/unsigned integer types and min, max,
   PHY error model remain open; see [NSCC](NSCC.md) and [trimming](TRIMMING.md).
 - YAML experiments produce memory-verified results, a structured virtual-time
   trace, an Ethernet nanosecond PCAP, diagnostic protocol logs and source/spec
-  provenance. The runner supports 2–64 hosts and the operations listed above.
+  provenance. The runner supports 2–64 hosts and NO_OP, SEND and WRITE;
+  the other native operations require the native API or their regression fixtures.
 
 - PDS processes per-packet SACK independently of CMS, queries confirmed data for
   lost semantic responses, infers DEFAULT only from a strictly-higher CACK, and
@@ -299,6 +300,9 @@ This is an M4 increment, with remaining congestion/control acceptance tracked
 explicitly; the default legacy/reference experiments do not silently enable it.
 [Probe recovery](PDS-PROBE.md) and [triggering-packet feedback](PDS-FEEDBACK.md)
 explain control timers, peer-window progress and EV/CE/RETX attribution.
+[MAC timing](MAC-TIMING.md) separates NIC queueing, actual first-bit departure,
+ACK service time and source RTT samples, including local rejection and stale
+transmit notifications after PDC reuse.
 
 The [trimming path](TRIMMING.md) documents switch admission, restricted parsing
 of unauthenticated truncated headers, and NACK recovery without PDC allocation.
@@ -316,8 +320,10 @@ pdftotext -layout UE-Specification-1.1.pdf build/ue11.txt
 python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output build/ue11-candidates.json
 ```
 
-All extracted candidates require manual normative/informative, conditional and
-Profile classification. The inventory deliberately remains incomplete; the
+Extracted candidates require manual normative/informative, conditional and
+Profile classification. The first 20 are classified and split into obligations
+in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
+remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements
 are verified. A `verified` implementation task such as deterministic replay is
 not an assertion of UE compliance.

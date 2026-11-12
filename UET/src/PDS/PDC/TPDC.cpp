@@ -32,6 +32,7 @@
 
 bool T_PDC::initPDC(uint16_t id)
 {
+    if (!beginTransmitIncarnation()) return false;
     resetCloseSafety();
     resetProbe();
     clearAllPacketTimers();

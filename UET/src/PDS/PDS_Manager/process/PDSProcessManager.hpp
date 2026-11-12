@@ -135,6 +135,13 @@ public:
 
     // The initiator owns graceful close (§3.5.8.3). A target sends a Close
     // Request CP; it cannot unilaterally perform the successful close handshake.
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (!pds_process_info || notification.identity.local_pdc>=MAX_PDC*2) return false;
+        return notification.identity.local_pdc<MAX_PDC?
+            pds_process_info->pds_instance->IPDC_Processmanager.notifyTransmit(notification):
+            pds_process_info->pds_instance->TPDC_Processmanager.notifyTransmit(notification);
+    }
     bool requestConnectionClose(uint16_t local_pdc_id) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         if (!pds_process_info || local_pdc_id>=MAX_PDC*2) return false;

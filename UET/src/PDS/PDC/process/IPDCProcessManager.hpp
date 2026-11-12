@@ -613,6 +613,12 @@ public:
         return true;
     }
 
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(notification.identity.local_pdc);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->notifyTransmit(notification);
+    }
+
     bool requestConnectionProbe(uint16_t pdcid,uint32_t selective_base) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=ipdc_processes.find(pdcid);

@@ -42,6 +42,9 @@ CMS 阻塞的请求不会让事件循环在同一虚拟时间持续轮询；ACK�
 RTO 或推断丢失先移除该发送尝试的在途贡献，再等待 CMS 窗口。等待期间不增加重试
 计数，不启动下一次 RTO。重传实际准入后才重新增加在途字节和启动 RTO。PDS 使用
 已经缓存的 payload，不重新读取应用缓冲区。一个发送尝试的 NACK/丢失记账只执行一次。
+具备发送时序能力的端口在首字节离开源 NIC 后才通知 PDS 启动 RTO；等待 CMS、
+`WouldBlock` 或已接受的 NIC 队列都不消耗额外重试次数。本地拒绝会安排恢复定时器，
+但不产生有效 RTT 样本。
 
 如果收到数据确认但语义响应尚未到达，PDS 保留语义恢复状态，并用 ACK Request
 查询接收端缓存。重复发送已经确认的数据会在源端重复增加在途字节，而接收端重复
@@ -65,9 +68,11 @@ increase、multiplicative decrease、quick adapt、接收窗口惩罚与恢复�
 
 RTT 样本结合最后发送时间、重传次数、ACK RETX flag 和 service time 判断有效性。
 零 service time 被忽略，饱和值不用于精确 RTT 测量；不确定的样本仍处理字节确认。
-Fabric 提供目的链路的首字节到达时间，PDS 在生成 ACK 时估计 service time。发送端
-时间戳和 ACK 生成时间目前位于 PDS/端口边界；端口排队很长时尚不能保证 MAC 测量
-精度目标，实时 socket 也不宣称提供真实 MAC 硬件时间戳。
+Fabric 提供目的链路的首字节到达时间，并在源链路首字节发送时通知 PDS。ACK_CC 的
+service time 在目的端 NIC 真正出队时写入，因此包含目的端处理与 NIC 排队时间。
+源端使用 ACK 首字节到达时间计算 RTT，避免把 ACK 完整帧串行化或后续协议处理延迟
+混入网络 RTT。详见 [MAC 时序与计时器](MAC-TIMING.md)。实时 socket 使用明确的
+提交时刻近似，不宣称提供真实 MAC 硬件时间戳。
 
 ## 交换机队列与 ECN
 
@@ -115,5 +120,5 @@ NSCC 开启和关闭两种运行的报告。命令和工作流的存在不代替
 无 TSS 的真实截短、NACK 与恢复路径见 [trimming](TRIMMING.md)。
 
 仍需完成：trimming 的完整故障组合与安全扩展、完整 Probe/base RTT 初始化、MPR/SACK 与所有控制路径的
-联合验收、控制路径 entropy 完整覆盖、端口/MAC 时间戳细化、incast/竞争流/不对称路径
+联合验收、控制路径 entropy 完整覆盖、incast/竞争流/不对称路径
 验收与场景配置输出。RCCC、TFC、CSIG 和其他 Profile 的相关路径在后续阶段实现。

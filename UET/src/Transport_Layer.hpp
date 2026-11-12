@@ -34,6 +34,8 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <optional>
+#include "Runtime/TransmitEvents.hpp"
 
 //=============================================================================
 // Cross-platform structure packing macro definitions
@@ -563,6 +565,9 @@ struct PDStoNET_pkt
     uint8_t network_ecn=0;
     uint32_t nominal_packet_size=0;
     uint64_t receive_time_ns=0; // Local timing metadata; never serialized.
+    bool has_receive_timestamp=false;
+    std::optional<uint64_t> acknowledgment_trigger_arrival_ns;
+    std::optional<UET::Runtime::TransmitIdentity> transmit_identity;
     bool trimmed=false,trimmed_last_hop=false; // DSCP classification, never an SES payload promise.
 };
 
