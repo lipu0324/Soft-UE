@@ -5,12 +5,12 @@
 namespace UET::NetworkLayer {
 namespace {
 using Bytes = std::vector<uint8_t>;
-void put(Bytes& out, uint64_t value, size_t width) {
-    for (size_t i=width; i>0; --i) out.push_back(static_cast<uint8_t>(value >> ((i-1)*8)));
+void put(Bytes& encoded_bytes, uint64_t value, size_t width) {
+    for (size_t i=width; i>0; --i) encoded_bytes.push_back(static_cast<uint8_t>(value >> ((i-1)*8)));
 }
-uint64_t get(const uint8_t* p, size_t width) {
+uint64_t get(const uint8_t* input_bytes, size_t width) {
     uint64_t value = 0;
-    for (size_t i=0; i<width; ++i) value = (value << 8) | p[i];
+    for (size_t i=0; i<width; ++i) value = (value << 8) | input_bytes[i];
     return value;
 }
 class Reader {
@@ -50,181 +50,187 @@ PDS_next_hdr next_host(uint8_t next) {
     if (next > 6) throw std::invalid_argument("unsupported next header");
     return names[next];
 }
-void put_semantic(Bytes& out, const PDStoNET_pkt& packet, PDS_next_hdr next) {
+void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr next) {
     if (next == UET_HDR_NONE) {
         if (!packet.SESpkt.payload.empty()) throw std::invalid_argument("payload without SES header");
         return;
     }
     if (next == UET_HDR_REQUEST_STD) {
         if (packet.SESpkt.bth_type != Standard_Header) throw std::invalid_argument("SES header type mismatch");
-        const auto& h = packet.SESpkt.bth_header.Standard_Header;
-        if (h.version != 0) throw std::invalid_argument("unsupported SES version");
-        put(out,h.opcode,1);
-        put(out,(h.dc<<5)|(h.ie<<4)|(h.rel<<3)|(h.hd<<2)|(h.eom<<1)|h.som,1);
-        put(out,h.msg_id,2); put(out,(uint32_t{h.ri_generation}<<24)|h.job_id,4);
-        put(out,h.PIDonFEP,2); put(out,h.resource_index,2);
-        put(out,h.buffer_offset,8); put(out,h.initiator,4); put(out,h.match_bits,8);
-        if (h.som) put(out,h.diff.som_true.header_data,8);
-        else put(out,(uint64_t{h.diff.som_false.payload_length}<<32)|h.diff.som_false.message_offset,8);
-        put(out,h.request_length,4);
-        if (h.opcode==3) {
+        const auto& header = packet.SESpkt.bth_header.Standard_Header;
+        if (header.version != 0) throw std::invalid_argument("unsupported SES version");
+        put(encoded_bytes,header.opcode,1);
+        put(encoded_bytes,(header.dc<<5)|(header.ie<<4)|(header.rel<<3)|(header.hd<<2)|(header.eom<<1)|header.som,1);
+        put(encoded_bytes,header.msg_id,2); put(encoded_bytes,(uint32_t{header.ri_generation}<<24)|header.job_id,4);
+        put(encoded_bytes,header.PIDonFEP,2); put(encoded_bytes,header.resource_index,2);
+        put(encoded_bytes,header.buffer_offset,8); put(encoded_bytes,header.initiator,4); put(encoded_bytes,header.match_bits,8);
+        if (header.som) put(encoded_bytes,header.diff.som_true.header_data,8);
+        else put(encoded_bytes,(uint64_t{header.diff.som_false.payload_length}<<32)|header.diff.som_false.message_offset,8);
+        put(encoded_bytes,header.request_length,4);
+        if (header.opcode==3) {
             const auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
             if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
-            put(out,atomic.atomic_opcode,1); put(out,atomic.atomic_datatype,1);
-            put(out,atomic.semantic_contol,1); put(out,0,1);
+            put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
+            put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
         }
     } else if (next == UET_HDR_RESPONSE) {
         if (packet.SESpkt.bth_type != Semantic_Response_Header) throw std::invalid_argument("SES header type mismatch");
-        const auto& h = packet.SESpkt.bth_header.Semantic_Response_Header;
-        if (h.version != 0) throw std::invalid_argument("unsupported SES version");
-        put(out,(h.list<<6)|h.opcode,1); put(out,h.return_code,1); put(out,h.message_id,2);
-        put(out,(uint32_t{h.ri_generation}<<24)|h.job_id,4); put(out,h.modified_length,4);
+        const auto& header = packet.SESpkt.bth_header.Semantic_Response_Header;
+        if (header.version != 0) throw std::invalid_argument("unsupported SES version");
+        put(encoded_bytes,(header.list<<6)|header.opcode,1); put(encoded_bytes,header.return_code,1); put(encoded_bytes,header.message_id,2);
+        put(encoded_bytes,(uint32_t{header.ri_generation}<<24)|header.job_id,4); put(encoded_bytes,header.modified_length,4);
     } else if (next == UET_HDR_RESPONSE_DATA) {
         if (packet.SESpkt.bth_type != Semantic_Response_with_Data_Header) throw std::invalid_argument("SES header type mismatch");
-        const auto& h = packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
-        if (h.version != 0) throw std::invalid_argument("unsupported SES version");
-        put(out,(h.list<<6)|h.opcode,1); put(out,h.return_code,1); put(out,h.response_message_id,2);
-        put(out,h.job_id,4); put(out,h.read_request_msg_id,2); put(out,h.payload_length,2);
-        put(out,h.modified_length,4); put(out,h.message_offset,4);
+        const auto& header = packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+        if (header.version != 0) throw std::invalid_argument("unsupported SES version");
+        put(encoded_bytes,(header.list<<6)|header.opcode,1); put(encoded_bytes,header.return_code,1); put(encoded_bytes,header.response_message_id,2);
+        put(encoded_bytes,header.job_id,4); put(encoded_bytes,header.read_request_msg_id,2); put(encoded_bytes,header.payload_length,2);
+        put(encoded_bytes,header.modified_length,4); put(encoded_bytes,header.message_offset,4);
     } else throw std::invalid_argument("SES wire format not implemented");
-    out.insert(out.end(),packet.SESpkt.payload.begin(),packet.SESpkt.payload.end());
+    encoded_bytes.insert(encoded_bytes.end(),packet.SESpkt.payload.begin(),packet.SESpkt.payload.end());
 }
-void get_semantic(Reader& r, PDStoNET_pkt& packet, PDS_next_hdr next) {
+void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
     if (next == UET_HDR_NONE) {
-        if (!r.rest().empty()) throw std::invalid_argument("unexpected UET payload");
+        if (!reader.rest().empty()) throw std::invalid_argument("unexpected UET payload");
         return;
     }
     if (next == UET_HDR_REQUEST_STD) {
         packet.SESpkt.bth_type = Standard_Header;
-        auto& h = packet.SESpkt.bth_header.Standard_Header;
-        const auto opcode=r.take(1), flags=r.take(1);
+        auto& header = packet.SESpkt.bth_header.Standard_Header;
+        const auto opcode=reader.take(1), flags=reader.take(1);
         if ((opcode&0xc0)||(flags&0xc0)) throw std::invalid_argument("reserved SES bits or unsupported version");
-        h.opcode=opcode; h.dc=(flags>>5)&1; h.ie=(flags>>4)&1; h.rel=(flags>>3)&1;
-        h.hd=(flags>>2)&1; h.eom=(flags>>1)&1; h.som=flags&1;
-        h.msg_id=r.take(2); const auto job=r.take(4); h.ri_generation=job>>24; h.job_id=job&0xffffff;
-        const auto pid=r.take(2), ri=r.take(2);
+        header.opcode=opcode; header.dc=(flags>>5)&1; header.ie=(flags>>4)&1; header.rel=(flags>>3)&1;
+        header.hd=(flags>>2)&1; header.eom=(flags>>1)&1; header.som=flags&1;
+        header.msg_id=reader.take(2); const auto job=reader.take(4); header.ri_generation=job>>24; header.job_id=job&0xffffff;
+        const auto pid=reader.take(2), ri=reader.take(2);
         if ((pid&0xf000)||(ri&0xf000)) throw std::invalid_argument("reserved address bits");
-        h.PIDonFEP=pid; h.resource_index=ri; h.buffer_offset=r.take(8);
-        h.initiator=r.take(4); h.match_bits=r.take(8); const auto data=r.take(8);
-        if (h.som) h.diff.som_true.header_data=data;
+        header.PIDonFEP=pid; header.resource_index=ri; header.buffer_offset=reader.take(8);
+        header.initiator=reader.take(4); header.match_bits=reader.take(8); const auto data=reader.take(8);
+        if (header.som) header.diff.som_true.header_data=data;
         else {
             if (data>>46) throw std::invalid_argument("reserved SES payload bits");
-            h.diff.som_false.payload_length=(data>>32)&0x3fff;
-            h.diff.som_false.message_offset=data&0xffffffff;
+            header.diff.som_false.payload_length=(data>>32)&0x3fff;
+            header.diff.som_false.message_offset=data&0xffffffff;
         }
-        h.request_length=r.take(4);
-        if (h.opcode==3) {
+        header.request_length=reader.take(4);
+        if (header.opcode==3) {
             packet.SESpkt.eth_type=Atomic_Operation_Extension_Header;
             auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
-            atomic.atomic_opcode=r.take(1); atomic.atomic_datatype=r.take(1);
-            atomic.semantic_contol=r.take(1);
-            if (r.take(1)) throw std::invalid_argument("reserved atomic extension bits");
+            atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
+            atomic.semantic_contol=reader.take(1);
+            if (reader.take(1)) throw std::invalid_argument("reserved atomic extension bits");
         }
     } else if (next == UET_HDR_RESPONSE) {
         packet.SESpkt.bth_type=Semantic_Response_Header;
-        auto& h=packet.SESpkt.bth_header.Semantic_Response_Header;
-        const auto op=r.take(1), code=r.take(1);
+        auto& header=packet.SESpkt.bth_header.Semantic_Response_Header;
+        const auto op=reader.take(1), code=reader.take(1);
         if (code&0xc0) throw std::invalid_argument("unsupported SES response version");
-        h.list=op>>6; h.opcode=op&0x3f; h.return_code=code; h.message_id=r.take(2);
-        const auto job=r.take(4); h.ri_generation=job>>24; h.job_id=job&0xffffff;
-        h.modified_length=r.take(4);
+        header.list=op>>6; header.opcode=op&0x3f; header.return_code=code; header.message_id=reader.take(2);
+        const auto job=reader.take(4); header.ri_generation=job>>24; header.job_id=job&0xffffff;
+        header.modified_length=reader.take(4);
     } else if (next == UET_HDR_RESPONSE_DATA) {
         packet.SESpkt.bth_type=Semantic_Response_with_Data_Header;
-        auto& h=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
-        const auto op=r.take(1), code=r.take(1);
+        auto& header=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+        const auto op=reader.take(1), code=reader.take(1);
         if (code&0xc0) throw std::invalid_argument("unsupported SES response version");
-        h.list=op>>6; h.opcode=op&0x3f; h.return_code=code; h.response_message_id=r.take(2);
-        const auto job=r.take(4); if (job>>24) throw std::invalid_argument("reserved response bits");
-        h.job_id=job; h.read_request_msg_id=r.take(2); const auto length=r.take(2);
+        header.list=op>>6; header.opcode=op&0x3f; header.return_code=code; header.response_message_id=reader.take(2);
+        const auto job=reader.take(4); if (job>>24) throw std::invalid_argument("reserved response bits");
+        header.job_id=job; header.read_request_msg_id=reader.take(2); const auto length=reader.take(2);
         if (length>>14) throw std::invalid_argument("reserved response payload bits");
-        h.payload_length=length; h.modified_length=r.take(4); h.message_offset=r.take(4);
+        header.payload_length=length; header.modified_length=reader.take(4); header.message_offset=reader.take(4);
     } else throw std::invalid_argument("SES wire format not implemented");
-    packet.SESpkt.payload=r.rest();
+    packet.SESpkt.payload=reader.rest();
 }
 Bytes encode_pds(const PDStoNET_pkt& packet) {
-    Bytes out; PDS_next_hdr next=UET_HDR_NONE;
+    Bytes encoded_bytes; PDS_next_hdr next=UET_HDR_NONE;
+    // §3.5.10: the 16-bit prologue contains type[15:11], next-header[10:7]
+    // and flags[6:0]. Pack fields explicitly; C++ bitfield layout is not wire ABI.
     if (packet.PDS_type == RUOD_req_header) {
-        const auto& h=packet.PDS_header.RUOD_req_header;
-        if (h.type!=RUD_REQ && h.type!=ROD_REQ) throw std::invalid_argument("unsupported request type");
-        next=h.next_hdr;
-        put(out,(uint16_t{h.type}<<11)|(next_wire(next)<<7)|(h.flags.retx<<4)|(h.flags.ar<<3)|(h.flags.syn<<2),2);
-        put(out,h.clear_psn_off,2); put(out,h.psn,4); put(out,h.spdcid,2);
-        put(out,h.flags.syn ? (h.pdc_info<<12)|h.psn_off : h.dpdcid,2);
+        const auto& header=packet.PDS_header.RUOD_req_header;
+        if (header.type!=RUD_REQ && header.type!=ROD_REQ) throw std::invalid_argument("unsupported request type");
+        next=header.next_hdr;
+        put(encoded_bytes,(uint16_t{header.type}<<11)|(next_wire(next)<<7)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
+        put(encoded_bytes,header.clear_psn_off,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
+        put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2);
     } else if (packet.PDS_type == RUOD_ack_header) {
-        const auto& h=packet.PDS_header.RUOD_ack_header;
-        if (h.type!=ACK) throw std::invalid_argument("ACK extension not implemented");
-        next=h.next_hdr;
-        put(out,(7<<11)|(next_wire(next)<<7)|(h.flags.m<<5)|(h.flags.retx<<4)|(h.flags.p<<3)|(h.flags.req<<1),2);
-        put(out,static_cast<uint16_t>(h.ack_psn_off),2); put(out,h.cack_psn,4); put(out,h.spdcid,2); put(out,h.dpdcid,2);
+        const auto& header=packet.PDS_header.RUOD_ack_header;
+        if (header.type!=ACK) throw std::invalid_argument("ACK extension not implemented");
+        next=header.next_hdr;
+        put(encoded_bytes,(7<<11)|(next_wire(next)<<7)|(header.flags.m<<5)|(header.flags.retx<<4)|(header.flags.p<<3)|(header.flags.req<<1),2);
+        put(encoded_bytes,static_cast<uint16_t>(header.ack_psn_off),2); put(encoded_bytes,header.cack_psn,4); put(encoded_bytes,header.spdcid,2); put(encoded_bytes,header.dpdcid,2);
     } else if (packet.PDS_type == nack_header) {
-        const auto& h=packet.PDS_header.nack_header;
-        if (h.type!=NACK || h.next_hdr!=UET_HDR_NONE) throw std::invalid_argument("unsupported NACK format");
-        put(out,(10<<11)|(h.flags.m<<5)|(h.flags.retx<<4)|(h.flags.nt<<3),2);
-        put(out,h.nack_code,1); put(out,h.vendor_code,1); put(out,h.nack_psn,4);
-        put(out,h.spdcid,2); put(out,h.dpdcid,2); put(out,h.payload,4);
+        const auto& header=packet.PDS_header.nack_header;
+        if (header.type!=NACK || header.next_hdr!=UET_HDR_NONE) throw std::invalid_argument("unsupported NACK format");
+        put(encoded_bytes,(10<<11)|(header.flags.m<<5)|(header.flags.retx<<4)|(header.flags.nt<<3),2);
+        put(encoded_bytes,header.nack_code,1); put(encoded_bytes,header.vendor_code,1); put(encoded_bytes,header.nack_psn,4);
+        put(encoded_bytes,header.spdcid,2); put(encoded_bytes,header.dpdcid,2); put(encoded_bytes,header.payload,4);
     } else if (packet.PDS_type == RUOD_cp_header) {
-        const auto& h=packet.PDS_header.RUOD_cp_header;
-        if (h.type!=CP) throw std::invalid_argument("invalid CP type");
-        put(out,(11<<11)|(h.ctl_type<<7)|(h.flags.isrod<<5)|(h.flags.retx<<4)|(h.flags.ar<<3)|(h.flags.syn<<2),2);
-        put(out,h.probe_opaque,2); put(out,h.psn,4); put(out,h.spdcid,2);
-        put(out,h.flags.syn ? (h.pdc_info<<12)|h.psn_off : h.dpdcid,2); put(out,h.payload,4);
+        const auto& header=packet.PDS_header.RUOD_cp_header;
+        if (header.type!=CP) throw std::invalid_argument("invalid CP type");
+        put(encoded_bytes,(11<<11)|(header.ctl_type<<7)|(header.flags.isrod<<5)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
+        put(encoded_bytes,header.probe_opaque,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
+        put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2); put(encoded_bytes,header.payload,4);
     } else if (packet.PDS_type == UUD_req_header) {
         next=packet.PDS_header.UUD_req_header.next_hdr;
         if (packet.PDS_header.UUD_req_header.type!=UUD_REQ)
             throw std::invalid_argument("invalid UUD packet type");
         // §3.5.10.14: no sequence, connection ID or acknowledgement state.
-        put(out,(6u<<11)|(next_wire(next)<<7),2); put(out,0,2);
+        put(encoded_bytes,(6u<<11)|(next_wire(next)<<7),2); put(encoded_bytes,0,2);
     } else throw std::invalid_argument("PDS wire format not implemented");
-    put_semantic(out,packet,next);
-    return out;
+    put_semantic(encoded_bytes,packet,next);
+    return encoded_bytes;
 }
 PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
-    PDStoNET_pkt packet{}; Reader r(bytes,size);
-    const auto prologue=r.take(2), type=prologue>>11, flags=prologue&0x7f;
+    PDStoNET_pkt packet{}; Reader reader(bytes,size);
+    const auto prologue=reader.take(2), type=prologue>>11, flags=prologue&0x7f;
     PDS_next_hdr next=type==11 ? UET_HDR_NONE : next_host((prologue>>7)&0xf);
     if (type==2 || type==3) {
+        // RUD/ROD share a 12-byte header. During SYN the final two bytes
+        // carry PDC info and start-PSN offset instead of destination PDCID.
         if (flags&0x63) throw std::invalid_argument("reserved PDS request flags");
-        packet.PDS_type=RUOD_req_header; auto& h=packet.PDS_header.RUOD_req_header;
-        h.type=static_cast<PDS_type>(type); h.next_hdr=next;
-        h.flags.retx=(flags>>4)&1; h.flags.ar=(flags>>3)&1; h.flags.syn=(flags>>2)&1;
-        h.clear_psn_off=static_cast<int16_t>(r.take(2)); h.psn=r.take(4); h.spdcid=r.take(2);
-        const auto destination=r.take(2);
-        if (h.flags.syn) { h.pdc_info=destination>>12; h.psn_off=destination&0xfff; }
-        else h.dpdcid=destination;
+        packet.PDS_type=RUOD_req_header; auto& header=packet.PDS_header.RUOD_req_header;
+        header.type=static_cast<PDS_type>(type); header.next_hdr=next;
+        header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1; header.flags.syn=(flags>>2)&1;
+        header.clear_psn_off=static_cast<int16_t>(reader.take(2)); header.psn=reader.take(4); header.spdcid=reader.take(2);
+        const auto destination=reader.take(2);
+        if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; }
+        else header.dpdcid=destination;
     } else if (type==7) {
         if (flags&0x41) throw std::invalid_argument("unsupported ACK flags");
-        packet.PDS_type=RUOD_ack_header; auto& h=packet.PDS_header.RUOD_ack_header;
-        h.type=ACK; h.next_hdr=next; h.flags.m=(flags>>5)&1; h.flags.retx=(flags>>4)&1;
-        h.flags.p=(flags>>3)&1; h.flags.req=(flags>>1)&3;
-        h.ack_psn_off=static_cast<int16_t>(r.take(2)); h.cack_psn=r.take(4); h.spdcid=r.take(2); h.dpdcid=r.take(2);
+        packet.PDS_type=RUOD_ack_header; auto& header=packet.PDS_header.RUOD_ack_header;
+        header.type=ACK; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1;
+        header.flags.p=(flags>>3)&1; header.flags.req=(flags>>1)&3;
+        header.ack_psn_off=static_cast<int16_t>(reader.take(2)); header.cack_psn=reader.take(4); header.spdcid=reader.take(2); header.dpdcid=reader.take(2);
     } else if (type==10) {
         if ((flags&0x47)||next!=UET_HDR_NONE) throw std::invalid_argument("invalid NACK flags");
-        packet.PDS_type=nack_header; auto& h=packet.PDS_header.nack_header;
-        h.type=NACK; h.next_hdr=next; h.flags.m=(flags>>5)&1; h.flags.retx=(flags>>4)&1; h.flags.nt=(flags>>3)&1;
-        h.nack_code=static_cast<PDS_Nack_Codes>(r.take(1)); h.vendor_code=r.take(1);
-        h.nack_psn=r.take(4); h.spdcid=r.take(2); h.dpdcid=r.take(2); h.payload=r.take(4);
+        packet.PDS_type=nack_header; auto& header=packet.PDS_header.nack_header;
+        header.type=NACK; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1; header.flags.nt=(flags>>3)&1;
+        header.nack_code=static_cast<PDS_Nack_Codes>(reader.take(1)); header.vendor_code=reader.take(1);
+        header.nack_psn=reader.take(4); header.spdcid=reader.take(2); header.dpdcid=reader.take(2); header.payload=reader.take(4);
     } else if (type==11) {
         if (flags&0x43) throw std::invalid_argument("invalid CP flags");
-        packet.PDS_type=RUOD_cp_header; auto& h=packet.PDS_header.RUOD_cp_header;
-        h.type=CP; h.ctl_type=(prologue>>7)&0xf;
-        h.flags.isrod=(flags>>5)&1; h.flags.retx=(flags>>4)&1; h.flags.ar=(flags>>3)&1; h.flags.syn=(flags>>2)&1;
-        h.probe_opaque=r.take(2); h.psn=r.take(4); h.spdcid=r.take(2);
-        const auto destination=r.take(2);
-        if (h.flags.syn) { h.pdc_info=destination>>12; h.psn_off=destination&0xfff; } else h.dpdcid=destination;
-        h.payload=r.take(4); next=UET_HDR_NONE;
+        packet.PDS_type=RUOD_cp_header; auto& header=packet.PDS_header.RUOD_cp_header;
+        header.type=CP; header.ctl_type=(prologue>>7)&0xf;
+        header.flags.isrod=(flags>>5)&1; header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1; header.flags.syn=(flags>>2)&1;
+        header.probe_opaque=reader.take(2); header.psn=reader.take(4); header.spdcid=reader.take(2);
+        const auto destination=reader.take(2);
+        if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; } else header.dpdcid=destination;
+        header.payload=reader.take(4); next=UET_HDR_NONE;
     } else if (type==6) {
         // UUD flags/reserved bits are ignored on reception (§3.5.10.14).
-        r.take(2);
+        reader.take(2);
         packet.PDS_type=UUD_req_header;
         packet.PDS_header.UUD_req_header.type=UUD_REQ;
         packet.PDS_header.UUD_req_header.next_hdr=next;
     } else throw std::invalid_argument("PDS wire format not implemented");
-    get_semantic(r,packet,next);
+    get_semantic(reader,packet,next);
     return packet;
 }
 } // namespace
 
 uint32_t UetWireCodec::crc32c(const uint8_t* bytes, size_t length) {
+    // §3.5.26 / RFC 3385: reflected Castagnoli polynomial, all-ones initial
+    // remainder and final complement. Serialization supplies network byte order.
     uint32_t crc=0xffffffff;
     for (size_t i=0; i<length; ++i) {
         crc ^= bytes[i];
@@ -232,75 +238,75 @@ uint32_t UetWireCodec::crc32c(const uint8_t* bytes, size_t length) {
     }
     return ~crc;
 }
-std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const WireOptions& o) {
-    if (o.dscp>63 || o.ecn>3 || !o.hop_limit) throw std::invalid_argument("invalid network fields");
+std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const WireOptions& network_options) {
+    if (network_options.dscp>63 || network_options.ecn>3 || !network_options.hop_limit) throw std::invalid_argument("invalid network fields");
     const auto body=encode_pds(packet);
-    const size_t ip_size=o.ipv6?40:20, transport=o.udp?8:4;
-    const size_t ip_length=ip_size+transport+body.size()+(o.crc?4:0);
+    const size_t ip_size=network_options.ipv6?40:20, transport=network_options.udp?8:4;
+    const size_t ip_length=ip_size+transport+body.size()+(network_options.crc?4:0);
     if (ip_length>65535) throw std::length_error("packet exceeds supported MTU");
-    Bytes out; out.insert(out.end(),o.destination.mac.begin(),o.destination.mac.end());
-    out.insert(out.end(),o.source.mac.begin(),o.source.mac.end()); put(out,o.ipv6?0x86dd:0x0800,2);
-    const size_t ip_begin=out.size();
-    if (o.ipv6) {
-        put(out,(6u<<28)|((uint32_t{o.dscp}<<2|o.ecn)<<20),4);
-        put(out,ip_length-40,2); put(out,o.udp?17:o.native_ip_protocol,1); put(out,o.hop_limit,1);
-        out.insert(out.end(),o.source.ip.begin(),o.source.ip.end()); out.insert(out.end(),o.destination.ip.begin(),o.destination.ip.end());
+    Bytes encoded_bytes; encoded_bytes.insert(encoded_bytes.end(),network_options.destination.mac.begin(),network_options.destination.mac.end());
+    encoded_bytes.insert(encoded_bytes.end(),network_options.source.mac.begin(),network_options.source.mac.end()); put(encoded_bytes,network_options.ipv6?0x86dd:0x0800,2);
+    const size_t ip_begin=encoded_bytes.size();
+    if (network_options.ipv6) {
+        put(encoded_bytes,(6u<<28)|((uint32_t{network_options.dscp}<<2|network_options.ecn)<<20),4);
+        put(encoded_bytes,ip_length-40,2); put(encoded_bytes,network_options.udp?17:network_options.native_ip_protocol,1); put(encoded_bytes,network_options.hop_limit,1);
+        encoded_bytes.insert(encoded_bytes.end(),network_options.source.ip.begin(),network_options.source.ip.end()); encoded_bytes.insert(encoded_bytes.end(),network_options.destination.ip.begin(),network_options.destination.ip.end());
     } else {
-        put(out,0x45,1); put(out,(o.dscp<<2)|o.ecn,1); put(out,ip_length,2);
-        put(out,0,2); put(out,0x4000,2); put(out,o.hop_limit,1); put(out,o.udp?17:o.native_ip_protocol,1); put(out,0,2);
-        out.insert(out.end(),o.source.ip.begin(),o.source.ip.begin()+4);
-        out.insert(out.end(),o.destination.ip.begin(),o.destination.ip.begin()+4);
-        const auto checksum=ip_checksum(out.data()+ip_begin);
-        out[ip_begin+10]=checksum>>8; out[ip_begin+11]=checksum&255;
+        put(encoded_bytes,0x45,1); put(encoded_bytes,(network_options.dscp<<2)|network_options.ecn,1); put(encoded_bytes,ip_length,2);
+        put(encoded_bytes,0,2); put(encoded_bytes,0x4000,2); put(encoded_bytes,network_options.hop_limit,1); put(encoded_bytes,network_options.udp?17:network_options.native_ip_protocol,1); put(encoded_bytes,0,2);
+        encoded_bytes.insert(encoded_bytes.end(),network_options.source.ip.begin(),network_options.source.ip.begin()+4);
+        encoded_bytes.insert(encoded_bytes.end(),network_options.destination.ip.begin(),network_options.destination.ip.begin()+4);
+        const auto checksum=ip_checksum(encoded_bytes.data()+ip_begin);
+        encoded_bytes[ip_begin+10]=checksum>>8; encoded_bytes[ip_begin+11]=checksum&255;
     }
-    if (o.udp) {
-        put(out,o.entropy,2); put(out,49150,2); put(out,ip_length-ip_size,2); put(out,0,2);
-    } else { put(out,o.entropy,2); put(out,0,2); }
-    out.insert(out.end(),body.begin(),body.end());
-    if (o.crc) {
-        const auto start=ip_begin+(o.ipv6?8:12);
-        const auto crc=crc32c(out.data()+start,out.size()-start);
-        put(out,crc,4); // §3.5.26: CRC trailer uses network byte order.
+    if (network_options.udp) {
+        put(encoded_bytes,network_options.entropy,2); put(encoded_bytes,49150,2); put(encoded_bytes,ip_length-ip_size,2); put(encoded_bytes,0,2);
+    } else { put(encoded_bytes,network_options.entropy,2); put(encoded_bytes,0,2); }
+    encoded_bytes.insert(encoded_bytes.end(),body.begin(),body.end());
+    if (network_options.crc) {
+        const auto start=ip_begin+(network_options.ipv6?8:12);
+        const auto crc=crc32c(encoded_bytes.data()+start,encoded_bytes.size()-start);
+        put(encoded_bytes,crc,4); // §3.5.26: CRC trailer uses network byte order.
     }
-    return out;
+    return encoded_bytes;
 }
 
 DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol) {
     if (!bytes || size<34) throw std::invalid_argument("truncated Ethernet/IP frame");
     DecodedPacket result;
-    auto& o=result.network; o.crc=crc_enabled; o.native_ip_protocol=native_ip_protocol;
-    std::copy_n(bytes,6,o.destination.mac.begin()); std::copy_n(bytes+6,6,o.source.mac.begin());
+    auto& network_options=result.network; network_options.crc=crc_enabled; network_options.native_ip_protocol=native_ip_protocol;
+    std::copy_n(bytes,6,network_options.destination.mac.begin()); std::copy_n(bytes+6,6,network_options.source.mac.begin());
     const auto ether=get(bytes+12,2);
     if (ether!=0x0800 && ether!=0x86dd) throw std::invalid_argument("unsupported EtherType");
-    o.ipv6=ether==0x86dd;
-    const size_t ip_begin=14, ip_size=o.ipv6?40:20;
+    network_options.ipv6=ether==0x86dd;
+    const size_t ip_begin=14, ip_size=network_options.ipv6?40:20;
     if (size<ip_begin+ip_size) throw std::invalid_argument("truncated IP header");
     const auto* ip=bytes+ip_begin;
     size_t end; uint8_t protocol;
-    if (o.ipv6) {
+    if (network_options.ipv6) {
         if ((ip[0]>>4)!=6) throw std::invalid_argument("invalid IPv6 version");
-        end=ip_begin+40+get(ip+4,2); protocol=ip[6]; o.hop_limit=ip[7];
-        const auto traffic=static_cast<uint8_t>(get(ip,2)>>4); o.dscp=traffic>>2; o.ecn=traffic&3;
-        std::copy_n(ip+8,16,o.source.ip.begin()); std::copy_n(ip+24,16,o.destination.ip.begin());
+        end=ip_begin+40+get(ip+4,2); protocol=ip[6]; network_options.hop_limit=ip[7];
+        const auto traffic=static_cast<uint8_t>(get(ip,2)>>4); network_options.dscp=traffic>>2; network_options.ecn=traffic&3;
+        std::copy_n(ip+8,16,network_options.source.ip.begin()); std::copy_n(ip+24,16,network_options.destination.ip.begin());
     } else {
         if (ip[0]!=0x45 || ip_checksum(ip)!=0 || (get(ip+6,2)&0xbfff)) throw std::invalid_argument("invalid or unsupported IPv4 header");
-        end=ip_begin+get(ip+2,2); protocol=ip[9]; o.hop_limit=ip[8]; o.dscp=ip[1]>>2; o.ecn=ip[1]&3;
-        std::copy_n(ip+12,4,o.source.ip.begin()); std::copy_n(ip+16,4,o.destination.ip.begin());
+        end=ip_begin+get(ip+2,2); protocol=ip[9]; network_options.hop_limit=ip[8]; network_options.dscp=ip[1]>>2; network_options.ecn=ip[1]&3;
+        std::copy_n(ip+12,4,network_options.source.ip.begin()); std::copy_n(ip+16,4,network_options.destination.ip.begin());
     }
     if (protocol!=17 && protocol!=native_ip_protocol) throw std::invalid_argument("unsupported IP protocol");
-    o.udp=protocol==17;
-    const size_t transport=o.udp?8:4, start=ip_begin+ip_size;
-    if (!o.hop_limit || end>size || end<start+transport+2+(crc_enabled?4:0))
+    network_options.udp=protocol==17;
+    const size_t transport=network_options.udp?8:4, start=ip_begin+ip_size;
+    if (!network_options.hop_limit || end>size || end<start+transport+2+(crc_enabled?4:0))
         throw std::invalid_argument("invalid IP length or hop limit");
-    o.entropy=get(bytes+start,2);
-    if (o.udp) {
+    network_options.entropy=get(bytes+start,2);
+    if (network_options.udp) {
         if (get(bytes+start+2,2)!=49150 || get(bytes+start+4,2)!=end-start)
             throw std::invalid_argument("unsupported or invalid UET UDP header");
     } else if (get(bytes+start+2,2)!=0) throw std::invalid_argument("reserved entropy bits");
     if (crc_enabled) {
-        const auto crc_start=ip_begin+(o.ipv6?8:12);
+        const auto crc_start=ip_begin+(network_options.ipv6?8:12);
         uint32_t crc;
-        if (o.udp) {
+        if (network_options.udp) {
             // §3.5.10: ignore UDP checksum on receive. §3.5.26 requires
             // treating it as zero when verifying the UET CRC as well.
             Bytes protected_bytes(bytes+crc_start,bytes+end-4);

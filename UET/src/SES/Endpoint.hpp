@@ -125,16 +125,16 @@ public:
                 request.mode=is_datagram?UUD:operation.delivery_mode;
                 request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
                 request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
-                auto& h=request.pkt.bth_header.Standard_Header;
-                h.opcode=static_cast<uint8_t>(operation.type); h.version=0;
-                h.som=offset==0; h.eom=offset+count==operation.payload.size(); h.dc=!is_datagram; h.rel=1;
-                h.msg_id=is_datagram?0:message; h.job_id=operation.job; h.PIDonFEP=operation.target_pid;
-                h.resource_index=operation.target_resource; h.buffer_offset=operation.remote_offset;
-                h.initiator=node_; h.match_bits=operation.remote_key;
-                h.request_length=operation.payload.size();
+                auto& semantic_header=request.pkt.bth_header.Standard_Header;
+                semantic_header.opcode=static_cast<uint8_t>(operation.type); semantic_header.version=0;
+                semantic_header.som=offset==0; semantic_header.eom=offset+count==operation.payload.size(); semantic_header.dc=!is_datagram; semantic_header.rel=1;
+                semantic_header.msg_id=is_datagram?0:message; semantic_header.job_id=operation.job; semantic_header.PIDonFEP=operation.target_pid;
+                semantic_header.resource_index=operation.target_resource; semantic_header.buffer_offset=operation.remote_offset;
+                semantic_header.initiator=node_; semantic_header.match_bits=operation.remote_key;
+                semantic_header.request_length=operation.payload.size();
                 if (operation.immediate_data) {
-                    h.hd=1;
-                    if (!offset) h.diff.som_true.header_data=*operation.immediate_data;
+                    semantic_header.hd=1;
+                    if (!offset) semantic_header.diff.som_true.header_data=*operation.immediate_data;
                 }
                 if (is_atomic) {
                     request.pkt.eth_type=Atomic_Operation_Extension_Header;
@@ -142,7 +142,7 @@ public:
                     extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
                     extension.atomic_datatype=static_cast<uint8_t>(operation.atomic_datatype);
                 }
-                if (offset) { h.diff.som_false.payload_length=count; h.diff.som_false.message_offset=offset; }
+                if (offset) { semantic_header.diff.som_false.payload_length=count; semantic_header.diff.som_false.message_offset=offset; }
                 request.pkt.payload.assign(operation.payload.begin()+offset,operation.payload.begin()+offset+count);
                 request.pkt_len=static_cast<uint16_t>(44+(is_atomic?4:0)+count);
                 if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation");
@@ -224,21 +224,21 @@ private:
     }
     void respond(const PDC_SES_rsp& response) {
         if (response.pkt.bth_type!=Semantic_Response_Header) return;
-        const auto& h=response.pkt.bth_header.Semantic_Response_Header;
-        const auto it=pending_.find(h.message_id);
+        const auto& semantic_header=response.pkt.bth_header.Semantic_Response_Header;
+        const auto it=pending_.find(semantic_header.message_id);
         if (it==pending_.end()) return;
-        if (response.source_fep!=it->second.peer || h.job_id!=it->second.job || h.version) return;
-        finish(h.message_id,h.return_code==1?CompletionStatus::Success:CompletionStatus::RemoteError,h.modified_length,h.return_code);
+        if (response.source_fep!=it->second.peer || semantic_header.job_id!=it->second.job || semantic_header.version) return;
+        finish(semantic_header.message_id,semantic_header.return_code==1?CompletionStatus::Success:CompletionStatus::RemoteError,semantic_header.modified_length,semantic_header.return_code);
     }
     void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool semantic=true) {
         SES_PDS_rsp response{}; response.PDCID=request.PDCID;
         response.rx_pkt_handle=request.rx_pkt_handle; response.rsp_len=semantic?12:0;
         response.gtd_del=semantic;
         response.rsp.bth_type=Semantic_Response_Header;
-        auto& h=response.rsp.bth_header.Semantic_Response_Header;
-        h.opcode=1; h.version=0; h.return_code=code;
-        h.job_id=request.pkt.bth_header.Standard_Header.job_id;
-        h.message_id=request.pkt.bth_header.Standard_Header.msg_id; h.modified_length=length;
+        auto& semantic_header=response.rsp.bth_header.Semantic_Response_Header;
+        semantic_header.opcode=1; semantic_header.version=0; semantic_header.return_code=code;
+        semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
+        semantic_header.message_id=request.pkt.bth_header.Standard_Header.msg_id; semantic_header.modified_length=length;
         if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected semantic response");
         host_.wake();
     }
@@ -261,65 +261,65 @@ private:
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
-        const auto& h=request.pkt.bth_header.Standard_Header;
-        if (!memory_.has_job(h.job_id)) { reply(request,SemanticReturnCode::BadJob,0); return; }
-        if (h.PIDonFEP!=1) { reply(request,SemanticReturnCode::BadPid,0); return; }
-        if (h.resource_index!=1) { reply(request,SemanticReturnCode::BadIndex,0); return; }
-        if (h.ri_generation) { reply(request,SemanticReturnCode::BadGeneration,0); return; }
-        if (h.version || h.ie || (h.hd && h.opcode!=1) || !h.rel ||
-            (h.opcode!=0 && h.opcode!=1 && h.opcode!=3 && h.opcode!=5)) {
+        const auto& semantic_header=request.pkt.bth_header.Standard_Header;
+        if (!memory_.has_job(semantic_header.job_id)) { reply(request,SemanticReturnCode::BadJob,0); return; }
+        if (semantic_header.PIDonFEP!=1) { reply(request,SemanticReturnCode::BadPid,0); return; }
+        if (semantic_header.resource_index!=1) { reply(request,SemanticReturnCode::BadIndex,0); return; }
+        if (semantic_header.ri_generation) { reply(request,SemanticReturnCode::BadGeneration,0); return; }
+        if (semantic_header.version || semantic_header.ie || (semantic_header.hd && semantic_header.opcode!=1) || !semantic_header.rel ||
+            (semantic_header.opcode!=0 && semantic_header.opcode!=1 && semantic_header.opcode!=3 && semantic_header.opcode!=5)) {
             reply(request,SemanticReturnCode::UnsupportedOperation,0); return;
         }
-        const auto offset=h.som?0:h.diff.som_false.message_offset;
+        const auto offset=semantic_header.som?0:semantic_header.diff.som_false.message_offset;
         const auto count=request.pkt.payload.size();
         const auto& atomic_extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
-        if (h.opcode==3) {
+        if (semantic_header.opcode==3) {
             if (atomic_extension.atomic_datatype>7) { reply(request,SemanticReturnCode::AtomicUnsupportedDatatype,0); return; }
             if (atomic_extension.atomic_opcode>12 || atomic_extension.atomic_opcode==11 ||
                 atomic_extension.semantic_contol || atomic_extension.rsvd) { reply(request,SemanticReturnCode::AtomicUnsupportedOperation,0); return; }
             const auto width=integer_atomic_width(static_cast<IntegerAtomicDatatype>(atomic_extension.atomic_datatype));
-            if (h.request_length%width || count%width || offset%width) { reply(request,SemanticReturnCode::AtomicUnsupportedSize,0); return; }
-            if (h.buffer_offset%width) { reply(request,SemanticReturnCode::AtomicUnaligned,0); return; }
+            if (semantic_header.request_length%width || count%width || offset%width) { reply(request,SemanticReturnCode::AtomicUnsupportedSize,0); return; }
+            if (semantic_header.buffer_offset%width) { reply(request,SemanticReturnCode::AtomicUnaligned,0); return; }
         }
-        if (offset>h.request_length || count>h.request_length-offset ||
-            (!h.som && count!=h.diff.som_false.payload_length) ||
-            (h.eom && offset+count!=h.request_length) || (h.opcode==0 && h.request_length)) {
+        if (offset>semantic_header.request_length || count>semantic_header.request_length-offset ||
+            (!semantic_header.som && count!=semantic_header.diff.som_false.payload_length) ||
+            (semantic_header.eom && offset+count!=semantic_header.request_length) || (semantic_header.opcode==0 && semantic_header.request_length)) {
             reply(request,SemanticReturnCode::UnsupportedSize,0); return;
         }
-        const MessageKey key{request.source_fep,request.PDCID,h.job_id,h.initiator,h.msg_id};
+        const MessageKey key{request.source_fep,request.PDCID,semantic_header.job_id,semantic_header.initiator,semantic_header.msg_id};
         try {
             auto found=incoming_.find(key);
             if (found==incoming_.end()) {
                 if (incoming_.size()>=4096) { reply(request,SemanticReturnCode::Undeliverable,0); return; }
-                Incoming incoming{static_cast<uint8_t>(h.opcode),static_cast<uint32_t>(h.request_length),h.match_bits,h.buffer_offset,
-                                  static_cast<uint16_t>(h.PIDonFEP),0};
-                if (h.opcode==1) memory_.authorize(h.job_id,h.PIDonFEP,h.match_bits,h.buffer_offset,h.request_length,Access::Write);
-                else if (h.opcode==3) {
-                    const auto& region=memory_.authorize(h.job_id,h.PIDonFEP,h.match_bits,h.buffer_offset,h.request_length,Access::Atomic);
+                Incoming incoming{static_cast<uint8_t>(semantic_header.opcode),static_cast<uint32_t>(semantic_header.request_length),semantic_header.match_bits,semantic_header.buffer_offset,
+                                  static_cast<uint16_t>(semantic_header.PIDonFEP),0};
+                if (semantic_header.opcode==1) memory_.authorize(semantic_header.job_id,semantic_header.PIDonFEP,semantic_header.match_bits,semantic_header.buffer_offset,semantic_header.request_length,Access::Write);
+                else if (semantic_header.opcode==3) {
+                    const auto& region=memory_.authorize(semantic_header.job_id,semantic_header.PIDonFEP,semantic_header.match_bits,semantic_header.buffer_offset,semantic_header.request_length,Access::Atomic);
                     if ((region.permissions&3u)!=3u) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
                     incoming.atomic_operation=atomic_extension.atomic_opcode;
                     incoming.atomic_datatype=atomic_extension.atomic_datatype;
                 }
-                else if (h.opcode==5) {
-                    auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& p) { return p.job==h.job_id && p.pid==h.PIDonFEP; });
+                else if (semantic_header.opcode==5) {
+                    auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& posted_receive) { return posted_receive.job==semantic_header.job_id && posted_receive.pid==semantic_header.PIDonFEP; });
                     if (posted==posted_.end()) { reply(request,SemanticReturnCode::NoMatch,0); return; }
-                    if (posted->capacity<h.request_length) { reply(request,SemanticReturnCode::UnsupportedSize,0); return; }
-                    memory_.authorize(posted->job,posted->pid,posted->key,posted->offset,h.request_length,Access::Write);
+                    if (posted->capacity<semantic_header.request_length) { reply(request,SemanticReturnCode::UnsupportedSize,0); return; }
+                    memory_.authorize(posted->job,posted->pid,posted->key,posted->offset,semantic_header.request_length,Access::Write);
                     incoming.key=posted->key; incoming.base=posted->offset; incoming.context=posted->context;
                     posted_.erase(posted);
                 }
-                incoming.has_immediate=h.hd;
+                incoming.has_immediate=semantic_header.hd;
                 found=incoming_.emplace(key,std::move(incoming)).first;
             }
             auto& message=found->second;
-            if (message.opcode!=h.opcode || message.total!=h.request_length) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
-            if ((h.opcode==1 || h.opcode==3) &&
-                (message.key!=h.match_bits || message.base!=h.buffer_offset || message.has_immediate!=bool(h.hd))) {
+            if (message.opcode!=semantic_header.opcode || message.total!=semantic_header.request_length) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
+            if ((semantic_header.opcode==1 || semantic_header.opcode==3) &&
+                (message.key!=semantic_header.match_bits || message.base!=semantic_header.buffer_offset || message.has_immediate!=bool(semantic_header.hd))) {
                 reply(request,SemanticReturnCode::OperationViolation,0); return;
             }
-            if (h.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
+            if (semantic_header.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
                 message.atomic_datatype!=atomic_extension.atomic_datatype)) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
-            if (h.som && h.hd) message.immediate_data=h.diff.som_true.header_data;
+            if (semantic_header.som && semantic_header.hd) message.immediate_data=semantic_header.diff.som_true.header_data;
             if (message.completed) { reply(request,SemanticReturnCode::Ok,message.total); return; }
             auto position=message.segments.lower_bound(offset);
             if (position!=message.segments.end() && position->first==offset && position->second==count) return;
@@ -327,16 +327,16 @@ private:
                 (position!=message.segments.begin() && std::prev(position)->first+std::prev(position)->second>offset)) {
                 reply(request,SemanticReturnCode::OperationViolation,0); return;
             }
-            if (h.opcode==3) {
-                memory_.atomic_elements(h.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
+            if (semantic_header.opcode==3) {
+                memory_.atomic_elements(semantic_header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
                     static_cast<IntegerAtomicOperation>(message.atomic_operation),
                     static_cast<IntegerAtomicDatatype>(message.atomic_datatype),request.pkt.payload);
-            } else if (h.opcode!=0) memory_.write(h.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),request.pkt.payload);
+            } else if (semantic_header.opcode!=0) memory_.write(semantic_header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),request.pkt.payload);
             message.segments.emplace(offset,count); message.received+=count;
             if (message.received==message.total) {
                 message.completed=true;
-                if (h.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
-                if (h.opcode==1 && message.immediate_data)
+                if (semantic_header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
+                if (semantic_header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 trace_.record(node_,"memory_delivered",message.total);
                 reply(request,SemanticReturnCode::Ok,message.total);

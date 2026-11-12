@@ -1,10 +1,12 @@
 # **Soft**-UE: Software Prototype of Ultra Ethernet
 
 > UE 1.1 simulation work: a deterministic runtime now drives the original
-> PDS/IPDC/TPDC with experimental native NO_OP/SEND/WRITE, checked sparse memory,
-> a standard-wire subset and configurable packet-fabric scenarios. Start with
+> PDS/IPDC/TPDC with native NO_OP/SEND/WRITE, datagrams, WRITE immediate and
+> non-fetching integer atomics, checked sparse memory and packet-fabric scenarios. Start with
 > `make simulation`, `make test-sim`, and `make test-scenarios`.
 > See [implementation status and limits](DOC/ue11/IMPLEMENTATION.md).
+> Researchers can follow the [Chinese architecture walkthrough](DOC/ue11/ARCHITECTURE.md)
+> for the layer boundaries, protocol state variables and executable examples.
 > This increment does **not** claim a complete UE 1.1 Profile or full-stack implementation.
 
 ---
