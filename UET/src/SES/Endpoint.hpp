@@ -144,7 +144,7 @@ public:
                 }
                 if (offset) { h.diff.som_false.payload_length=count; h.diff.som_false.message_offset=offset; }
                 request.pkt.payload.assign(operation.payload.begin()+offset,operation.payload.begin()+offset+count);
-                request.pkt_len=static_cast<uint16_t>(44+count);
+                request.pkt_len=static_cast<uint16_t>(44+(is_atomic?4:0)+count);
                 if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation");
                 offset+=count;
                 if (offset==operation.payload.size()) break;

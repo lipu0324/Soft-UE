@@ -183,7 +183,9 @@ void PDC::updateTxPsnTracker(){
         pause_pdc = true;
     }
     // Window backpressure is independent of ACK-request heuristics.
-    pause_pdc = unack_cnt >= MPR;
+    // §3.5.12.6: selective ACKs free packet buffers, but cannot authorize a
+    // new PSN beyond the still-open sequence window at the receiver.
+    pause_pdc = unack_cnt >= MPR || tx_cur_psn-clear_psn > MPR;
 
     
     std::stringstream after_state;
@@ -227,7 +229,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
     if (fast_retransmit_psn_ && !tx_pkt_buffer.count(*fast_retransmit_psn_))
         fast_retransmit_psn_.reset();
     while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
-    pause_pdc = unack_cnt >= MPR;
+    pause_pdc = unack_cnt >= MPR || tx_cur_psn-clear_psn > MPR;
     if ((ack_req_flag & 1u) && (valid_explicit || valid_cumulative)) gen_cm = CLR_CMD;
     // Selective ACKs are remembered, so a repeated ACK cannot decrement the
     // count twice or cause an endless ACK_REQ/cache-reply exchange.

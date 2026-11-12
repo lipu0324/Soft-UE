@@ -41,6 +41,17 @@ int main() {
         CHECK(sender.tx_pkt_q.size()==1);
         CHECK(sender.tx_pkt_q.front().PDS_header.RUOD_cp_header.flags.retx==1);
         CHECK(sender.tx_pkt_q.front().PDS_header.RUOD_cp_header.ctl_type==Close_cmd);
+
+        I_PDC window_sender(&services); CHECK(window_sender.initPDC(2));
+        for (size_t packet=0;packet<Default_MPR;++packet) window_sender.sesTxReq(&request);
+        CHECK(window_sender.pause_pdc);
+        for (uint32_t sequence=1001;sequence<1000+Default_MPR;++sequence)
+            window_sender.updateTxPsnTracker(sequence,0,999);
+        CHECK(window_sender.unack_cnt==1);
+        CHECK(window_sender.pause_pdc); // One hole still pins the PSN window.
+        window_sender.updateTxPsnTracker(1000,0,999);
+        CHECK(!window_sender.pause_pdc && window_sender.unack_cnt==0);
+        CHECK(loop.pending()==0);
         std::cout << "PASS: selective and duplicate ACKs, inclusive cleanup, PSN wrap and stale RTO\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -32,3 +32,41 @@ jobs:
             build/conformance.json
             build/cmake/Testing/Temporary/
             build/simulation-test-*/
+
+  reference-wire:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the pinned independent reference
+        uses: actions/checkout@v4
+        with:
+          repository: ultraethernet/uet-ref-prov
+          ref: 5b4e0491329b8e28764bca6847e2f6a0eaa84b9b
+          path: build/uet-reference
+      - name: Build libfabric 2.0.0 dependency
+        shell: bash
+        run: |
+          curl -fL --retry 3 https://github.com/ofiwg/libfabric/releases/download/v2.0.0/libfabric-2.0.0.tar.bz2 -o build/libfabric.tar.bz2
+          echo '1a8e40f1f331d6ee2e9ace518c0088a78c8a838968f8601c2b77fd012a7bf0f5  build/libfabric.tar.bz2' | sha256sum -c -
+          tar -xjf build/libfabric.tar.bz2 -C build
+          cd build/libfabric-2.0.0
+          ./configure --enable-only --enable-sockets
+          make -j2
+      - name: Build the reference library and application
+        run: make -C build/uet-reference -j2 LIBFABRIC="$GITHUB_WORKSPACE/build/libfabric-2.0.0" libuet_fabric.so uet
+      - name: Configure the parser comparison
+        run: >-
+          cmake -S . -B build/reference-tests
+          -DSOFTUE_REFERENCE_ROOT="$GITHUB_WORKSPACE/build/uet-reference"
+          -DSOFTUE_LIBFABRIC_ROOT="$GITHUB_WORKSPACE/build/libfabric-2.0.0"
+      - name: Build independent parser and fixture generator
+        run: cmake --build build/reference-tests -j2 --target reference_wire_oracle reference_wire_fixtures
+      - name: Compare reference parsing and CRC
+        run: ctest --test-dir build/reference-tests -R reference_wire_comparison --output-on-failure
+      - name: Preserve comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-wire-evidence
+          path: build/reference-tests/Testing/Temporary/
