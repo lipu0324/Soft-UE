@@ -24,6 +24,7 @@ struct WireOptions {
 struct DecodedPacket {
     WireOptions network;
     PDStoNET_pkt packet{};
+    uint32_t nominal_packet_size=0; // transport_pktsize+40, §3.6.12.2.
 };
 
 // Initial supported subset: RUD/ROD requests, ACK, NACK, CP; standard SES
@@ -35,6 +36,6 @@ public:
     static std::vector<uint8_t> encode(const PDStoNET_pkt& packet, const WireOptions& options);
     static DecodedPacket decode(const uint8_t* bytes, size_t size, bool crc_enabled = true,
                                 uint8_t native_ip_protocol = 253);
-    static void mark_ecn(std::vector<uint8_t>& frame);
+    static bool mark_ecn(std::vector<uint8_t>& frame); // Only ECT(0/1) transitions to CE.
 };
 } // namespace UET::NetworkLayer

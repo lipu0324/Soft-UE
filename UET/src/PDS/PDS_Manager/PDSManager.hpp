@@ -414,7 +414,8 @@ public:
             return packet->PDS_header.RUOD_req_header.type == ROD_REQ ||
                    packet->PDS_header.RUOD_req_header.type == RUD_REQ;
         case RUOD_cp_header: return packet->PDS_header.RUOD_cp_header.type == CP;
-        case RUOD_ack_header: return packet->PDS_header.RUOD_ack_header.type == ACK;
+        case RUOD_ack_header: return packet->PDS_header.RUOD_ack_header.type == ACK ||
+            packet->PDS_header.RUOD_ack_header.type == ACK_CC;
         case nack_header:
             return packet->PDS_header.nack_header.type == NACK &&
                    !packet->PDS_header.nack_header.flags.nt;

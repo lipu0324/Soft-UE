@@ -3,6 +3,7 @@
 #include "PacketPort.hpp"
 #include "../Network_Layer/PdsPacketCodec.hpp"
 #include "../Network_Layer/UetWireCodec.hpp"
+#include "../CMS/NsccEngine.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
 #include <deque>
 
@@ -37,6 +38,9 @@ public:
                         decoded.network.destination.ip != address(node_).ip)
                         throw std::invalid_argument("network address or encapsulation mismatch");
                     packet = std::move(decoded.packet);
+                    packet.wire_entropy=decoded.network.entropy; packet.network_ecn=decoded.network.ecn;
+                    packet.receive_time_ns=frame.has_arrival_timestamp?frame.first_byte_arrival_ns:loop_.now();
+                    packet.nominal_packet_size=decoded.nominal_packet_size;
                     packet.src_fep=frame.source; packet.dst_fep=frame.destination;
                 }
                 if (packet.dst_fep != node_ || packet.src_fep != frame.source)
@@ -57,6 +61,13 @@ public:
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
+    void enable_nscc(const CMS::NsccConfig& config) {
+        if (stopped_ || format_!=WireFormat::Uet11 || services_.congestion_control || manager_.getPDSStatus().open_cnt)
+            throw std::logic_error("configure NSCC once before opening connections");
+        congestion_=std::make_unique<CMS::NsccEngine>(config,loop_,[this] { wake(); },network_,&trace_,node_);
+        services_.congestion_control=congestion_.get();
+    }
+    const CMS::NsccEngine* nscc() const { return congestion_.get(); }
     void cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id) {
         if (!stopped_) manager_.cancelQueuedMessage(peer,job,message_id);
     }
@@ -116,6 +127,7 @@ private:
     Trace& trace_;
     IPacketPort& port_;
     Services services_;
+    std::unique_ptr<CMS::NsccEngine> congestion_; // Outlives every PDC in manager_.
     PDSProcessManager manager_;
     std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
     TimerId pending_ = 0;
@@ -167,6 +179,13 @@ private:
                 else {
                     auto options=network_;
                     options.source=address(packet.src_fep); options.destination=address(packet.dst_fep);
+                    if (services_.congestion_control) {
+                        options.entropy=packet.wire_entropy; options.ecn=packet.network_ecn;
+                        frame.entropy=packet.wire_entropy;
+                        if (packet.PDS_type!=RUOD_req_header && packet.PDS_type!=UUD_req_header) {
+                            frame.traffic_class=1; options.dscp=48; // Explicit two-class simulator mapping.
+                        }
+                    }
                     frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                 }
                 outbound_.push_back({std::move(frame),packet.PDS_type==UUD_req_header,packet.local_tx_handle});

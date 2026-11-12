@@ -87,6 +87,7 @@ PDC::PDC(UET::Runtime::Services* services)
  */
 PDC::~PDC()
 {
+    releaseCongestionState();
     resetCloseSafety();
     resetNackPause();
     lifetime_guard_.reset();
@@ -149,7 +150,44 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
 
     uint16_t handle = setRXhandle(meta.psn, meta.spdcid);
     rx_pkt_map.insert({handle, meta});
+    if (runtime_ && runtime_->congestion_control) {
+        congestion_engaged_=true;
+        runtime_->congestion_control->received(congestionConnection(),*pkt);
+    }
     return handle;
+}
+
+void PDC::releaseCongestionState() {
+    if (congestion_engaged_ && runtime_ && runtime_->congestion_control)
+        runtime_->congestion_control->closed(congestionConnection());
+    congestion_engaged_=false;
+    congestion_connection_.reset();
+    congestion_deferred_retries_.clear();
+}
+
+void PDC::processCongestionAck(const PDStoNET_pkt& packet) {
+    if (!runtime_ || !runtime_->congestion_control) return;
+    const auto& ack=packet.PDS_header.RUOD_ack_header;
+    const uint32_t sequence=ack.cack_psn+ack.ack_psn_off;
+    std::optional<UET::CMS::NsccTransmitSample> sample;
+    const auto found=tx_pkt_map.find(sequence);
+    if (found!=tx_pkt_map.end() && found->second.congestion_nominal_bytes && !found->second.congestion_data_received)
+        sample=UET::CMS::NsccTransmitSample{found->second.last_transmit_time,found->second.retry_cnt};
+    runtime_->congestion_control->acknowledged(congestionConnection(),packet,sample);
+    if (ack.type==ACK_CC) {
+        const auto span=tx_cur_psn-clear_psn;
+        for (auto& item:tx_pkt_map) {
+            const uint32_t distance=item.first-clear_psn;
+            const uint32_t sack_base=ack.cack_psn+packet.congestion_ack.sack_psn_offset;
+            const uint32_t sack_bit=item.first-sack_base;
+            if (distance && distance<span && (item.first==sequence ||
+                (ack.cack_psn-clear_psn<span && distance<=ack.cack_psn-clear_psn) ||
+                (sack_bit<64 && (packet.congestion_ack.sack_bitmap&(uint64_t{1}<<sack_bit))))) {
+                item.second.congestion_data_received=true;
+                item.second.congestion_inflight=false;
+            }
+        }
+    }
 }
 
 /**
@@ -225,6 +263,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
              (valid_cumulative && distance <= cumulative_distance))) {
             const auto sequence = it->first;
             stopPacketTimer(sequence);
+            congestion_deferred_retries_.erase(sequence);
             tx_pkt_map.erase(sequence);
             acknowledged_tx_.insert(sequence);
             it = tx_pkt_buffer.erase(it);
@@ -260,6 +299,8 @@ void PDC::clearReceivedPacketsThrough(uint32_t clear_through)
     // malformed peer could silently discard a hole in the RUD receive window.
     if (clear_through-rx_cur_psn && clear_through-rx_cur_psn<0x80000000u) return;
     rx_clear_psn=clear_through;
+    if (congestion_engaged_ && runtime_ && runtime_->congestion_control)
+        runtime_->congestion_control->receive_cleared(congestionConnection(),clear_through);
     if (advance) emitPdcEvent(UET::Runtime::PdcEventKind::ReceiveCleared,clear_through);
     for (auto entry=tx_ack_buffer.begin();entry!=tx_ack_buffer.end();) {
         if (clear_through-entry->first<0x80000000u) {
@@ -297,6 +338,20 @@ void PDC::reTx(uint32_t psn){
     const auto found = tx_pkt_buffer.find(psn);
     if (found == tx_pkt_buffer.end()) return;
     PDStoNET_pkt p = found->second;
+    if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header &&
+        tx_pkt_map.at(psn).congestion_data_received) {
+        // Data receipt has already clocked NSCC. Re-sending that data would
+        // charge another attempt that duplicate suppression can never count
+        // as new bytes. Ask for the retained SES response (§3.5.16.2).
+        PDStoNET_pkt query{}; query.src_fep=src_fep; query.dst_fep=dst_fep;
+        query.PDS_type=RUOD_cp_header;
+        auto& control=query.PDS_header.RUOD_cp_header;
+        control.type=CP; control.ctl_type=ACK_req; control.flags.ar=1;
+        control.psn=psn; control.spdcid=SPDCID; control.dpdcid=DPDCID;
+        control.payload=uint32_t{p.SESpkt.bth_header.Standard_Header.msg_id}<<16;
+        if (public_net_queue) public_net_queue->push(query); else tx_pkt_q.push(query);
+        return;
+    }
     if (p.PDS_type == RUOD_cp_header) {
         auto& control=p.PDS_header.RUOD_cp_header;
         control.flags.retx=1;
@@ -314,6 +369,11 @@ void PDC::reTx(uint32_t psn){
         }
     }
     else return;
+    if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header) {
+        auto& metadata=tx_pkt_map.at(psn);
+        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
+        metadata.congestion_inflight=true;
+    }
     found->second=p;
     if (runtime_ && tx_pkt_map.count(psn)) tx_pkt_map.at(psn).last_transmit_time=runtime_->clock.now();
     if (public_net_queue) {
@@ -332,6 +392,18 @@ void PDC::txRto(uint32_t psn){
     if (nack_traffic_paused_ && tx_pkt_buffer.at(psn).PDS_type!=RUOD_cp_header) {
         deferred_nack_retransmits_.insert(psn);
         return;
+    }
+    if (runtime_ && runtime_->congestion_control && tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header &&
+        !tx_pkt_map.at(psn).congestion_data_received) {
+        auto& metadata=tx_pkt_map.at(psn);
+        if (metadata.congestion_inflight) {
+            runtime_->congestion_control->inferred_loss(congestionConnection(),metadata.congestion_nominal_bytes);
+            metadata.congestion_inflight=false;
+        }
+        // Infer loss once, but do not consume a retry or arm a new RTO until
+        // CMS admits the actual retransmission (§3.6.8 / §3.6.13.5).
+        stopPacketTimer(psn);
+        if (!congestionReady()) { congestion_deferred_retries_.insert(psn); return; }
     }
     TX_pkt_meta meta = tx_pkt_map.at(psn);
     const auto& lost_packet=tx_pkt_buffer.at(psn);
@@ -432,6 +504,7 @@ void PDC::pauseForResourceNack(uint32_t sequence) {
 
 void PDC::freePDC()
 {
+    releaseCongestionState();
     resetCloseSafety();
     resetNackPause();
     clearAllPacketTimers();
@@ -1062,6 +1135,14 @@ void PDC::rxNack(PDStoNET_pkt* packet)
     // A late reply from an earlier incarnation of this local PDCID cannot
     // affect the current context, even when its peer tuple is otherwise equal.
     if (!tx_pkt_buffer.count(negative_ack.nack_psn)) return;
+    if (runtime_ && runtime_->congestion_control) {
+        auto& metadata=tx_pkt_map.at(negative_ack.nack_psn);
+        if (metadata.congestion_inflight) {
+            runtime_->congestion_control->negative_acknowledged(congestionConnection(),metadata.congestion_nominal_bytes,
+                *packet,UET::CMS::NsccTransmitSample{metadata.last_transmit_time,metadata.retry_cnt});
+            metadata.congestion_inflight=false;
+        }
+    }
     if (isClose(negative_ack.nack_code)) {
         close_error = true;
         failure_reason_=UET::Runtime::PdcFailureReason::FatalNegativeAcknowledgement;
@@ -1139,6 +1220,13 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
         p.PDS_header.RUOD_req_header.psn_off = psn - start_psn;
     }
     p.SESpkt = *pkt;
+    if (runtime_ && runtime_->congestion_control) {
+        congestion_engaged_=true;
+        auto& metadata=tx_pkt_map[psn];
+        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
+        metadata.congestion_inflight=true;
+        metadata.last_transmit_time=runtime_->clock.now();
+    }
     if (pkt->bth_type==Standard_Header)
         emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
             pkt->bth_header.Standard_Header.job_id,pkt->bth_header.Standard_Header.msg_id,
@@ -1210,6 +1298,8 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
         p.SESpkt = *pkt;
         LOG_DEBUG(__FUNCTION__, formatLogMessage("包含SES层数据"));
     }
+    if (runtime_ && runtime_->congestion_control)
+        runtime_->congestion_control->decorate_ack(congestionConnection(),psn,p);
 
     
     std::stringstream ack_info;

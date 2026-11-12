@@ -185,10 +185,20 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2);
     } else if (packet.PDS_type == RUOD_ack_header) {
         const auto& header=packet.PDS_header.RUOD_ack_header;
-        if (header.type!=ACK) throw std::invalid_argument("ACK extension not implemented");
+        if (header.type!=ACK && header.type!=ACK_CC) throw std::invalid_argument("ACK extension not implemented");
         next=header.next_hdr;
-        put(encoded_bytes,(7<<11)|(next_wire(next)<<7)|(header.flags.m<<5)|(header.flags.retx<<4)|(header.flags.p<<3)|(header.flags.req<<1),2);
+        put(encoded_bytes,((header.type==ACK?7:8)<<11)|(next_wire(next)<<7)|(header.flags.m<<5)|(header.flags.retx<<4)|(header.flags.p<<3)|(header.flags.req<<1),2);
         put(encoded_bytes,static_cast<uint16_t>(header.ack_psn_off),2); put(encoded_bytes,header.cack_psn,4); put(encoded_bytes,header.spdcid,2); put(encoded_bytes,header.dpdcid,2);
+        if (header.type==ACK_CC) {
+            const auto& congestion=packet.congestion_ack;
+            if (congestion.type!=0 || congestion.receiver_window_penalty>127 || congestion.received_byte_units>0xffffff)
+                throw std::invalid_argument("unsupported ACK_CC state");
+            put(encoded_bytes,congestion.type<<4,1); put(encoded_bytes,congestion.mpr,1);
+            put(encoded_bytes,static_cast<uint16_t>(congestion.sack_psn_offset),2); put(encoded_bytes,congestion.sack_bitmap,8);
+            put(encoded_bytes,congestion.service_time,2);
+            put(encoded_bytes,(congestion.restore_window?0x80:0)|congestion.receiver_window_penalty,1);
+            put(encoded_bytes,congestion.received_byte_units,3); put(encoded_bytes,congestion.out_of_order_count,2);
+        }
     } else if (packet.PDS_type == nack_header) {
         const auto& header=packet.PDS_header.nack_header;
         if (header.type!=NACK || header.next_hdr!=UET_HDR_NONE) throw std::invalid_argument("unsupported NACK format");
@@ -231,12 +241,25 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         const auto destination=reader.take(2);
         if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; }
         else header.dpdcid=destination;
-    } else if (type==7) {
+    } else if (type==7 || type==8) {
         if (flags&0x41) throw std::invalid_argument("unsupported ACK flags");
         packet.PDS_type=RUOD_ack_header; auto& header=packet.PDS_header.RUOD_ack_header;
-        header.type=ACK; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1;
+        header.type=type==7?ACK:ACK_CC; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1;
         header.flags.p=(flags>>3)&1; header.flags.req=(flags>>1)&3;
         header.ack_psn_off=static_cast<int16_t>(reader.take(2)); header.cack_psn=reader.take(4); header.spdcid=reader.take(2); header.dpdcid=reader.take(2);
+        if (type==8) {
+            auto& congestion=packet.congestion_ack;
+            congestion.type=reader.take(1)>>4; congestion.mpr=reader.take(1);
+            congestion.sack_psn_offset=static_cast<int16_t>(reader.take(2)); congestion.sack_bitmap=reader.take(8);
+            // Unknown CC state still leaves a valid base ACK/SACK. Its opaque
+            // bits must not accidentally become NSCC byte acknowledgments.
+            const auto state=reader.take(8);
+            if (congestion.type==0) {
+                congestion.service_time=state>>48; congestion.restore_window=(state>>47)&1;
+                congestion.receiver_window_penalty=(state>>40)&0x7f;
+                congestion.received_byte_units=(state>>16)&0xffffff; congestion.out_of_order_count=state&0xffff;
+            }
+        }
     } else if (type==10) {
         if ((flags&0x47)||next!=UET_HDR_NONE) throw std::invalid_argument("invalid NACK flags");
         packet.PDS_type=nack_header; auto& header=packet.PDS_header.nack_header;
@@ -371,19 +394,27 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         if (crc!=actual) throw std::invalid_argument("UET CRC mismatch");
     }
     result.packet=decode_pds(bytes+start+transport,end-start-transport-(crc_enabled?4:0));
+    result.nominal_packet_size=static_cast<uint32_t>(end-start+40);
     return result;
 }
 
-void UetWireCodec::mark_ecn(std::vector<uint8_t>& frame) {
+bool UetWireCodec::mark_ecn(std::vector<uint8_t>& frame) {
     if (frame.size()<34) throw std::invalid_argument("truncated ECN frame");
     const auto ether=get(frame.data()+12,2);
     if (ether==0x0800) {
+        if (frame[14]!=0x45 || ip_checksum(frame.data()+14)!=0) throw std::invalid_argument("invalid ECN IPv4 header");
+        const auto original=frame[15]&3;
+        if (!original || original==3) return false;
         frame[15]|=3; frame[24]=frame[25]=0;
         const auto checksum=ip_checksum(frame.data()+14);
         frame[24]=checksum>>8; frame[25]=checksum&255;
     } else if (ether==0x86dd) {
         if (frame.size()<54) throw std::invalid_argument("truncated IPv6 ECN frame");
+        if ((frame[14]>>4)!=6) throw std::invalid_argument("invalid ECN IPv6 header");
+        const auto original=(frame[15]>>4)&3;
+        if (!original || original==3) return false;
         frame[15]|=0x30;
     } else throw std::invalid_argument("unsupported ECN EtherType");
+    return true;
 }
 } // namespace UET::NetworkLayer

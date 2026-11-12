@@ -23,13 +23,18 @@ private:
     IPacketPort& lower_; bool permanent_;
 };
 
-void streaming_write(uint64_t length,bool drop_packet) {
+void streaming_write(uint64_t length,bool drop_packet,bool use_nscc=false) {
     CHECK(length>=4 && length<=UINT32_MAX);
     EventLoop loop; Trace trace(loop,0); Fabric fabric(loop,trace,42);
     auto& forward=fabric.add_host(1); auto& reverse=fabric.add_host(2);
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     StreamFaultPort faults(forward); faults.drop_second=drop_packet;
     PdsHost source_host(1,loop,trace,faults),target_host(2,loop,trace,reverse);
+    if (use_nscc) {
+        auto congestion=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,8296);
+        congestion.initial_maximum_window=4*8296;
+        source_host.enable_nscc(congestion); target_host.enable_nscc(congestion);
+    }
     Endpoint source(1,source_host,loop,trace,8192,10000*kMillisecond),target(2,target_host,loop,trace,8192);
     source.memory().add_job(1); target.memory().add_job(1);
     const auto region=target.memory().register_region(1,1,length,7);
@@ -64,7 +69,7 @@ void streaming_write(uint64_t length,bool drop_packet) {
     CHECK(lifetime.expired());
     source.close(); target.close(); source_host.close(); target_host.close(); CHECK(loop.pending()==0);
     std::cout<<"PASS streaming bytes="<<length<<" fragments="<<reads<<" peak_queued="<<maximum_queued
-        <<" intervals="<<maximum_intervals<<" pages="<<region.storage->allocated_pages()<<" loss="<<drop_packet<<'\n';
+        <<" intervals="<<maximum_intervals<<" pages="<<region.storage->allocated_pages()<<" loss="<<drop_packet<<" nscc="<<use_nscc<<'\n';
 }
 
 void invalid_size_and_permanent_loss() {
@@ -96,11 +101,14 @@ void invalid_size_and_permanent_loss() {
 int main(int argc,char** argv) {
     try {
         if (argc==3 && std::string(argv[1])=="--bytes") streaming_write(std::stoull(argv[2]),false);
+        else if (argc==3 && std::string(argv[1])=="--nscc-bytes") streaming_write(std::stoull(argv[2]),false,true);
         else {
             CHECK(argc==1);
             invalid_size_and_permanent_loss();
             streaming_write(8*1024*1024+3,false);
             streaming_write(1024*1024+3,true);
+            streaming_write(8*1024*1024+3,false,true);
+            streaming_write(1024*1024+3,true,true);
         }
         return 0;
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

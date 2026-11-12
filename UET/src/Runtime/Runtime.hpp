@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+namespace UET::CMS { class ICongestionControl; }
 namespace UET::Runtime {
 
 using Time = uint64_t; // Integer nanoseconds in both runtime implementations.
@@ -59,6 +60,7 @@ struct Services {
     Time resource_nack_retry_delay = 2*kMillisecond;
     bool standard_wire=true;
     std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.
+    CMS::ICongestionControl* congestion_control=nullptr; // Optional explicit CMS configuration.
 };
 
 class EventLoop final : public IClock, public ITimerQueue {

@@ -200,6 +200,7 @@ void I_PDC::openChk(){
         rxNack(&p);      // Process negative acknowledgment packet
         }
     }
+    else if(congestionRetryReady()) { retryCongestionDeferred(); }
     else if(!rto_pkt_q.empty()){
         uint32_t psn = rto_pkt_q.front();
         rto_pkt_q.pop();
@@ -216,7 +217,7 @@ void I_PDC::openChk(){
         sesTxRsp(&tx_rsp_q.front());
         tx_rsp_q.pop();
     }
-    else if(!tx_req_q.empty() && !pause_pdc){   // Respect the PDC outstanding-packet window.
+    else if(!tx_req_q.empty() && !pause_pdc && congestionReady()){   // PDS and CMS must both admit the send.
         diagnostics() << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer request transmission");
         sesTxReq(&tx_req_q.front());
@@ -302,6 +303,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
     diagnostics() << getCurrentTimestamp() << "I_PDC receive request packet - PSN: " << pkt->PDS_header.RUOD_req_header.psn << std::endl;
 
     chkRxError(pkt);
+    observeCongestionDuplicate(*pkt);
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
@@ -382,11 +384,14 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
         //FUNCTION_LOG_EXIT();
         return;
     }
+    // Probe ACK's opaque value is not a PSN. It cannot retire data or Close.
+    if (pkt->PDS_header.RUOD_ack_header.flags.p) return;
 
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
     const bool matches_outstanding=tx_pkt_buffer.count(ack_psn)!=0;
     if (runtime_ && SYN && !matches_outstanding) return;
+    processCongestionAck(*pkt);
 
     // Record ACK packet information
     std::stringstream ack_info;

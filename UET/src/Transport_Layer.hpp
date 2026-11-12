@@ -549,6 +549,20 @@ struct PDStoNET_pkt
         uint8_t cp_ack_type=0,cp_ack_length=2,start_psn_method=0,reserved=0;
         uint32_t expected_psn=0;
     } control_ack; // §3.5.16.4.1: local representation, never memcpy'd to wire.
+    struct {
+        uint8_t type=0,mpr=0;
+        int16_t sack_psn_offset=0;
+        uint64_t sack_bitmap=0;
+        uint16_t service_time=0;
+        bool restore_window=false;
+        uint8_t receiver_window_penalty=0;
+        uint32_t received_byte_units=0;
+        uint16_t out_of_order_count=0xffff;
+    } congestion_ack; // §3.5.10.8 / §3.6.9.2, encoded explicitly by UetWireCodec.
+    uint16_t wire_entropy=0;
+    uint8_t network_ecn=0;
+    uint32_t nominal_packet_size=0;
+    uint64_t receive_time_ns=0; // Local timing metadata; never serialized.
 };
 
 

@@ -10,6 +10,8 @@ struct Frame {
     uint16_t entropy = 0;
     uint8_t traffic_class = 0;
     std::vector<uint8_t> bytes;
+    uint64_t first_byte_arrival_ns=0;
+    bool has_arrival_timestamp=false; // Behavioral MAC timing; real socket adapters leave this false.
 };
 enum class SendResult { Accepted, WouldBlock, NoRoute, TooLarge, Closed };
 struct IPacketPort {

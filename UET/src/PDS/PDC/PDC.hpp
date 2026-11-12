@@ -35,6 +35,7 @@
 #include "../../logger/Logger.hpp"
 #include "process/ThreadSafeQueue.hpp"
 #include "RTOTimer/RTOTimer.hpp"
+#include "../../CMS/CongestionControl.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
@@ -313,6 +314,9 @@ struct TX_pkt_meta
     uint16_t rto;           /**< Retransmission timeout time */
     uint16_t retry_cnt;     /**< Retry count */
     UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
+    uint32_t congestion_nominal_bytes=0;
+    bool congestion_inflight=false; // One debit per attempt, released by ACK counter/NACK/loss.
+    bool congestion_data_received=false; // Recover a missing semantic response with ACK Request, not data.
     // Add any other metadata you need to store here 
 };
 
@@ -443,7 +447,7 @@ public:
 
     bool hasPendingWork() const {
         const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
-                            (!tx_req_q.empty() && !pause_pdc) || !tx_rsp_q.empty();
+                            (!tx_req_q.empty() && !pause_pdc && congestionReady()) || !tx_rsp_q.empty() || congestionRetryReady();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
@@ -465,12 +469,42 @@ public:
         if (found == tx_ack_buffer.end()) return false;
         auto ack = found->second;
         ack.PDS_header.RUOD_ack_header.flags.retx = 1;
+        if (runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->decorate_ack(congestionConnection(),psn,ack);
         if (public_net_queue) return public_net_queue->push(ack);
         tx_pkt_q.push(std::move(ack));
         return true;
     }
 
 protected:
+    mutable bool congestion_engaged_=false;
+    mutable std::optional<UET::CMS::Connection> congestion_connection_;
+    std::set<uint32_t> congestion_deferred_retries_;
+    UET::CMS::Connection congestionConnection() const {
+        if (congestion_connection_) return *congestion_connection_;
+        // Before the first request is issued, its queued delivery mode has not
+        // yet been committed by txReq. Admission must use that same future CCC.
+        const auto delivery=(tx_cur_psn==start_psn && !tx_req_q.empty())?tx_req_q.front().delivery_mode:mode;
+        congestion_connection_=UET::CMS::Connection{dst_fep,SPDCID,start_psn,delivery==ROD};
+        congestion_engaged_=true;
+        return *congestion_connection_;
+    }
+    bool congestionReady() const {
+        if (!runtime_ || !runtime_->congestion_control) return true;
+        congestion_engaged_=true;
+        return runtime_->congestion_control->can_send(congestionConnection());
+    }
+    bool congestionRetryReady() const { return !congestion_deferred_retries_.empty() && congestionReady(); }
+    void retryCongestionDeferred() {
+        const auto sequence=*congestion_deferred_retries_.begin();
+        congestion_deferred_retries_.erase(sequence); txRto(sequence);
+    }
+    void processCongestionAck(const PDStoNET_pkt& packet);
+    void releaseCongestionState();
+    void observeCongestionDuplicate(const PDStoNET_pkt& packet) {
+        if (error_chk==ACK_ERROR && runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->received(congestionConnection(),packet,true);
+    }
     std::ostream& diagnostics() const {
         if (!runtime_) return std::cout;
         if (runtime_->diagnostic_output) return *runtime_->diagnostic_output;

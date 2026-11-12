@@ -162,6 +162,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         state = PENDING; // Waiting for secure PSN verification
 
     chkRxError(pkt); // Check receive packet error
+    observeCongestionDuplicate(*pkt);
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
@@ -269,6 +270,7 @@ void T_PDC::openChk()
                 netRxCm(&p); // Handle control packet / Process control packet
             }
         }
+        else if(congestionRetryReady()) { retryCongestionDeferred(); }
         else if(!rto_pkt_q.empty()){
             uint32_t psn = rto_pkt_q.front();
             rto_pkt_q.pop();
@@ -282,7 +284,7 @@ void T_PDC::openChk()
             sesTxRsp(&tx_rsp_q.front());
             tx_rsp_q.pop();
         }
-        else if (state == ESTABLISHED && pause_pdc == false)
+        else if (state == ESTABLISHED && pause_pdc == false && !tx_req_q.empty() && congestionReady())
         { // Packet transmission can only be done in established state
             //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] state == ESTABLISHED && pause_pdc == false" << std::endl;
             if (!tx_req_q.empty())
@@ -537,6 +539,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     LOG_DEBUG(__FUNCTION__, formatLogMessage(pkt_info.str()));
 
     chkRxError(pkt); // Check receive packet error
+    observeCongestionDuplicate(*pkt);
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
@@ -600,6 +603,8 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
 {
     // FUNCTION_LOG_ENTRY();
 
+    if (pkt->PDS_header.RUOD_ack_header.flags.p) return;
+    processCongestionAck(*pkt);
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx ack,ack_psn:" << ack_psn << ",cack_psn:" << cack_psn << std::endl;

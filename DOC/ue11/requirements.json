@@ -332,13 +332,19 @@
       "id": "CMS-NSCC",
       "reference": "§3.3.7; §3.6.13",
       "summary": "NSCC 准入、窗口与反馈闭环",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "nscc_test",
+        "nscc_integration_test",
+        "fabric_congestion_test",
+        "uet_wire_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Original PDS send/retransmit admission, signed nominal-byte ACK clock, four ECN/delay cases and quick adapt implemented. Trimming, complete Probe/MPR/SACK/control handling, MAC timing accuracy and incast/profile acceptance remain open; see NSCC.md."
     },
     {
       "id": "NET-BASE",
@@ -347,9 +353,11 @@
       "status": "partial",
       "tests": [
         "fabric_test",
-        "simulation_scenarios"
+        "simulation_scenarios",
+        "fabric_congestion_test"
       ],
-      "profiles": []
+      "profiles": [],
+      "evidence_note": "Independent traffic-class buffers, byte-deficit round-robin service, dequeue ECN, first-byte arrival timing and link-failure generations are tested; trimming and full M4 workload acceptance remain open."
     },
     {
       "id": "SES-READ",

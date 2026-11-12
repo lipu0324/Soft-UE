@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--timeout", type=int, default=1200)
+    parser.add_argument("--nscc", action="store_true", help="Enable NSCC and exercise its 24-bit ACK counter wrap")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("timeout must be positive")
@@ -26,7 +27,7 @@ def main():
     source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     source_dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip())
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
-    command = [str(binary), "--bytes", "4294967295"]
+    command = [str(binary), "--nscc-bytes" if args.nscc else "--bytes", "4294967295"]
     usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.perf_counter()
     returncode = None
@@ -41,10 +42,13 @@ def main():
     elapsed = time.perf_counter() - started
     usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     log_text = log_path.read_text()
-    match = re.search(r"PASS streaming bytes=(\d+) fragments=(\d+) peak_queued=(\d+) intervals=(\d+) pages=(\d+) loss=(\d+)", log_text)
+    match = re.search(r"PASS streaming bytes=(\d+) fragments=(\d+) peak_queued=(\d+) intervals=(\d+) pages=(\d+) loss=(\d+) nscc=([01])", log_text)
     observed = dict(zip(["bytes", "unique_data_fragments", "peak_producer_queue", "receive_intervals", "sparse_pages", "injected_loss"],
-                        map(int, match.groups()))) if match else None
+                        map(int, match.groups()[:6]))) if match else None
+    if observed is not None:
+        observed["nscc_enabled"] = bool(int(match.group(7)))
     passed = returncode == 0 and observed is not None and observed["bytes"] == 4294967295 and observed["unique_data_fragments"] == 524288
+    passed = passed and observed["nscc_enabled"] == args.nscc
     report = {
         "schema_version": 1, "experiment": "streamed-native-write-boundary", "passed": passed,
         "source_commit": source_commit, "source_dirty": source_dirty,
@@ -52,6 +56,8 @@ def main():
         "specification_sha256": requirements["specification_sha256"],
         "softue_baseline": requirements["softue_baseline"], "command": command,
         "returncode": returncode, "timed_out": timed_out, "observed": observed,
+        "congestion_control": "NSCC" if args.nscc else "disabled",
+        "nscc_counter_wrap_required": args.nscc,
         "fragment_count_note": "Unique fragments count application reads; cached retransmissions are not counted. injected_loss excludes any fabric queue loss.",
         "executor_measurements": {
             "wall_seconds": elapsed,

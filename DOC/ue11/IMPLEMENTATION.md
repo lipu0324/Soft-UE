@@ -284,6 +284,11 @@ protocol implementation. Failed runs remain part of the validation record.
 
 ## Traceability and normative review
 
+The first explicitly enabled NSCC integration, nominal-byte ACK clock and
+dequeue-ECN switch queues are described in [NSCC architecture](NSCC.md).
+This is an M4 increment, with remaining congestion/control acceptance tracked
+explicitly; the default legacy/reference experiments do not silently enable it.
+
 The fixed inputs are UE Specification 1.1 (2026-10-12), Soft-UE
 `4a4e6d874909720097b1ae20302a538a97116976`, and uet-ref-prov
 `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b`. The uploaded PDF SHA256 is

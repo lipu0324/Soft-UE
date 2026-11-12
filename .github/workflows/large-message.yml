@@ -7,6 +7,9 @@ permissions:
   contents: read
 jobs:
   streaming-boundary:
+    strategy:
+      matrix:
+        congestion: [disabled, nscc]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -16,10 +19,15 @@ jobs:
           cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
           cmake --build build/release --target streaming_payload_test -j2
       - name: Verify 4 GiB minus one through the protocol and fabric
-        run: python3 scripts/test_large_message.py --binary build/release/streaming_payload_test --output build/large-message
+        run: |
+          if [ "${{ matrix.congestion }}" = "nscc" ]; then
+            python3 scripts/test_large_message.py --binary build/release/streaming_payload_test --output build/large-message --nscc
+          else
+            python3 scripts/test_large_message.py --binary build/release/streaming_payload_test --output build/large-message
+          fi
       - name: Preserve source and boundary evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: large-message-evidence
+          name: large-message-evidence-${{ matrix.congestion }}
           path: build/large-message/
