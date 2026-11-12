@@ -24,8 +24,12 @@ constexpr bool native_atomic_platform=true;
 constexpr bool native_atomic_platform=false;
 #endif
 constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|(native_atomic_platform?FI_ATOMIC:0);
-constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE;
-constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE;
+// The single application FIFO waits for final completion before initiating
+// its successor, including while a recoverable semantic error is retried.
+// It therefore enforces FI_FENCE for every transmit (§3.4.2.7.1.1), even
+// across peers. This conservative policy trades concurrency for simplicity.
+constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_FENCE;
+constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE|FI_FENCE;
 // §2.2.6 defines two independent ordering predicates. A cross-operation flag
 // can participate in both. The provider's one application FIFO also supplies
 // source-side fencing between ordered operations using different PDC modes.
@@ -760,6 +764,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;
+        if (hints && hints->tx_attr) info.tx_attr->op_flags|=hints->tx_attr->op_flags;
         info.tx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->tx_attr?hints->tx_attr->msg_order:uint64_t{FI_ORDER_SAS});
         info.tx_attr->comp_order=FI_ORDER_NONE;
         info.rx_attr->caps=available_caps&~(FI_SEND|FI_WRITE); info.rx_attr->size=4096;

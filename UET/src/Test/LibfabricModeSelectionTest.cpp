@@ -57,11 +57,13 @@ public:
         hints->fabric_attr->prov_name=::strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
         hints->addr_format=FI_SOCKADDR_IN; hints->caps=FI_MSG|FI_RMA|FI_ATOMIC;
         hints->tx_attr->msg_order=hints->rx_attr->msg_order=ordering;
+        hints->tx_attr->op_flags=FI_FENCE;
         const auto result=fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info);
         if (result) std::cerr<<"getinfo ordering="<<ordering<<" result="<<result<<" "<<fi_strerror(-result)<<'\n';
         CHECK(result==0);
         CHECK(info->tx_attr->msg_order==ordering && info->rx_attr->msg_order==ordering);
         CHECK(info->ep_attr->max_order_waw_size==UINT32_MAX);
+        CHECK(info->tx_attr->op_flags&FI_FENCE);
         CHECK(fi_fabric(info->fabric_attr,&fabric,nullptr)==0);
         CHECK(fi_domain(fabric,info,&domain,nullptr)==0);
         fi_av_attr av_attributes{}; av_attributes.type=FI_AV_UNSPEC;
@@ -96,7 +98,8 @@ public:
     fid_cq* completions=nullptr; fid_ep* endpoint=nullptr; sockaddr_in address{};
 };
 
-void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma) {
+void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,bool late_receive=false) {
+    const bool receive_was_late=late_receive;
     ProviderFixture provider(ordering);
     RealtimeRuntime runtime; Trace trace(runtime.events(),0); UdpFramePort network(0);
     ObservedNativePort observed(network);
@@ -105,26 +108,43 @@ void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma) 
     target.memory().add_job(1);
     uint8_t memory[64]{};
     const auto region=target.memory().register_buffer(1,1,memory,sizeof(memory),7);
-    target.post_receive(1,1,region.key,0,8,77);
+    if (!late_receive) target.post_receive(1,1,region.key,0,8,77);
     const auto peer=provider.add_peer(network.local_port());
     network.add_peer(ntohs(provider.address.sin_port),"127.0.0.1",ntohs(provider.address.sin_port));
     const uint64_t increment=1;
-    CHECK(fi_send(provider.endpoint,"hi",2,nullptr,peer,reinterpret_cast<void*>(1))==0);
-    CHECK(fi_write(provider.endpoint,"data",4,nullptr,peer,8,region.key,reinterpret_cast<void*>(2))==0);
-    CHECK(fi_atomic(provider.endpoint,&increment,1,nullptr,peer,24,region.key,FI_UINT64,FI_SUM,reinterpret_cast<void*>(3))==0);
+    iovec send_buffer{const_cast<char*>("hi"),2}; fi_msg send{};
+    send.msg_iov=&send_buffer; send.iov_count=1; send.addr=peer; send.context=reinterpret_cast<void*>(1);
+    CHECK(fi_sendmsg(provider.endpoint,&send,FI_FENCE)==0);
+    iovec write_buffer{const_cast<char*>("data"),4}; fi_rma_iov remote_write{8,4,region.key}; fi_msg_rma write{};
+    write.msg_iov=&write_buffer; write.iov_count=1; write.addr=peer; write.rma_iov=&remote_write;
+    write.rma_iov_count=1; write.context=reinterpret_cast<void*>(2);
+    CHECK(fi_writemsg(provider.endpoint,&write,FI_FENCE|FI_DELIVERY_COMPLETE)==0);
+    fi_ioc atomic_buffer{const_cast<uint64_t*>(&increment),1}; fi_rma_ioc remote_atomic{24,1,region.key}; fi_msg_atomic atomic{};
+    atomic.msg_iov=&atomic_buffer; atomic.iov_count=1; atomic.addr=peer; atomic.rma_iov=&remote_atomic;
+    atomic.rma_iov_count=1; atomic.datatype=FI_UINT64; atomic.op=FI_SUM; atomic.context=reinterpret_cast<void*>(3);
+    CHECK(fi_atomicmsg(provider.endpoint,&atomic,FI_FENCE|FI_COMPLETION)==0);
     size_t sends=0,receives=0;
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
     while ((sends<3 || receives<1) && std::chrono::steady_clock::now()<deadline) {
         sends+=provider.progress(); network.progress(); runtime.progress(10000);
         Completion completion{};
         while (target.poll_completion(completion)) { CHECK(completion.receive && completion.status==CompletionStatus::Success); ++receives; }
+        if (late_receive && observed.request_modes.count(5)) {
+            // The first RUD SEND was rejected with NO_MATCH. The provider
+            // must retain its fence while hiding that intermediate error.
+            CHECK(!observed.request_modes.count(1) && !observed.request_modes.count(3));
+            target.post_receive(1,1,region.key,0,8,77); late_receive=false;
+        }
     }
     CHECK(sends==3 && receives==1);
     CHECK(!std::memcmp(memory,"hi",2) && !std::memcmp(memory+8,"data",4) && memory[24]==1);
     CHECK(observed.request_modes.at(5)==(ordered_send?3u:2u));
     CHECK(observed.request_modes.at(1)==(ordered_rma?3u:2u));
     CHECK(observed.request_modes.at(3)==(ordered_rma?3u:2u));
-    CHECK(observed.first_request_opcodes==std::vector<unsigned>({5,1,3})); // Mixed-mode source FIFO/fence.
+    // A semantic NO_MATCH retry is a new SEND message with a new PSN. It
+    // still precedes every fenced RMA/atomic operation on this source FIFO.
+    const auto expected=receive_was_late?std::vector<unsigned>({5,5,1,3}):std::vector<unsigned>({5,1,3});
+    CHECK(observed.first_request_opcodes==expected);
     target.close(); host.close(); network.close(); provider.close();
     CHECK(runtime.events().pending()==0);
 }
@@ -191,6 +211,7 @@ void check_ordering_validation() {
 int main() {
     try {
         check_delivery_modes(0,false,false);
+        check_delivery_modes(0,false,false,true);
         check_delivery_modes(FI_ORDER_SAS,true,false);
         check_delivery_modes(FI_ORDER_RMA_WAW,false,true);
         check_delivery_modes(FI_ORDER_SAS|FI_ORDER_RMA_WAW,true,true);

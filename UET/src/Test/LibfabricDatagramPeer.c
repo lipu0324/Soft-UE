@@ -19,10 +19,12 @@ int main(int argc,char** argv) {
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
     CHECK(hints); hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_DGRAM;
     hints->caps=FI_MSG|FI_REMOTE_CQ_DATA; hints->addr_format=FI_SOCKADDR_IN;
+    hints->tx_attr->op_flags=FI_FENCE;
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && info->ep_attr->type==FI_EP_DGRAM && info->ep_attr->max_msg_size==1024);
+    CHECK(info->tx_attr->op_flags&FI_FENCE);
     CHECK(!(info->caps&(FI_RMA|FI_ATOMIC)) && info->tx_attr->msg_order==FI_ORDER_NONE);
-    CHECK(info->tx_attr->op_flags==FI_TRANSMIT_COMPLETE);
+    CHECK(info->tx_attr->op_flags==(FI_TRANSMIT_COMPLETE|FI_FENCE));
     struct fid_fabric *fabric; struct fid_domain *domain;
     struct fid_cq *queue; struct fid_av *addresses; struct fid_ep *endpoint;
     SUCCESS(fi_fabric(info->fabric_attr,&fabric,NULL)); SUCCESS(fi_domain(fabric,info,&domain,NULL));
@@ -59,7 +61,10 @@ int main(int argc,char** argv) {
             } else { CHECK((entry->flags&FI_SEND) && entry->op_context==(void*)2 && !sent); sent=1; }
         } else CHECK(count==-FI_EAGAIN);
         if (server && received && !reply_started) {
-            SUCCESS(fi_senddata(endpoint,send_buffer,1024,NULL,server?0:0x1234,peer,(void*)2)); reply_started=1;
+            struct iovec reply_buffer={send_buffer,1024};
+            struct fi_msg reply={0}; reply.msg_iov=&reply_buffer; reply.iov_count=1;
+            reply.addr=peer; reply.context=(void*)2; reply.data=0;
+            SUCCESS(fi_sendmsg(endpoint,&reply,FI_FENCE|FI_REMOTE_CQ_DATA)); reply_started=1;
         }
         if (!sent || !received) poll(NULL,0,1);
     }

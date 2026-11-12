@@ -54,10 +54,14 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 排序 flags 按 §2.2.6 的单独列表解释，交叉排序 flag 可以同时参与两种判断。
 可用的 WRITE/非取回 ATOMIC 提供完整消息范围的 WAW，`max_order_waw_size` 为
 UINT32_MAX。READ 仍未公布，RAW/WAR 大小保持零。源端应用队列串行等待前操作的
-语义完成，为跨模式的混合操作提供保守的 fence；公开 `FI_FENCE` flag 仍未实现。
+语义完成，为跨模式的混合操作提供保守的 fence。`sendmsg`、`writemsg`、
+`atomicmsg` 支持逐调用 `FI_FENCE`，能力查询保留默认 fence flags；DGRAM 的
+fence 等待先前的本地发送完成。该队列也等待其他 peer 的在先操作，属于更强的
+串行策略，会限制并发度。
 
 `libfabric_mode_selection_test` 通过公开 `fi_*` API 向原生协议对端发起操作，
 独立提取实际帧的 PDS type 和 SES opcode，检查四行排序矩阵及交叉排序 flags。
+其中的晚到 receive 场景检查 NO_MATCH 语义重试仍在 fenced WRITE/ATOMIC 之前。
 同一用例用三个公开 MR 注册入口验证不同 JobID 的绝对寻址授权，同时检查 key 撤销
 和缺少远端写权限时内存不变。它补充现有两个公开 libfabric 进程的测试路径。
 原生应用 key 的作用域和本地撤销身份见 [MR key 说明](MEMORY-KEYS.md)；provider 的

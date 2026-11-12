@@ -88,7 +88,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0112-002 | 表 2-21，三个 receive API 与 flag | fi_recv、fi_recvv、fi_recvmsg，至少 vendor 声明的 scatter-gather 大小；FI_COMPLETION 必选；消息边界/FIFO/JobID 条件分别验证。 | 目前支持单 iovec、普通接收与 FI_COMPLETION；authorization 分支未完成。MULTI_RECV 是 SHOULD，不能和强制基础接收混为一个义务。 |
 | UE11-p0112-003 | 表 2-22，fi_send | API 必选；DGRAM 映射 DATAGRAM_SEND，RDM 映射 SEND。 | 已有两种公开进程测试及 wire/CQ 回归。 |
 | UE11-p0112-004 | 表 2-22，fi_sendv 与跨页映射 | fi_sendv 必选，iovec 上限由 vendor 声明；AI Full/HPC 的大消息 opcode 选择在下一页展开。 | 单 iovec 路径存在；deferrable/rendezvous 的源端大小选择仍未实现。 |
-| UE11-p0113-001 | 表 2-22，多个 send/inject 义务 | fi_sendmsg 支持 CQ data、completion、inject、三种完成级别及 fence；fi_inject 成功不生成 CQ，可靠端点交付失败必须生成错误 CQ。 | CQ data/部分完成语义已实现；inject、inject-complete、RDM transmit-complete 与 fence 尚缺。需拆成功抑制、错误报告和每个 flag，不能用 sendmsg 基础通过代替。 |
+| UE11-p0113-001 | 表 2-22，多个 send/inject 义务 | fi_sendmsg 支持 CQ data、completion、inject、三种完成级别及 fence；fi_inject 成功不生成 CQ，可靠端点交付失败必须生成错误 CQ。 | CQ data/部分完成语义及 FI_FENCE 已实现；inject、inject-complete 与 RDM transmit-complete 尚缺。需拆成功抑制、错误报告和每个 flag，不能用 sendmsg 基础通过代替。 |
 
 ## 第 61～80 个候选
 
@@ -107,9 +107,9 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | M5 缺失；其他地址字段参与 directed receive 属于可选，不能混入基础强制匹配。 |
 | UE11-p0116-002 | §2.2.5.4.2.1，Profile/能力条件项 | AI Full/HPC 支持 UNSPEC；HPC 支持指定源地址。 | 未实现；FI_EXACT_DIRECTED_RECV 例外声明及与前句的关系需在选用该能力时单独复核，当前不宣称该能力。 |
 | UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 与未标记 rendezvous 分开验收；两者当前均缺失。 |
-| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；READ、inject、fence 等缺失。不能用 WRITE 成功证明整张表通过。 |
+| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；READ、inject 和其他完成等级仍缺失；FI_FENCE 已有混合模式/重试回归。不能用 WRITE 成功证明整张表通过。 |
 | UE11-p0118-001 | §2.2.5.4.4，原子数量约束 | 非取回原子支持 bulk；取回原子限制为所选类型的一个单位。 | 非取回 bulk 已在 native/provider 实现并测试，公开 valid/query 返回类型相关数量；fetching 未实现，未来必须拒绝多单位。 |
-| UE11-p0118-002 | 表 2-26，非取回 API 与 flags | atomic/atomicv/atomicmsg 必选；支持 COMPLETION、INJECT、FENCE，以及下一页续列的 TAGGED。 | bulk 整数操作已有覆盖；INJECT/FENCE/TAGGED 尚缺。“all profiles” 按本章范围解释。 |
+| UE11-p0118-002 | 表 2-26，非取回 API 与 flags | atomic/atomicv/atomicmsg 必选；支持 COMPLETION、INJECT、FENCE，以及下一页续列的 TAGGED。 | bulk 整数操作已有覆盖；FI_FENCE 已有公开 API 回归；INJECT/TAGGED 尚缺。“all profiles” 按本章范围解释。 |
 | UE11-p0119-001 | 表 2-26，inject 与 fetching | inject_atomic 为基础要求；AI Full/HPC 支持 fetch_atomic/v/msg，flags 继承 atomicmsg。 | inject 与 fetching 均未实现；单单位约束与成功/失败 CQ 语义需联合验收。 |
 | UE11-p0119-002 | 表 2-26，CAS 与能力查询 | AI Full/HPC 支持 compare_atomic/v/msg；所有本章 Profile 支持 atomicvalid/fetch_atomicvalid/compare_atomicvalid/query_atomic，返回实际支持类型和操作。 | 非取回查询已有实现；fetch/CAS 当前明确不支持。需逐一复核查询 API 对不支持组合的返回值，不能把拒绝取回操作算作已实现取回。 |
 | UE11-p0120-001 | §2.2.5.4.5，选定 INC 后的条件项 | 支持 INC 时公布 FI_COLLECTIVE；不支持时不公布属于 SHOULD。 | INC 留给 M8 后独立增强，当前不公布 FI_COLLECTIVE，不算作已实现 INC。 |
@@ -241,7 +241,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 |---|---|---|---|
 | UE11-p0212-002 | §3.4.2.6.4，目标 memory key | RMA 支持把 match_bits 用作 memory key，并遵循 libfabric 定义的结构。 | native/provider 标准头已有 key 映射及授权回归；不把内部容器选择当作线格式要求。 |
 | UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 普通 SEND 模式映射已按独立谓词修正并检查实际报文；M5 tagged/rendezvous/DS 初始与后续消息关联尚未实现。 |
-| UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 现有应用 FIFO 可提供保守串行，但 FI_FENCE API flag 仍缺失；需按实际配置分别验收混合模式。 |
+| UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 已支持 FI_FENCE；公开模式用例同时验证 SENDMSG/WRITEMSG/ATOMICMSG 的 flags，以及 NO_MATCH 重试不被后续 fenced 操作越过。 |
 | UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | READ/WAR 及结果缓存未实现；不能用按请求顺序发送 READ 请求证明结果生命周期正确。 |
 | UE11-p0214-001 | §3.4.2.7.1.3，消息内连续性 | SOM 首 PSN 与 offset0；后包 PSN 连续、offset=(N−1)×Payload MTU；最后包 EOM；同 PDC 两条消息不交错。 | native FIFO producer、PDC PSN 及大消息分片已有回归；M5 多消息/重启格式仍需各自测试。 |
 | UE11-p0214-002 | §3.4.2.7.1.3，线端顺序 | ROD 按 PSN 顺序发往线端；RUD 可任意顺序。 | 初始 FIFO、GoBackN 顺序和回绕已测试；不同 NACK 延迟、NIC 背压与重传组合仍须持续覆盖。 |
