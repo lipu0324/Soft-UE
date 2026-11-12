@@ -508,8 +508,8 @@ void T_PDC::netRxCm(PDStoNET_pkt *pkt)
     if (state==CLOSED) {
         // §3.5.16: NOOP and Negotiation are the only CPs that can establish
         // a PDC. No semantic request or application completion is fabricated.
-        if (!header.flags.syn || (header.ctl_type!=Noop && header.ctl_type!=Negotiation)) return;
-        establishContext(header.spdcid,header.psn-header.psn_off,header.flags.isrod?ROD:RUD);
+        if (!header.flags.syn || (header.ctl_type!=Noop && header.ctl_type!=Negotiation) || header.flags.pdc_type>1) return;
+        establishContext(header.spdcid,header.psn-header.psn_off,header.flags.pdc_type==1?ROD:RUD);
     }
     if (pkt->PDS_header.RUOD_cp_header.ctl_type == 4){
         LOG_INFO(__FUNCTION__, formatLogMessage("TPDC received close command, PSN:" + std::to_string(pkt->PDS_header.RUOD_cp_header.psn)));

@@ -621,7 +621,7 @@ void I_PDC::sendClose(){
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.syn = 0;
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.ar = 1;        // Request ACK
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.retx = 0;      // Not retransmission
-    ctrl_pkt.PDS_header.RUOD_cp_header.flags.isrod = 0;     // rsvd
+    ctrl_pkt.PDS_header.RUOD_cp_header.flags.pdc_type = 0;     // Ignored outside NOOP/Negotiation.
     ctrl_pkt.PDS_header.RUOD_cp_header.payload = 0;  // The CP pds.payload field is set to 0x0
 
     // Record close packet information

@@ -55,14 +55,15 @@
       "tests": [
         "uet_wire_test",
         "reference_wire_comparison",
-        "ses_reserved_fields_test"
+        "ses_reserved_fields_test",
+        "pds_reserved_fields_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "IPv4/IPv6/native/UDP and configurable native protocol tested; extension headers remain unsupported. Implemented SES formats ignore reserved receive bits after integrity validation; unimplemented formats remain outside this coverage."
+      "evidence_note": "IPv4/IPv6/native/UDP and configurable native protocol tested; extension headers remain unsupported. Implemented SES formats ignore reserved receive bits after integrity validation; unimplemented formats remain outside this coverage. Implemented PDS reserved bits are ignored after integrity validation; the full CP type is preserved and unsupported types rejected before allocation (PDS-RESERVED-FIELDS.md)."
     },
     {
       "id": "WIRE-CRC",
@@ -103,7 +104,8 @@
       "tests": [
         "pdc_ack_test",
         "peer_sequence_window_test",
-        "pds_mpr_test"
+        "pds_mpr_test",
+        "pds_reserved_fields_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -123,7 +125,8 @@
         "pdc_lifecycle_test",
         "pds_feedback_test",
         "pds_probe_test",
-        "negative_acknowledgment_test"
+        "negative_acknowledgment_test",
+        "pds_reserved_fields_test"
       ],
       "profiles": [
         "AI_BASE",

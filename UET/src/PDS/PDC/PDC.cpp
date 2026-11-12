@@ -812,7 +812,7 @@ void PDC::txCtrl(){
         p.PDS_header.RUOD_cp_header.type = CP;
         p.PDS_header.RUOD_cp_header.flags.syn = 0;
         p.PDS_header.RUOD_cp_header.flags.retx = 0;         
-        p.PDS_header.RUOD_cp_header.flags.isrod = 0;        // rsvd
+        p.PDS_header.RUOD_cp_header.flags.pdc_type = 0;        // Ignored outside NOOP/Negotiation.
         switch (requested_control)
         {
         case PROBE:
@@ -971,7 +971,7 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     if (!packet) return false;
     const auto& header=packet->PDS_header.RUOD_cp_header;
     const bool carries_mode=header.ctl_type==Noop || header.ctl_type==Negotiation;
-    if (carries_mode && bool(header.flags.isrod)!=(mode==ROD)) {
+    if (carries_mode && header.flags.pdc_type!=(mode==ROD?1:0)) {
         sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr,packet); return false;
     }
     if (header.flags.syn && header.psn-header.psn_off!=start_psn) {
@@ -1102,7 +1102,7 @@ void PDC::sendCtrlNoop(PDStoNET_pkt *p){
     p->PDS_header.RUOD_cp_header.psn = setPsn();         
     p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;           
-    p->PDS_header.RUOD_cp_header.flags.isrod = mode==ROD;
+    p->PDS_header.RUOD_cp_header.flags.pdc_type = mode==ROD;
     p->PDS_header.RUOD_cp_header.flags.syn = SYN;        
     p->PDS_header.RUOD_cp_header.payload = 0;            
     if(!SYN)p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
@@ -1168,7 +1168,7 @@ void PDC::sendCtrlCloseReq(PDStoNET_pkt *p)
     p->PDS_header.RUOD_cp_header.ctl_type = Close_req;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;
     p->PDS_header.RUOD_cp_header.psn = setPsn();
-    p->PDS_header.RUOD_cp_header.flags.isrod = 0; // Reserved in a CP.
+    p->PDS_header.RUOD_cp_header.flags.pdc_type = 0; // Ignored in Close; meaningful only for NOOP/Negotiation.
     p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
     p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
     p->PDS_header.RUOD_cp_header.pdc_info = 0;
@@ -1190,7 +1190,7 @@ void PDC::sendCtrlCredit(PDStoNET_pkt *p)
         return;
     }
     
-    p->PDS_header.RUOD_cp_header.flags.isrod = 0;   // rsvd
+    p->PDS_header.RUOD_cp_header.flags.pdc_type = 0;   // Ignored outside NOOP/Negotiation.
     p->PDS_header.RUOD_cp_header.ctl_type = gen_cm; 
     p->PDS_header.RUOD_cp_header.flags.ar = 0;
     p->PDS_header.RUOD_cp_header.flags.syn = 0;
@@ -1217,7 +1217,7 @@ void PDC::sendCtrlNegotiation(PDStoNET_pkt* packet)
 {
     auto& header=packet->PDS_header.RUOD_cp_header;
     header.ctl_type=Negotiation; header.flags.ar=1; header.flags.syn=SYN;
-    header.flags.isrod=mode==ROD; header.psn=setPsn(); header.spdcid=SPDCID;
+    header.flags.pdc_type=mode==ROD; header.psn=setPsn(); header.spdcid=SPDCID;
     if (SYN) { header.pdc_info=0; header.psn_off=header.psn-start_psn; }
     else header.dpdcid=DPDCID;
     // NO_NEG: no optional feature is requested or enabled. The standard keeps

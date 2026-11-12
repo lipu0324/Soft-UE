@@ -114,10 +114,10 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
     if (next==UET_HDR_CP_ACK) {
         auto& acknowledgement=packet.control_ack;
         acknowledgement.cp_ack_type=reader.take(1); acknowledgement.cp_ack_length=reader.take(1);
-        acknowledgement.start_psn_method=reader.take(1); acknowledgement.reserved=reader.take(1);
+        acknowledgement.start_psn_method=reader.take(1); reader.take(1); // Reserved CP_ACK octet is ignored.
         acknowledgement.expected_psn=reader.take(4);
         if (acknowledgement.cp_ack_type!=Close_cmd || acknowledgement.cp_ack_length!=2 ||
-            acknowledgement.reserved || acknowledgement.start_psn_method>1 || !reader.rest().empty())
+            acknowledgement.start_psn_method>1 || !reader.rest().empty())
             throw std::invalid_argument("invalid control acknowledgement");
         return;
     }
@@ -182,7 +182,7 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         next=header.next_hdr;
         put(encoded_bytes,(uint16_t{header.type}<<11)|(next_wire(next)<<7)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
         put(encoded_bytes,header.clear_psn_off,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
-        put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2);
+        put(encoded_bytes,header.flags.syn ? ((header.pdc_info&1)<<12)|header.psn_off : header.dpdcid,2);
     } else if (packet.PDS_type == RUOD_ack_header) {
         const auto& header=packet.PDS_header.RUOD_ack_header;
         if (header.type!=ACK && header.type!=ACK_CC) throw std::invalid_argument("ACK extension not implemented");
@@ -208,9 +208,11 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
     } else if (packet.PDS_type == RUOD_cp_header) {
         const auto& header=packet.PDS_header.RUOD_cp_header;
         if (header.type!=CP) throw std::invalid_argument("invalid CP type");
-        put(encoded_bytes,(11<<11)|(header.ctl_type<<7)|(header.flags.isrod<<5)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
+        const bool carries_mode=header.ctl_type==Noop || header.ctl_type==Negotiation;
+        const auto pdc_type=carries_mode?header.flags.pdc_type:0;
+        put(encoded_bytes,(11<<11)|(header.ctl_type<<7)|(pdc_type<<5)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
         put(encoded_bytes,header.probe_opaque,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
-        put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2); put(encoded_bytes,header.payload,4);
+        put(encoded_bytes,header.flags.syn ? ((header.pdc_info&1)<<12)|header.psn_off : header.dpdcid,2); put(encoded_bytes,header.payload,4);
         if (header.ctl_type==Negotiation) {
             if (packet.control_extension.size()+4!=negotiation_payload_size(header.payload))
                 throw std::invalid_argument("negotiation payload length mismatch");
@@ -233,16 +235,15 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
     if (type==2 || type==3) {
         // RUD/ROD share a 12-byte header. During SYN the final two bytes
         // carry PDC info and start-PSN offset instead of destination PDCID.
-        if (flags&0x63) throw std::invalid_argument("reserved PDS request flags");
+        // §3.5.10: extract meaningful fields and ignore reserved receive bits.
         packet.PDS_type=RUOD_req_header; auto& header=packet.PDS_header.RUOD_req_header;
         header.type=static_cast<PDS_type>(type); header.next_hdr=next;
         header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1; header.flags.syn=(flags>>2)&1;
         header.clear_psn_off=static_cast<int16_t>(reader.take(2)); header.psn=reader.take(4); header.spdcid=reader.take(2);
         const auto destination=reader.take(2);
-        if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; }
+        if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
         else header.dpdcid=destination;
     } else if (type==7 || type==8) {
-        if (flags&0x41) throw std::invalid_argument("unsupported ACK flags");
         packet.PDS_type=RUOD_ack_header; auto& header=packet.PDS_header.RUOD_ack_header;
         header.type=type==7?ACK:ACK_CC; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1;
         header.flags.p=(flags>>3)&1; header.flags.req=(flags>>1)&3;
@@ -261,19 +262,20 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
             }
         }
     } else if (type==10) {
-        if ((flags&0x47)||next!=UET_HDR_NONE) throw std::invalid_argument("invalid NACK flags");
+        if (next!=UET_HDR_NONE) throw std::invalid_argument("invalid NACK next header");
         packet.PDS_type=nack_header; auto& header=packet.PDS_header.nack_header;
         header.type=NACK; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1; header.flags.nt=(flags>>3)&1;
         header.nack_code=static_cast<PDS_Nack_Codes>(reader.take(1)); header.vendor_code=reader.take(1);
         header.nack_psn=reader.take(4); header.spdcid=reader.take(2); header.dpdcid=reader.take(2); header.payload=reader.take(4);
     } else if (type==11) {
-        if (flags&0x43) throw std::invalid_argument("invalid CP flags");
         packet.PDS_type=RUOD_cp_header; auto& header=packet.PDS_header.RUOD_cp_header;
         header.type=CP; header.ctl_type=(prologue>>7)&0xf;
-        header.flags.isrod=(flags>>5)&1; header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1; header.flags.syn=(flags>>2)&1;
+        const bool carries_mode=header.ctl_type==Noop || header.ctl_type==Negotiation;
+        header.flags.pdc_type=carries_mode?(flags>>5)&3:0;
+        header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1; header.flags.syn=(flags>>2)&1;
         header.probe_opaque=reader.take(2); header.psn=reader.take(4); header.spdcid=reader.take(2);
         const auto destination=reader.take(2);
-        if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; } else header.dpdcid=destination;
+        if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; } else header.dpdcid=destination;
         header.payload=reader.take(4); next=UET_HDR_NONE;
         if (header.ctl_type==Negotiation) {
             packet.control_extension=reader.rest();
@@ -399,7 +401,7 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
             header.flags.syn=(flags>>2)&1; header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1;
             header.clear_psn_off=static_cast<int16_t>(get(pds+2,2)); header.psn=get(pds+4,4); header.spdcid=get(pds+8,2);
             const auto destination=get(pds+10,2);
-            if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; }
+            if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
             else header.dpdcid=destination;
         } else if (type==7 || type==8 || type==9) packet.PDS_type=RUOD_ack_header;
         else if (type==11) packet.PDS_type=RUOD_cp_header;
@@ -414,7 +416,7 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
     if (network_options.udp) {
         if (get(bytes+start+2,2)!=49150 || get(bytes+start+4,2)!=end-start)
             throw std::invalid_argument("unsupported or invalid UET UDP header");
-    } else if (get(bytes+start+2,2)!=0) throw std::invalid_argument("reserved entropy bits");
+    } // Native entropy's final 16 bits are reserved and ignored (§3.5.10.1).
     if (crc_enabled) {
         const auto crc_start=ip_begin+(network_options.ipv6?8:12);
         uint32_t crc;

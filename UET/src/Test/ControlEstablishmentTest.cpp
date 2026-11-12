@@ -14,7 +14,7 @@ public:
         if (packet.PDS_type==RUOD_cp_header) {
             const auto& header=packet.PDS_header.RUOD_cp_header;
             if (header.ctl_type==Noop || header.ctl_type==Negotiation) {
-                CHECK(header.flags.ar && header.flags.isrod==(mode==ROD));
+                CHECK(header.flags.ar && header.flags.pdc_type==(mode==ROD));
                 if (!controls++) { CHECK(header.flags.syn && !header.psn_off && !header.flags.retx); first=frame; }
                 else CHECK(header.flags.retx && header.psn==1000);
                 if (drop_first && controls==1) return SendResult::Accepted;

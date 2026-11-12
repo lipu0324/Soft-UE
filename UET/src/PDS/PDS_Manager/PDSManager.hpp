@@ -345,7 +345,7 @@ public:
             PDCtoSES_req.push(datagram);
             return;
         }
-        if (!checkRxPkt(&received_packet)) return;
+        if (!checkRxPkt(&received_packet)) { ++event_cnt; return; }
 
         const bool is_request = received_packet.PDS_type == RUOD_req_header;
         const bool is_control = received_packet.PDS_type == RUOD_cp_header;
@@ -437,9 +437,16 @@ public:
         case RUOD_req_header:
             return packet->PDS_header.RUOD_req_header.type == ROD_REQ ||
                    packet->PDS_header.RUOD_req_header.type == RUD_REQ;
-        case RUOD_cp_header: return packet->PDS_header.RUOD_cp_header.type == CP;
-        case RUOD_ack_header: return packet->PDS_header.RUOD_ack_header.type == ACK ||
-            packet->PDS_header.RUOD_ack_header.type == ACK_CC;
+        case RUOD_cp_header: {
+            const auto& control=packet->PDS_header.RUOD_cp_header;
+            const bool carries_mode=control.ctl_type==Noop || control.ctl_type==Negotiation;
+            // RODL is not enabled yet. Check the full two-bit field before
+            // allocating a context; never reinterpret 10/11 as RUD or ROD.
+            return control.type==CP && (!carries_mode || control.flags.pdc_type<=1);
+        }
+        case RUOD_ack_header:
+            return (packet->PDS_header.RUOD_ack_header.type==ACK || packet->PDS_header.RUOD_ack_header.type==ACK_CC) &&
+                packet->PDS_header.RUOD_ack_header.flags.req!=3;
         case nack_header:
             return packet->PDS_header.nack_header.type == NACK &&
                    !packet->PDS_header.nack_header.flags.nt &&

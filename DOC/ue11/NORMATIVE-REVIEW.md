@@ -288,6 +288,62 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0242-001 | §3.4.4.1.3，exact matching | exact-only 实现可任意次序尝试，但有匹配 buffer 时必须选择；多个匹配时允许任选，否则 unexpected。 | tagged 未实现；不能把 wildcard 的强制 FIFO 规则误套成 exact-only 所有实现的 MUST。 |
 | UE11-p0242-002 | §3.4.4.1.3，ROD wildcard 顺序 | 按 posted buffer 次序尝试；同 Job/initiator 在目标 tuple 上按源发送顺序处理头。 | M5 缺失；允许保持可观察顺序的内部优化，不强制某一种容器/搜索算法。 |
 
-复核进度为上述 200 个候选的分类与义务拆分；其余 529 个候选、表格/算法的额外
+## 第 201～220 个候选
+
+本批检查目标授权与响应生成。默认响应、显式响应、保证传递是不同概念；首错的
+保证传递例外须与一般显式响应规则一起解释，不能只根据 opcode 决定缓存策略。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0243-001 | §3.4.4.1.4，直接寻址 | Job 选择地址上下文，线端地址从对应基址开始；允许仅一个 Job。 | M8 缺失；不能把收到的地址直接转换成本机指针。 |
+| UE11-p0243-002 | §3.4.4.2，buffer 授权 | 每个 buffer 同时支持 exact Job 和 any Job 两种配置。 | native MR 与 provider 默认 any Job 已有回归；不同权限与撤销仍受检查，完整管理配置尚未完成。 |
+| UE11-p0243-003 | §3.4.4.3，消息响应 | 每条消息至少一个语义响应；最后收到包的响应等待此前所有包完成语义处理。 | 当前同步 WRITE/原子与延迟接收有覆盖；异步操作/扩展消息组合仍需验收。 |
+| UE11-p0244-001 | §3.4.4.3，DEFAULT 与保证传递 | DEFAULT 前完成处理；无法用 DEFAULT 表达的结果保证传递，并结合后述首错例外。 | PDS 区分 delivery/semantic/Clear；发现重复错误均设置 gtd，已用独立 8 包场景复现，修正待完成。 |
+| UE11-p0244-002 | Informative Text | 重复说明每条消息需要响应，无新增独立规范义务。 | 归入解释材料，不重复计作 MUST。 |
+| UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | first-error sticky 已实现；重复 gtd 缺陷已确认。需区分显式错误、保证缓存与 NO_RESPONSE 占位。 |
+| UE11-p0245-001 | §3.4.4.3，提前 ACK | 未处理包提前 ACK 使用 NO_RESPONSE；DS 首包必须带实际语义响应。 | native RUD 缺口/DS-as-SEND 有回归；真正 DS/RTR M5 缺失。 |
+| UE11-p0245-002 | §3.4.4.3，DC | DC 等到整个消息 GO；“最后收到”不等同于带 EOM 的包。 | provider 各完成等级保守选择 GO，原生乱序缺口有回归；完整操作集尚未完成。 |
+| UE11-p0245-003 | §3.4.4.3，响应 ID | 回显 request message ID 或 read_request_message_id；请求无 ID 时响应 ID 为0。 | 标准请求路径回显已有覆盖；READ/紧凑格式缺失。 |
+| UE11-p0245-004 | §3.4.4.3，响应 Job | 请求有 Job 时响应回显，某些 PDS 控制查询例外。 | 当前 SES response 构造回显，管理/TSS 扩展仍待验收。 |
+| UE11-p0245-005 | §3.4.4.3，数据偏移 | SOM 响应 offset0，其余回显请求 offset。 | 带数据 codec 不能代替 READ/fetch 实际语义路径，M5 缺失。 |
+| UE11-p0245-006 | §3.4.4.3，显式响应 | 非 DEFAULT 无数据用 RESPONSE，有数据用 RESPONSE_W_DATA，并遵守保证传递规则及先述重复错误例外。 | 当前无数据显式响应有覆盖；数据响应生命周期与完整保证矩阵未完成。 |
+| UE11-p0245-007 | §3.4.4.3，首错优先 | 成功 RC_OK；首错按 SES 实际遇到顺序，非 PSN 顺序。 | native sticky error 与乱序错误测试已有覆盖；重复错误 gtd 另行修正。 |
+| UE11-p0246-001 | §3.4.4.3，modified_length | 普通响应为整个接受长度；DS defer 为0，RTR 指定重发量。 | 普通接受/错误长度已实现；完整 DS/RTR 缺失。 |
+| UE11-p0246-002 | §3.4.4.3，响应 payload | payload_length 表示本包实际返回字节数。 | READ/fetch 缺失；codec round-trip 不构成完整操作验收。 |
+| UE11-p0246-003 | §3.4.4.4，local packed 响应 | ACK 中逐项对应请求，READ/fetch 返回数据；错误数据响应触发整组 ACK。 | M8 缺失，不能独立发送部分结果。 |
+| UE11-p0246-004 | §3.4.4.4，响应排序/完成 | 原文要求 ROD/RODL 响应有序，本地处理完成后才响应，DC 等待 completion。 | 条文位于 Unified Local 小节，跨 Profile 适用范围需继续核对；当前异步 ROD response 排序尚未声明通过。 |
+| UE11-p0247-001 | §3.4.4.5，rendezvous eager | 不超过 eager 长度，末包 EOM；已发送量达到缩短长度时仍发送至少一个 EOM 包；窗口限制为 SHOULD。 | M5 缺失；缩短到0/已发送部分/末包在途需各自测试。 |
+| UE11-p0247-002 | §3.4.4.5，unexpected rendezvous | RUD header 耗尽 backoff/retry；ROD 必须 buffer header 并提供资源耗尽处理。 | M5 缺失；普通 SEND unexpected 存储不能证明 rendezvous 流程正确。 |
+| UE11-p0247-003 | §3.4.4.5，后续 READ | 原样使用 rendezvous PID/index/match，read_offset 可取整个消息；缓冲 eager 后相应推进偏移。 | M5 缺失；后续 READ 与原请求关联和授权必须完整测试。 |
+
+## 第 221～240 个候选
+
+本批区分 DS defer、NO_MATCH 重试和 ROD index exhaustion；三者的 token、generation
+及重试条件不能互换。buffered unexpected 跨页段落已连读，不把段落截断当作义务结束。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0247-004 | §3.4.4.6，DS 初始传输 | OK/length0 后仍发至少一个 EOM 包；OK/full length 发送全部 payload；初始窗口上限为 SHOULD。 | 完整 DS 发起端未实现，目标 DS-as-SEND 子集不能代替。 |
+| UE11-p0248-001 | §3.4.4.6，DS header 耗尽 | DS 必须实现 header 耗尽时 backoff/retry，buffered header 为 SHOULD。 | M5 缺失，需与已捕获 header 等待 RTR 的情况区分。 |
+| UE11-p0248-002 | §3.4.4.6，restart token | 初始 target token0；非零 target token 保证重启可匹配；defer 后等待 RTR，只重发请求部分；backoff 不产生 RTR。 | M5 缺失；32+32 位 token 生命周期、陈旧/重复 RTR 和再次 defer 均待测。 |
+| UE11-p0249-001 | §3.4.4.6.1，DS-as-SEND | 忽略 restart token 时，返回 NO_MATCH/0 或 OK/request length。 | `send_header_data_test` 覆盖目标兼容路径，真正 defer 与 RTR 不在此能力内。 |
+| UE11-p0249-002 | §3.4.4.7.1，RUD unexpected | 至少选择 backoff、buffered header、buffered message 中一种，可组合降级。 | native RUD 返回 NO_MATCH；provider 拥有操作副本并重试。原生低层调用者仍需履行重试合同。 |
+| UE11-p0250-001 | §3.4.4.7.1.1，NO_MATCH | NO_MATCH modified_length0；initiator 重发整条消息，软件 provider 可承担。 | provider 重试/源缓冲所有权已有回归；native API 当前直接报错误，完整发起端层次合同需继续补全。 |
+| UE11-p0250-002 | §3.4.4.7.1.1，RUD backoff | 所有 send/tagged send 支持 backoff/retry。 | 普通 provider SEND 部分实现；tagged/DS/rendezvous M5 缺失。 |
+| UE11-p0250-003 | §3.4.4.7.2.1，buffered header | 响应 OK/0；保存头并与新 recv/trecv 比较。 | 真正 DS/rendezvous header buffering 缺失；普通 SEND 不可使用本方案。 |
+| UE11-p0250-004 | §3.4.4.7.2.1，匹配后续动作 | rendezvous 保存 READ 所需信息并发 READ；DS 保存 initiator token 并发 RTR。 | M5 缺失；后续操作必须使用已授权资源和原 token。 |
+| UE11-p0250-005 | §3.4.4.7.2.1，适用操作 | buffered header 仅用于 rendezvous 或 DS。 | 记录负向约束，禁止普通 SEND 只留头却宣称已接受全部数据。 |
+| UE11-p0250-006 | §3.4.4.7.2.2，buffered message | eager 必须保存整个 payload，响应 OK/full request length。 | native ROD 有界 SparseMemory 保存全部 payload；DC 模式等待 posting 放置，完整完成条件还需与该策略联合验收。 |
+| UE11-p0251-001 | §3.4.4.7.2.2，晚到 posting | 比较新 posting 并交付缓存 payload；允许降级重试但受 ROD 后述禁令限制。 | `unexpected_message_test` 覆盖完整/部分到达、撤销和截断；不将 RUD 降级许可扩大到 ROD wildcard。 |
+| UE11-p0251-002 | §3.4.4.7.2.2，扩展长度 | rendezvous 返回长度≤eager；DS 返回0或全长，0表示 defer。 | M5 缺失；普通 SEND buffer 测试不能证明这些长度规则。 |
+| UE11-p0251-003 | §3.4.4.7.3，ROD 禁止 NO_MATCH | ROD untagged/wildcard unexpected 不能使用 backoff/retry，否则会破坏匹配顺序。 | native ROD 使用有界 buffer，耗尽返回 DISABLED_GEN；provider 独立 ROD/RUD 恢复用例检查实际码。 |
+| UE11-p0251-004 | §3.4.4.7.3，ROD wildcard 缓存 | 必须提供 buffered message 或 buffered header。 | 普通 untagged buffer 已有实现；M5 wildcard tagged 未实现。 |
+| UE11-p0251-005 | §3.4.4.7.3，buffer exhaustion | libfabric/UET 映射必须包含 exhaustion 解决方案。 | 当前 provider 采用 client/server generation 路径；scalable RC_DISABLED 方案未宣称支持。 |
+| UE11-p0252-001 | §3.4.4.7.3.1，选定 scalable 时 | tuple disabled 后全部返回 RC_DISABLED；重启前确保线上无旧操作；按原序重发。 | 此可选方案尚未启用，不可只切换返回码而复用 generation 恢复。 |
+| UE11-p0252-002 | §3.4.4.7.3.2，generation 配置 | 不用 generation 时为0；收到不匹配 generation 返回 BAD_GENERATION。 | ResourceDirectory 与 provider 已测试部分路径；完整可编程管理与所有 tagged 类型仍缺失。 |
+| UE11-p0253-001 | §3.4.4.7.3.2，耗尽/重启 | BAD_GENERATION 回当前代次；ROD 语义耗尽禁用 index 并返回 DISABLED_GEN；有资源且代次递增后启用。 | native resource lifecycle 和 provider process recovery 有覆盖，代次回绕/异步资源组合仍需验收。 |
+| UE11-p0253-002 | §3.4.4.7.3.2，发起端恢复 | 必须重发；提前增加 generation 时只发最老消息，成功后再继续；指数退避为 SHOULD。 | provider FIFO 重试并等待旧 PDS 操作排空；native 低层错误回报合同与完整多源顺序仍需补全。 |
+
+复核进度为上述 240 个候选的分类与义务拆分；其余 489 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

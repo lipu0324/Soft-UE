@@ -22,7 +22,7 @@ public:
         }
         if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==Close_req) {
             const auto& control=packet.PDS_header.RUOD_cp_header;
-            CHECK(control.flags.ar && !control.flags.syn && !control.flags.isrod && !control.payload);
+            CHECK(control.flags.ar && !control.flags.syn && !control.flags.pdc_type && !control.payload);
             if (requests.empty()) CHECK(!control.flags.retx);
             else CHECK(control.flags.retx && control.psn==requests.front());
             requests.push_back(control.psn);

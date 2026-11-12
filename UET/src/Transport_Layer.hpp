@@ -285,10 +285,9 @@ struct PDS_RUOD_cp_header
 {
     PDS_type type : 5;              // 5 bits, packet type = CP
     uint8_t ctl_type : 4;           // 4 bits, identifies CP type
-    struct                          // pds.flags[6:0] = [rsvd, rsvd/isrod, retx, ar, syn, rsvd]
+    struct                          // §3.5.11.8.1: pdc_type is meaningful in NOOP/Negotiation.
     {
-        uint8_t rsvd  : 1;          // Reserved bit
-        uint8_t isrod : 1;          // PDC type: 1=ROD PDC, 0=RUD PDC, only valid in NOOP and Negotiation
+        uint8_t pdc_type : 2;       // 00=RUD, 01=ROD, 10=RODL, 11=reserved; ignored in other CPs.
         uint8_t retx  : 1;          // Retransmission flag: 1 indicates this CP is a retransmission
         uint8_t ar    : 1;          // ACK request flag
         uint8_t syn   : 1;          // PDC establishment request flag
