@@ -61,9 +61,10 @@ public:
     Endpoint(uint32_t node, Runtime::PdsHost& host, Runtime::EventLoop& loop,
              Runtime::Trace& trace, size_t payload_mtu=1024,
              Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr,size_t submission_window=8,
-             size_t receive_message_limit=4096)
+             size_t receive_message_limit=4096,size_t unexpected_buffer_bytes=256*1024)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
-          memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit) {
+          memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit),
+          unexpected_limit_(unexpected_buffer_bytes) {
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_) throw std::invalid_argument("invalid SES configuration");
         host_.set_request_handler([this](const PDC_SES_req& request) { receive(request); });
         host_.set_response_handler([this](const PDC_SES_rsp& response) { respond(response); });
@@ -159,12 +160,23 @@ public:
         memory_.authorize(job,pid,key,offset,capacity,Access::Write,resource_index);
         if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
         posted_.push_back({job,pid,key,offset,capacity,context,resource_index});
+        match_unexpected();
+        if (const auto disabled=disabled_generations_.find({pid,resource_index});disabled!=disabled_generations_.end()) {
+            resources_.recover_after_exhaustion(pid,resource_index,ResourceSpace::Send,disabled->second);
+            disabled_generations_.erase(disabled);
+        }
     }
     bool poll_completion(Completion& completion) {
         if (completions_.empty()) return false;
         completion=completions_.front(); completions_.pop_front(); return true;
     }
     size_t pending() const { return pending_.size(); }
+    bool transport_pending(uint64_t operation) const {
+        for (const auto& pending:pending_) if (pending.second.id==operation) return true;
+        for (const auto& lease:message_leases_) if (lease.second.operation==operation) return true;
+        return false;
+    }
+    uint64_t unexpected_bytes() const { return unexpected_bytes_; }
     size_t queued_fragments() const { return queued_fragments_; }
     size_t receive_intervals() const {
         size_t count=0;
@@ -181,7 +193,8 @@ public:
         host_.set_context_event_handler({});
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
-        incoming_.clear(); exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
+        incoming_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
+        exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
     }
 private:
     struct SourceMessage {
@@ -201,7 +214,7 @@ private:
         bool end_of_message_transmitted=false;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
-    struct MessageLease { ConnectionKey connection; uint32_t last_psn; bool end_of_message_transmitted; };
+    struct MessageLease { ConnectionKey connection; uint32_t last_psn; bool end_of_message_transmitted; uint64_t operation; };
     struct Posted { uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity; uint64_t context; uint16_t resource_index; };
     struct Incoming {
         uint8_t opcode;
@@ -222,6 +235,9 @@ private:
         std::optional<SemanticReturnCode> first_error;
         uint8_t error_generation=0;
         CompletionStatus target_error=CompletionStatus::RemoteError;
+        std::shared_ptr<SparseMemory> unexpected;
+        uint64_t receive_order=0;
+        std::optional<PDC_SES_req> deferred_response;
     };
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
     uint32_t node_;
@@ -250,6 +266,9 @@ private:
     std::deque<Completion> completions_;
     size_t submission_window_,queued_fragments_=0;
     size_t receive_message_limit_;
+    uint64_t unexpected_limit_,unexpected_bytes_=0,next_receive_order_=0;
+    std::map<uint64_t,MessageKey> unexpected_order_;
+    std::map<std::pair<uint16_t,uint16_t>,uint8_t> disabled_generations_;
     std::map<uint16_t,SourceMessage> sources_;
     std::deque<uint16_t> submission_order_;
 
@@ -351,7 +370,7 @@ private:
             const auto peer_ack=peer_cumulative_acks_.find(connection);
             if (it->second.local_pdc==UINT16_MAX || !it->second.end_of_message_transmitted || peer_ack==peer_cumulative_acks_.end() ||
                 peer_ack->second-it->second.last_transmitted_psn>=0x80000000u)
-                message_leases_[message]={connection,it->second.last_transmitted_psn,it->second.end_of_message_transmitted};
+                message_leases_[message]={connection,it->second.last_transmitted_psn,it->second.end_of_message_transmitted,it->second.id};
         }
         pending_.erase(it);
     }
@@ -377,7 +396,7 @@ private:
                 operation->second.last_transmitted_psn=event.sequence;
                 operation->second.end_of_message_transmitted|=event.end_of_message;
             } else if (auto lease=message_leases_.find(event.message_id);lease!=message_leases_.end()) {
-                lease->second={connection,event.sequence,lease->second.end_of_message_transmitted || event.end_of_message};
+                lease->second={connection,event.sequence,lease->second.end_of_message_transmitted || event.end_of_message,lease->second.operation};
             }
             fragment_transmitted(event.message_id);
         } else if (event.kind==Runtime::PdcEventKind::PeerCumulativeAcknowledged) {
@@ -397,7 +416,20 @@ private:
                     std::get<5>(key)==event.connection_start_psn;
                 const bool retired=event.kind==Runtime::PdcEventKind::ConnectionClosed ||
                     (message->second.completed && event.sequence-message->second.completion_psn<0x80000000u);
-                if (same_context && retired) message=incoming_.erase(message); else ++message;
+                if (same_context && retired) {
+                    if (event.kind==Runtime::PdcEventKind::ConnectionClosed && !message->second.completed) {
+                        // §3.4.6.2: a PDC failure also terminates a matched
+                        // target transaction. Report placed bytes once; a
+                        // receiver must not wait forever for a missing EOM.
+                        auto& unfinished=message->second;
+                        if (!unfinished.first_error) unfinished.first_error=SemanticReturnCode::Undeliverable;
+                        unfinished.target_error=event.failure==Runtime::PdcFailureReason::RetryExhausted?
+                            CompletionStatus::Timeout:CompletionStatus::RemoteError;
+                        report_receive_error(unfinished);
+                    }
+                    release_unexpected(message->second);
+                    message=incoming_.erase(message);
+                } else ++message;
             }
             if (event.kind==Runtime::PdcEventKind::ConnectionClosed) {
                 std::vector<uint16_t> failed_messages;
@@ -470,6 +502,62 @@ private:
         }
         return SemanticReturnCode::Uncorrectable;
     }
+    void release_unexpected(Incoming& message) {
+        if (!message.unexpected) return;
+        unexpected_bytes_-=message.total;
+        unexpected_order_.erase(message.receive_order);
+        message.unexpected.reset();
+    }
+    void match_unexpected() {
+        // §3.4.4.7.2.2: ROD unexpected messages preserve acceptance order.
+        // Buffering is internal SES storage; placement into an application MR
+        // still requires a posting and the ordinary JobID/key/bounds checks.
+        for (auto order=unexpected_order_.begin();order!=unexpected_order_.end();) {
+            const auto key=order->second;
+            auto found=incoming_.find(key);
+            if (found==incoming_.end() || !found->second.unexpected) { order=unexpected_order_.erase(order); continue; }
+            auto& message=found->second;
+            auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+                return (!message.relative_addressing || receive.job==std::get<2>(key)) && receive.pid==message.pid &&
+                    receive.resource_index==message.resource_index;
+            });
+            if (posted==posted_.end()) { ++order; continue; }
+            const auto receive=*posted; posted_.erase(posted);
+            message.key=receive.key; message.base=receive.offset; message.context=receive.context;
+            message.matched_receive=true;
+            auto buffered=message.unexpected;
+            ++order; release_unexpected(message); // Erases the old order entry, not the next iterator.
+            const auto fail=[&](SemanticReturnCode code,CompletionStatus status=CompletionStatus::RemoteError) {
+                message.first_error=code; message.target_error=status; message.received=0; message.segments.clear();
+                message.completed=message.end_seen;
+                report_receive_error(message);
+                if (message.deferred_response) {
+                    reply(*message.deferred_response,code,0,true,message.error_generation);
+                    message.deferred_response.reset();
+                }
+            };
+            if (receive.capacity<message.total) { fail(SemanticReturnCode::UnsupportedSize,CompletionStatus::Truncated); continue; }
+            try {
+                memory_.authorize(std::get<2>(key),message.pid,message.key,message.base,message.total,
+                    Access::Write,message.resource_index);
+                for (const auto& interval:message.segments) {
+                    std::vector<uint8_t> bytes(interval.second);
+                    buffered->read(interval.first,bytes.data(),bytes.size());
+                    memory_.write(std::get<2>(key),message.pid,message.key,message.base+interval.first,bytes,message.resource_index);
+                }
+                if (message.received==message.total) {
+                    message.completed=true; message.completion_reported=true;
+                    completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
+                    if (message.deferred_response) {
+                        message.completion_psn=message.deferred_response->orig_psn;
+                        reply(*message.deferred_response,SemanticReturnCode::Ok,message.total);
+                        message.deferred_response.reset();
+                    }
+                }
+            } catch (const MemoryAccessError& error) { fail(memory_code(error.code)); }
+        }
+    }
+
     // First-error state belongs to a whole message, not to its first packet.
     // §3.4.6.1: arrival order chooses the first error, including in RUD.
     // Retain it through EOM + PDS Clear so a later posting cannot rescue a
@@ -490,8 +578,16 @@ private:
             message.first_error=code;
             message.error_generation=generation.value_or(request.pkt.bth_header.Standard_Header.ri_generation);
         }
+        if (message.unexpected) {
+            release_unexpected(message); message.received=0; message.segments.clear();
+        }
         message.completed=message.end_seen;
         report_receive_error(message);
+        if (message.deferred_response) {
+            if (message.deferred_response->orig_psn!=request.orig_psn)
+                reply(*message.deferred_response,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation);
+            message.deferred_response.reset();
+        }
         reply(request,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation);
     }
     void receive(const PDC_SES_req& request) {
@@ -510,6 +606,7 @@ private:
             Incoming incoming{static_cast<uint8_t>(header.opcode),static_cast<uint32_t>(header.request_length),
                 header.match_bits,header.buffer_offset,0,0};
             incoming.has_immediate=header.hd;
+            incoming.error_generation=header.ri_generation;
             found=incoming_.emplace(key,std::move(incoming)).first;
         }
         auto& message=found->second;
@@ -529,9 +626,16 @@ private:
         const bool poisoned=header.ie || message_error;
         ResourceSelection selected{};
         try {
-            const auto original_opcode=message_error?message.opcode:static_cast<uint8_t>(header.opcode);
-            selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
-                original_opcode==5?ResourceSpace::Send:ResourceSpace::Rma,header.ri_generation);
+            if (message.initialized) {
+                // A resource generation changes admission for new messages.
+                // Already accepted messages keep their selection and drain;
+                // MR permission and revocation remain checked on each access.
+                selected={message.pid,message.resource_index,message.error_generation};
+            } else {
+                const auto original_opcode=message_error?message.opcode:static_cast<uint8_t>(header.opcode);
+                selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                    original_opcode==5?ResourceSpace::Send:ResourceSpace::Rma,header.ri_generation);
+            }
         } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
         if (header.version || (header.hd && header.opcode!=1 && !message_error) ||
             (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && !message_error) ||
@@ -574,8 +678,19 @@ private:
                             receive.resource_index==selected.resource_index;
                     });
                     if (posted==posted_.end()) {
-                        reject(poisoned?SemanticReturnCode::InitiatorError:SemanticReturnCode::NoMatch); return;
-                    }
+                        if (poisoned) { reject(SemanticReturnCode::InitiatorError); return; }
+                        if (request.delivery_mode==RUD) { reject(SemanticReturnCode::NoMatch); return; }
+                        if (header.request_length>unexpected_limit_-unexpected_bytes_) {
+                            const auto generation=resources_.disable_for_exhaustion(selected.absolute_pid,
+                                selected.resource_index,ResourceSpace::Send);
+                            disabled_generations_[{selected.absolute_pid,selected.resource_index}]=generation;
+                            reject(SemanticReturnCode::DisabledGeneration,generation); return;
+                        }
+                        message.unexpected=std::make_shared<SparseMemory>(message.total);
+                        message.receive_order=++next_receive_order_;
+                        unexpected_order_.emplace(message.receive_order,key);
+                        unexpected_bytes_+=message.total;
+                    } else {
                     // Bind the posting before reporting truncation or initiator
                     // failure, so the target gets one error completion too.
                     const auto receive=*posted; posted_.erase(posted);
@@ -587,12 +702,14 @@ private:
                     }
                     if (!poisoned) memory_.authorize(header.job_id,receive.pid,receive.key,receive.offset,
                         header.request_length,Access::Write,selected.resource_index);
+                    }
                 }
                 message.initialized=true;
             }
             if (poisoned) { reject(SemanticReturnCode::InitiatorError); return; }
             if (message.pid!=selected.absolute_pid || message.resource_index!=selected.resource_index ||
                 message.wire_pid!=header.PIDonFEP || message.relative_addressing!=bool(header.rel) ||
+                message.error_generation!=header.ri_generation ||
                 message.opcode!=header.opcode || message.total!=header.request_length) {
                 reject(SemanticReturnCode::OperationViolation); return;
             }
@@ -609,7 +726,8 @@ private:
                 (position!=message.segments.begin() && std::prev(position)->first+std::prev(position)->second>offset)) {
                 reject(SemanticReturnCode::OperationViolation); return;
             }
-            if (header.opcode==3) {
+            if (message.unexpected) message.unexpected->write(offset,request.pkt.payload.data(),count);
+            else if (header.opcode==3) {
                 auto operands=request.pkt.payload;
                 convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
                 memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
@@ -631,8 +749,14 @@ private:
                 merged_length+=position->second; message.segments.erase(position);
             }
             message.segments.emplace(merged_offset,merged_length); message.received+=count;
+            if (message.unexpected && message.received==message.total) {
+                // Delivery-complete SEND waits for application placement. Hold
+                // its real EOM request handle; ACK Request sees SES processing.
+                message.deferred_response=request;
+                return;
+            }
             if (message.received==message.total) {
-                message.completed=true; message.completion_psn=request.orig_psn;
+                message.completed=true; message.completion_reported=true; message.completion_psn=request.orig_psn;
                 if (header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
                 if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});

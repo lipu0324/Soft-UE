@@ -94,6 +94,7 @@ if(BUILD_TESTING)
   softue_test(message_completion_test MessageCompletionTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
   softue_test(semantic_error_test SemanticErrorTest.cpp)
+  softue_test(unexpected_message_test UnexpectedMessageTest.cpp)
   add_executable(realtime_endpoint_peer ${CORE}/Test/RealtimeEndpointPeer.cpp)
   target_link_libraries(realtime_endpoint_peer PRIVATE softue_protocol softue_message)
   set_tests_properties(message_retirement_test PROPERTIES TIMEOUT 600)
@@ -122,6 +123,13 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
       --binary $<TARGET_FILE:libfabric_datagram_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
     set_tests_properties(libfabric_datagram_processes PROPERTIES TIMEOUT 40)
+    add_executable(libfabric_recovery_peer ${CORE}/Test/LibfabricRecoveryPeer.c)
+    target_include_directories(libfabric_recovery_peer PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_recovery_peer PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_test(NAME libfabric_recovery_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_recovery_processes PROPERTIES TIMEOUT 40)
   endif()
   add_test(NAME realtime_endpoint_processes COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_realtime_endpoint.py --binary $<TARGET_FILE:realtime_endpoint_peer>)

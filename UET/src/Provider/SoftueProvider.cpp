@@ -24,7 +24,8 @@ constexpr bool native_atomic_platform=true;
 constexpr bool native_atomic_platform=false;
 #endif
 constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|(native_atomic_platform?FI_ATOMIC:0);
-constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_TRANSMIT_COMPLETE;
+constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE;
+constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE;
 
 template<class Signature> struct Unsupported;
 template<class Result,class... Arguments> struct Unsupported<Result(*)(Arguments...)> {
@@ -82,6 +83,11 @@ struct ApplicationOperation {
     uint64_t flags;
     void* buffer;
     uint64_t temporary_key=0;
+    std::optional<SES::Operation> request;
+    uint64_t native_operation=0;
+    size_t retries=0;
+    Runtime::Time retry_at=0;
+    bool waiting_retry=false;
 };
 struct ProviderEndpoint {
     fid_ep handle{};
@@ -92,12 +98,15 @@ struct ProviderEndpoint {
     bool enabled=false;
     bool datagram=false;
     uint64_t next_receive_token=0;
+    uint64_t next_transmit_token=0;
     Runtime::RealtimeRuntime runtime;
     Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
     std::unique_ptr<Runtime::UdpFramePort> port;
     std::unique_ptr<Runtime::PdsHost> host;
     std::unique_ptr<SES::Endpoint> semantic;
     std::map<uint64_t,ApplicationOperation> transmits,receives;
+    std::deque<uint64_t> transmit_order;
+    std::map<std::pair<uint32_t,bool>,uint8_t> peer_generations; // Peer + SEND/RMA index space.
 };
 
 // fid is the first field in these Linux provider objects. These conversions
@@ -195,6 +204,52 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
     }
 }
 
+std::pair<uint32_t,bool> generation_key(const SES::Operation& request) {
+    return {request.peer,request.type==SES::OperationType::Send};
+}
+
+void drive_transmissions(ProviderEndpoint& endpoint) {
+    if (endpoint.transmit_order.empty()) return;
+    auto& application=endpoint.transmits.at(endpoint.transmit_order.front());
+    if (application.native_operation && !application.waiting_retry) return;
+    if (application.waiting_retry && (endpoint.runtime.events().now()<application.retry_at ||
+        endpoint.semantic->transport_pending(application.native_operation))) return;
+    auto& request=*application.request;
+    if (!application.waiting_retry) request.target_generation=endpoint.peer_generations[generation_key(request)];
+    application.native_operation=endpoint.semantic->submit(request);
+    application.waiting_retry=false;
+}
+
+void enqueue_transmission(ProviderEndpoint& endpoint,SES::Operation request,ApplicationOperation application) {
+    if (endpoint.next_transmit_token==UINT64_MAX) throw std::overflow_error("application transmit tokens exhausted");
+    const auto token=++endpoint.next_transmit_token;
+    request.context=token; application.request=std::move(request);
+    endpoint.transmits.emplace(token,std::move(application)); endpoint.transmit_order.push_back(token);
+    try { drive_transmissions(endpoint); }
+    catch (...) {
+        endpoint.transmits.erase(token);
+        endpoint.transmit_order.erase(std::remove(endpoint.transmit_order.begin(),endpoint.transmit_order.end(),token),endpoint.transmit_order.end());
+        throw;
+    }
+}
+
+bool retry_semantic_error(ProviderEndpoint& endpoint,ApplicationOperation& application,const SES::Completion& completion) {
+    if (completion.status!=SES::CompletionStatus::RemoteError || completion.remote_code<2 || completion.remote_code>5 ||
+        endpoint.datagram || application.retries>=8) return false;
+    auto& request=*application.request;
+    if (completion.remote_code==2 || completion.remote_code==3) request.target_generation=completion.remote_generation;
+    else if (completion.remote_code==4) request.target_generation=static_cast<uint8_t>(completion.remote_generation+1u);
+    endpoint.peer_generations[generation_key(request)]=request.target_generation;
+    // §3.4.4.7 / §3.4.6.3: retry the oldest operation, with bounded
+    // exponential back-off for resource errors. A new message ID is allocated
+    // only after EOM/Clear retires the previous attempt; its late fragments
+    // therefore cannot steal a posting for the retry.
+    const auto backoff=completion.remote_code==2?0:std::min<uint64_t>(100,uint64_t{1}<<application.retries);
+    ++application.retries; application.waiting_retry=true;
+    application.retry_at=Runtime::add_time(endpoint.runtime.events().now(),backoff*Runtime::kMillisecond);
+    return true;
+}
+
 void progress(ProviderDomain& domain) {
     auto* endpoint=domain.endpoint;
     if (!endpoint || !endpoint->enabled) return;
@@ -207,14 +262,25 @@ void progress(ProviderDomain& domain) {
                 queue_completion(*endpoint->receive_cq,{nullptr,FI_RMA|FI_REMOTE_WRITE,nullptr},completion);
         } else {
             auto& pending=completion.receive?endpoint->receives:endpoint->transmits;
-            const auto found=pending.find(completion.receive?completion.context:completion.operation);
+            const auto found=pending.find(completion.context);
             if (found==pending.end()) continue;
+            if (!completion.receive) {
+                if (found->second.native_operation!=completion.operation) continue;
+                if (retry_semantic_error(*endpoint,found->second,completion)) continue;
+                if (completion.status==SES::CompletionStatus::Success)
+                    endpoint->peer_generations[generation_key(*found->second.request)]=completion.remote_generation;
+                endpoint->transmit_order.pop_front();
+            }
             auto* queue=completion.receive?endpoint->receive_cq:endpoint->send_cq;
             if (queue) queue_completion(*queue,found->second,completion);
             if (found->second.temporary_key) domain.memory.deregister(found->second.temporary_key);
             pending.erase(found);
         }
     }
+    // Simulator/provider admission policy: serialize application operations.
+    // This conservative FI_ORDER_SAS implementation keeps newer sends behind
+    // a generation retry; the PDC still owns packet windows and reliability.
+    drive_transmissions(*endpoint);
 }
 
 void configure_peer(ProviderEndpoint& endpoint,const sockaddr_in& peer) {
@@ -491,8 +557,8 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
         // message (potentially 4 GiB-1) during the API call.
         auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
         operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
-        const auto identifier=endpoint.semantic->submit(std::move(operation));
-        endpoint.transmits.emplace(identifier,ApplicationOperation{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
+        enqueue_transmission(endpoint,std::move(operation),
+            {context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
         return 0;
     });
 }
@@ -519,8 +585,7 @@ ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_add
         // The native integer-memory model is little endian. The platform used
         // by this provider is Linux/little endian; SES separately encodes each
         // operand in network order. Fetching/CAS capabilities remain absent.
-        const auto identifier=endpoint.semantic->submit(std::move(request));
-        endpoint.transmits.emplace(identifier,ApplicationOperation{context,FI_ATOMIC|FI_WRITE,const_cast<void*>(buffer)});
+        enqueue_transmission(endpoint,std::move(request),{context,FI_ATOMIC|FI_WRITE,const_cast<void*>(buffer)});
         return 0;
     });
 }
@@ -557,8 +622,8 @@ ssize_t send_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi
     return send_message(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,context);
 }
 ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
-    if (!message || (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
-    if (owner<ProviderEndpoint>(endpoint).datagram && (flags&FI_DELIVERY_COMPLETE)) return -FI_EOPNOTSUPP;
+    const auto allowed=owner<ProviderEndpoint>(endpoint).datagram?datagram_operation_flags:supported_operation_flags;
+    if (!message || (flags&~allowed)) return -FI_EOPNOTSUPP;
     return send_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
 }
 ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
@@ -640,7 +705,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
             // MR hints enumerate modes the application can follow (fi_info
             // passes all current modes). Return our required PROV_KEY subset,
             // rather than rejecting additional modes the application supports.
-            if (hints->tx_attr && (hints->tx_attr->op_flags&~supported_operation_flags)) return -FI_ENODATA;
+            if (hints->tx_attr && (hints->tx_attr->op_flags&~(datagram?datagram_operation_flags:supported_operation_flags))) return -FI_ENODATA;
             if (hints->tx_attr && ((datagram && (hints->tx_attr->op_flags&FI_DELIVERY_COMPLETE)) ||
                 (hints->tx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS)))) return -FI_ENODATA;
             if (hints->rx_attr && (hints->rx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS))) return -FI_ENODATA;

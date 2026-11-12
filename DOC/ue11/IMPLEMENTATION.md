@@ -168,8 +168,24 @@ length. The provider maps this to `FI_ETRUNC` and `olen`.
 Per-message receive bookkeeping defaults to 4096 records. If it fills, the local
 simulator policy refuses new messages on that PDC until it closes, while existing
 records can finish. This conservative refusal is bounded by the PDC count and
-never silently evicts an error record. It is not the complete ordered unexpected
-message/generation recovery scheme of §3.4.4.7; that scheme remains open.
+never silently evicts an error record. This conservative bookkeeping exhaustion
+policy is separate from unexpected-payload capacity and full acceptance remains open.
+
+ROD SEND now buffers unmatched messages in acceptance order under a configurable
+logical-byte budget (256 KiB by default). A late posting can place a complete or
+partially buffered message through the ordinary MR checks. Delivery completion
+waits for placement; the actual EOM request remains in SES processing meanwhile.
+Payload exhaustion disables the SEND index using the client/server generation
+mechanism of §3.4.4.7.3.2. Posting resources increments the generation and enables
+the index, while previously accepted messages drain under their saved selection.
+RUD unmatched SEND returns NO_MATCH with zero modified length.
+
+`Endpoint::transport_pending(operation)` includes both application-pending and
+leased-ID state, so a caller can wait for the previous attempt to retire before
+retrying. The provider uses it for bounded recoverable-error retries and
+conservative ordered admission; see [its recovery policy](PROVIDER.md). A PDC
+termination also produces one error completion for an unfinished matched target
+receive, with the number of bytes already placed.
 
 `PdsHost::request_connection_close()` accepts either local PDC role. An initiator
 quiesces and sends Close Command; a target schedules one Close Request, consumes
@@ -222,7 +238,7 @@ results are simulation parameters, not calibrated hardware performance.
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
 | M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. The full control/error/wrap matrix and CC ACK variants remain open. |
-| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute resource selection and protocol-driven message retirement are covered. A real experimental FI_MSG/WRITE/integer-atomic/DGRAM provider runs; remaining AMO types/controls, API mappings and acceptance remain open. |
+| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute selection, retirement, first-error handling, bounded ROD unexpected messages and generation recovery are covered. The experimental FI_MSG/WRITE/integer-atomic/DGRAM provider includes recoverable-error retries. Remaining MR key classes, API flags and acceptance remain open. |
 | M4 | Basic packet-fabric substrate; congestion feedback and NSCC are not implemented. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 

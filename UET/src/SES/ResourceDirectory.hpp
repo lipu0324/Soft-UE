@@ -35,6 +35,21 @@ public:
             throw std::invalid_argument("relative resource address exceeds wire width");
         relative_pids_[{job,relative_pid}]=absolute_pid;
     }
+    uint8_t disable_for_exhaustion(uint16_t pid,uint16_t index,ResourceSpace space) {
+        auto& resource=resources_.at({pid,index,space});
+        resource.enabled=false; resource.generation_recovery=true;
+        return resource.generation;
+    }
+    bool recover_after_exhaustion(uint16_t pid,uint16_t index,ResourceSpace space,uint8_t generation) {
+        const auto found=resources_.find({pid,index,space});
+        if (found==resources_.end() || found->second.enabled || !found->second.generation_recovery ||
+            found->second.generation!=generation) return false;
+        // §3.4.4.7.3.2: software supplies resources, increments the eight-bit
+        // generation and only then enables the index. An explicit management
+        // reconfiguration cancels this automatic recovery policy.
+        ++found->second.generation; found->second.enabled=true; found->second.generation_recovery=false;
+        return true;
+    }
     ResourceSelection resolve(uint32_t job,bool relative,uint16_t wire_pid,uint16_t resource_index,
                               ResourceSpace space,uint8_t requested_generation) const {
         uint16_t absolute_pid=wire_pid;
@@ -52,14 +67,14 @@ public:
         const auto resource=resources_.find({absolute_pid,resource_index,space});
         if (resource==resources_.end()) throw AddressingError(SemanticReturnCode::BadIndex);
         if (!resource->second.enabled)
-            throw AddressingError(requested_generation==resource->second.generation?
+            throw AddressingError(!resource->second.generation_recovery && requested_generation==resource->second.generation?
                 SemanticReturnCode::Disabled:SemanticReturnCode::DisabledGeneration,resource->second.generation);
         if (requested_generation!=resource->second.generation)
             throw AddressingError(SemanticReturnCode::BadGeneration,resource->second.generation);
         return {absolute_pid,resource_index,resource->second.generation};
     }
 private:
-    struct Resource { uint8_t generation; bool enabled; };
+    struct Resource { uint8_t generation; bool enabled; bool generation_recovery=false; };
     std::map<std::tuple<uint16_t,uint16_t,ResourceSpace>,Resource> resources_;
     std::map<std::pair<uint32_t,uint16_t>,uint16_t> relative_pids_;
 };

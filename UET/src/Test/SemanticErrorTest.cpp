@@ -67,7 +67,7 @@ void rejected_message_cannot_take_later_posting(bool exhaust_records) {
     Fixture test(SemanticFaultPort::Fault::DelayTail,exhaust_records?1:4096);
     const auto region=test.target.memory().register_region(1,1,64,7);
     size_t reads=0; bool readable=true;
-    Operation send; send.type=OperationType::Send; send.peer=2;
+    Operation send; send.type=OperationType::Send; send.peer=2; send.delivery_mode=RUD;
     send.payload_source=std::make_shared<GeneratedPayload>(1024*1024,[&](uint64_t,uint8_t* bytes,size_t count) {
         CHECK(readable); ++reads; std::memset(bytes,0x77,count);
     });

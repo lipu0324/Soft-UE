@@ -66,11 +66,11 @@ jobs:
         run: >-
           cmake --build build/reference-tests -j2 --target
           reference_wire_oracle reference_wire_fixtures reference_interop_target
-          reference_interop_peer softue_fabric libfabric_provider_peer libfabric_datagram_peer
+          reference_interop_peer softue_fabric libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer
       - name: Compare parsing, run reference interop and exercise the public libfabric API
         run: >-
           ctest --test-dir build/reference-tests
-          -R 'reference_wire_comparison|reference_process_interop|libfabric_provider_processes|libfabric_datagram_processes'
+          -R 'reference_wire_comparison|reference_process_interop|libfabric_provider_processes|libfabric_datagram_processes|libfabric_recovery_processes'
           --output-on-failure
       - name: Preserve comparison evidence
         if: always()

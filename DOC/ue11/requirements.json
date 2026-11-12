@@ -619,6 +619,22 @@
         "HPC"
       ],
       "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open."
+    },
+    {
+      "id": "SES-UNEXPECTED-RECOVERY",
+      "reference": "§3.4.4.7; §3.4.6.2–3",
+      "summary": "有界 ROD unexpected 缓冲、资源代次恢复及最早消息的受限软件重试",
+      "status": "partial",
+      "tests": [
+        "unexpected_message_test",
+        "libfabric_recovery_processes"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Late/partial receive posting, ordered placement, zero-placement truncation, disabled-generation responses and re-enable, stale generation, SEND/RMA isolation, RUD no-match/manual retry, transport-retirement query and partial receive error on PDC failure are checked. Public API processes cover delayed receive, hidden intermediate errors, bounded retry failure and subsequent RMA. Full MR key classes, ordered/API acceptance and cross-peer recovery matrices remain open."
     }
   ]
 }

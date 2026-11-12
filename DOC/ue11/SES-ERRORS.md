@@ -61,8 +61,14 @@ RUD 中终止包可能先于 SOM 到达，因此不能以“已见 EOM”为理�
 
 错误记录同样消耗资源。默认消息记录上限为 4096；满时，本仿真策略拒绝该 PDC 的新消息，
 保留已有记录到正常退休，并在 PDC 关闭后释放拒绝状态。它避免无界增长和不安全驱逐，
-但不是 §3.4.4.7 完整的 ordered unexpected-message、资源代次和软件重试机制；这些
-仍需继续实现。各 Profile 的符合性声明继续关闭。
+这项记账容量策略与 unexpected payload 的容量分开。
+
+ROD 的未匹配消息现按接收顺序进入有界缓冲，后投递的 posting 可接收整条或已到达的
+前缀。payload 容量耗尽时，SEND index 进入 `DISABLED_GEN` 状态；补充资源后增加
+generation 再启用。已经接受的消息保存原选择并继续排空。provider 保留原应用操作，
+等待旧尝试的 `transport_pending()` 变为 false 后，使用新 Message ID 和正确代次重试；
+后来的操作等待最早操作完成。RUD 返回 NO_MATCH，由调用者或适配层负责退避重试。完整规范与 API
+验收尚未完成，各 Profile 的符合性声明继续关闭。
 
 ## 可重复验证
 

@@ -30,7 +30,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 |---|---|
 | Endpoint | `FI_EP_RDM` 或 `FI_EP_DGRAM`；每个 domain 一个 endpoint；域间状态独立 |
 | 线程和 progress | `FI_THREAD_DOMAIN`、手动 progress；应用串行调用域内 API；`fi_cq_read/readerr` 推进 socket 和协议定时器 |
-| 消息 | `fi_send/recv`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；接收缓冲区先投递 |
+| 消息 | `fi_send/recv`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；ROD 允许后投递接收缓冲区 |
 | 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
 | RMA | `fi_write/writev/writemsg/writedata`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
 | 原子 | 非取回 `fi_atomic/atomicv/atomicmsg`；8/16/32/64 位有符号/无符号整数；逐元素原子性和标准能力查询 |
@@ -49,9 +49,32 @@ READ、取回原子/CAS、浮点原子、tagged、inject、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时
-验证发送端错误、接收端错误 CQ 和后续消息交付。消息的恢复性 SES 错误重试、ordered
-unexpected message 处理和更多 operation flags 仍属于 M3；当前测试不代替 libfabric
-全套一致性验收。
+验证发送端错误、接收端错误 CQ 和后续消息交付。更多 operation flags、完整 MR key
+类别和 API 验收仍属于 M3；当前测试不代替 libfabric 全套一致性验收。
+
+RDM 当前使用 `FI_DELIVERY_COMPLETE`；尚未实现独立的 `FI_TRANSMIT_COMPLETE` 完成点，
+因此该选项在 RDM 能力查询和消息 flags 中会被明确拒绝。DGRAM 则使用本地发送完成，
+支持 `FI_TRANSMIT_COMPLETE`。这两条路径不会混用完成含义。
+
+## Unexpected message 与恢复
+
+原生 SES 默认最多为 ROD unexpected messages 预留 256 KiB 逻辑容量，按接收顺序匹配
+随后投递的缓冲区。预留容量包括尚未到达的片段，避免依靠稀疏零数据绕过容量限制。
+缓冲耗尽时，SEND Resource Index 被禁用并返回 `RC_DISABLED_GEN`；投递新的接收资源后，
+该 index 的 generation 增加，再重新启用。已接受消息可继续排空，RMA index 不受 SEND
+index 的禁用影响。RUD 不使用此有序缓冲策略，未匹配时返回 `RC_NO_MATCH`。
+
+provider 对 `BAD_GENERATION`、`DISABLED`、`DISABLED_GEN` 和 `NO_MATCH` 执行最多八次
+语义重试；资源错误使用 1～100 ms 的有界指数退避，generation mismatch 可立即重试。
+每次必须先等待旧原生尝试的 EOM/Clear 退休，再分配新 Message ID。应用在这期间继续
+保留原缓冲区，只收到一次最终 CQ 完成。当前实验适配器串行准入应用操作，保证后来的
+有序 SEND 不会越过正在重试的最早消息；PDS 仍独立承担包窗口、确认、重传和去重。
+这是一项保守的准入策略，会限制 provider 的并行度；原生多流仿真不使用该策略。
+
+`libfabric_recovery_processes` 使用两个只调用公开 `fi_*` API 的进程，延迟投递接收，
+验证 512 KiB SEND 和后续 SEND 的顺序、隐藏中间恢复错误、重试上限，以及 SEND
+资源持续禁用后仍可完成独立的 RMA。原生测试另验证部分消息已缓冲时投递接收、
+generation 返回值、旧尝试的退休约束和 PDC 失败时的部分接收错误 CQ。
 
 ## 阅读代码的顺序
 

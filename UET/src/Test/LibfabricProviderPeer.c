@@ -31,6 +31,10 @@ int main(int argc,char** argv) {
     CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_TAGGED)) && (info->caps&FI_ATOMIC));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
+    struct fi_info *unsupported_completion=NULL;
+    hints->tx_attr->op_flags=FI_TRANSMIT_COMPLETE;
+    CHECK(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&unsupported_completion)==-FI_ENODATA);
+    CHECK(!unsupported_completion); hints->tx_attr->op_flags=0;
     CHECK(info->ep_attr->max_msg_size==UINT32_MAX);
     struct fid_fabric *fabric=NULL; struct fid_domain *domain=NULL;
     struct fid_av *addresses=NULL; struct fid_cq *completions=NULL;
