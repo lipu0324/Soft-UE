@@ -119,14 +119,16 @@
       "tests": [
         "pds_recovery_test",
         "pds_fault_test",
-        "pdc_lifecycle_test"
+        "pdc_lifecycle_test",
+        "pds_feedback_test",
+        "pds_probe_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Missing-middle-packet go-back-N completes before RTO; duplicate and close-loss cases tested."
+      "evidence_note": "Missing-middle go-back-N, EV/CE/RETX feedback, fixed control entropy, Probe SACK and close-loss tested; asynchronous response ordering and complete control/error combinations remain under review."
     },
     {
       "id": "PDS-RTO",
@@ -151,14 +153,16 @@
       "tests": [
         "pds_recovery_test",
         "rud_window_test",
-        "selective_acknowledgment_test"
+        "selective_acknowledgment_test",
+        "pds_feedback_test",
+        "pds_probe_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Per-packet SACK generation/receipt, strict CACK default inference, response queries, guaranteed-error recovery and 32-bit wrap tested; optional coalescing and Probe remain open."
+      "evidence_note": "Per-packet SACK, strict CACK default inference, response queries, guaranteed-error recovery, Probe bitmap/window recovery and wrap tested; optional coalescing and full lifecycle/error combinations remain open."
     },
     {
       "id": "PDS-UUD",

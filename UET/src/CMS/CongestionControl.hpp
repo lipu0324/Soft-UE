@@ -23,6 +23,8 @@ public:
     virtual ~ICongestionControl()=default;
     virtual bool can_send(const Connection& connection)=0;
     virtual uint32_t transmitted(const Connection& connection,PDStoNET_pkt& packet)=0;
+    // Select the forward control path without charging data admission/bytes.
+    virtual void decorate_control(const Connection& connection,PDStoNET_pkt& packet)=0;
     virtual void acknowledged(const Connection& connection,const PDStoNET_pkt& packet,
                                std::optional<NsccTransmitSample> sample)=0;
     virtual void negative_acknowledged(const Connection& connection,uint32_t nominal_size,

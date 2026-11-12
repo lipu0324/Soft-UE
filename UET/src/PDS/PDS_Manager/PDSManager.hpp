@@ -399,7 +399,8 @@ public:
         if (local_pdc_id >= MAX_PDC * 2 || !pdc_list[local_pdc_id].is_open) {
             // Never answer an unexpected ACK/NACK with another NACK. Only
             // requests and controls can elicit this response (§3.5.12.7).
-            if (is_request || is_control) sendNack(&received_packet,UET_INV_DPDCID);
+            const bool unbound_probe=is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type==Probe;
+            if (!unbound_probe && (is_request || is_control)) sendNack(&received_packet,UET_INV_DPDCID);
             return;
         }
         auto& identity = connection_identities_[local_pdc_id];
@@ -413,7 +414,8 @@ public:
         if (identity.local_endpoint != received_packet.dst_fep ||
             identity.remote_endpoint != received_packet.src_fep ||
             (identity.remote_pdc_known && identity.remote_pdc_id != remote_pdc_id && !establishment_failure)) {
-            if (is_request || is_control) sendNack(&received_packet,UET_PDC_HDR_MISMATCH);
+            const bool unbound_probe=is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type==Probe;
+            if (!unbound_probe && (is_request || is_control)) sendNack(&received_packet,UET_PDC_HDR_MISMATCH);
             return;
         }
         if (!establishment_failure && !identity.remote_pdc_known) {
@@ -504,8 +506,10 @@ public:
         nack_pkt.SESpkt = {}; // NACK packet does not carry SES data
         nack_pkt.PDS_header.nack_header.type = PDS_type::NACK;
         nack_pkt.PDS_header.nack_header.next_hdr = PDS_next_hdr::UET_HDR_NONE;
-        nack_pkt.PDS_header.nack_header.flags.m = 0;
-        nack_pkt.PDS_header.nack_header.flags.retx = 0;
+        nack_pkt.wire_entropy=rx->wire_entropy;
+        nack_pkt.PDS_header.nack_header.flags.m = rx->network_ecn==3;
+        nack_pkt.PDS_header.nack_header.flags.retx = rx->PDS_type==RUOD_cp_header?
+            rx->PDS_header.RUOD_cp_header.flags.retx:rx->PDS_header.RUOD_req_header.flags.retx;
         nack_pkt.PDS_header.nack_header.flags.nt = 0;
         nack_pkt.PDS_header.nack_header.nack_code = nack_type;
         nack_pkt.PDS_header.nack_header.vendor_code = 0; // Unknown purpose

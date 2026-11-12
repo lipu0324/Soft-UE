@@ -146,7 +146,13 @@ void acknowledgement_request_states(uint32_t initial_sequence) {
     test.responses.clear(); test.send(test.control(ACK_req,initial_sequence+2,remote));
     CHECK(test.responses.size()==1 && test.responses[0].PDS_type==RUOD_ack_header);
     CHECK(test.responses[0].PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE);
-    CHECK(test.responses[0].PDS_header.RUOD_ack_header.flags.retx && delivered==1);
+    // This ACK Request is a new CP, so its replay must reflect RETX=0 even
+    // though the response payload comes from the guaranteed-delivery cache.
+    CHECK(!test.responses[0].PDS_header.RUOD_ack_header.flags.retx && delivered==1);
+    auto retried_query=test.control(ACK_req,initial_sequence+2,remote);
+    retried_query.PDS_header.RUOD_cp_header.flags.retx=1;
+    test.responses.clear(); test.send(retried_query);
+    CHECK(test.responses.size()==1 && test.responses[0].PDS_header.RUOD_ack_header.flags.retx && delivered==1);
     auto clear=test.control(Clear_cmd,0,remote); clear.PDS_header.RUOD_cp_header.payload=initial_sequence+2; test.send(clear);
     test.responses.clear(); test.send(test.control(ACK_req,initial_sequence,remote)); CHECK(test.responses.empty());
     test.close();

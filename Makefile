@@ -8,7 +8,7 @@ RDMA_LIBS = $(if $(filter 1,$(ENABLE_RDMA)),-libverbs,)
 CORE := UET/src
 BUILD := build
 PDS_SOURCES := $(CORE)/Test/PDS_fulltest.cpp \
-  $(CORE)/PDS/PDC/PDC.cpp \
+  $(CORE)/PDS/PDC/PDC.cpp $(CORE)/PDS/PDC/Probe.cpp \
   $(CORE)/PDS/PDC/IPDC.cpp \
   $(CORE)/PDS/PDC/TPDC.cpp \
   $(CORE)/PDS/PDC/RTOTimer/RTOTimer.cpp \
@@ -31,7 +31,7 @@ test-core: core
 
 $(BUILD)/ses_payload_test: $(CORE)/Test/SesPayloadIntegrationTest.cpp $(PDS_SOURCES) $(CORE_HEADERS) $(BUILD)/libsoftue_message.a | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CORE) $(CORE)/Test/SesPayloadIntegrationTest.cpp \
-	  $(CORE)/PDS/PDC/PDC.cpp $(CORE)/PDS/PDC/IPDC.cpp $(CORE)/PDS/PDC/TPDC.cpp \
+	  $(CORE)/PDS/PDC/PDC.cpp $(CORE)/PDS/PDC/Probe.cpp $(CORE)/PDS/PDC/IPDC.cpp $(CORE)/PDS/PDC/TPDC.cpp \
 	  $(CORE)/PDS/PDC/RTOTimer/RTOTimer.cpp $(CORE)/Network_Layer/UDP_Network_Layer.cpp \
 	  $(BUILD)/libsoftue_message.a -o $@ $(LDFLAGS) $(LDLIBS)
 

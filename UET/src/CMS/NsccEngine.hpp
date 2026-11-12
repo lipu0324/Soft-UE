@@ -32,10 +32,15 @@ public:
         record("nscc_window",state.controller->state().congestion_window);
         return static_cast<uint32_t>(bytes);
     }
+    void decorate_control(const Connection& connection,PDStoNET_pkt& packet) override {
+        auto& state=source(connection);
+        // ROD's forward requests and controls retain their CCC's one path.
+        // RUD may spray controls too. Control traffic does not consume cwnd.
+        packet.wire_entropy=connection.ordered?state.fixed_entropy:next_entropy_++;
+    }
     void acknowledged(const Connection& connection,const PDStoNET_pkt& packet,
                        std::optional<NsccTransmitSample> sample) override {
-        if (packet.PDS_header.RUOD_ack_header.type!=ACK_CC || packet.congestion_ack.type!=0 ||
-            packet.PDS_header.RUOD_ack_header.flags.p) return;
+        if (packet.PDS_header.RUOD_ack_header.type!=ACK_CC || packet.congestion_ack.type!=0) return;
         const auto found=sources_.find(connection);
         if (found==sources_.end()) return; // No request ever sent in this direction.
         auto& state=found->second;

@@ -255,9 +255,9 @@ results are simulation parameters, not calibrated hardware performance.
 |---|---|
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
-| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. Per-packet SACK, strict DEFAULT inference, response queries and peer MP_RANGE are covered. The full control/error/wrap matrix and Probe remain open. |
+| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. Per-packet SACK, strict DEFAULT inference, response queries and peer MP_RANGE are covered. Probe opaque correlation, mandatory ROD Probe bitmap, paced peer-window recovery and EV/CE/RETX feedback are covered; the full control/error/wrap matrix remains open. |
 | M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute selection, retirement, first-error handling, bounded ROD unexpected messages and generation recovery are covered. The experimental FI_MSG/WRITE/integer-atomic/DGRAM provider includes recoverable-error retries. Remaining MR key classes, API flags and acceptance remain open. |
-| M4 | NSCC gates actual data/retries; ACK_CC byte counters, independent TC queues, dequeue ECN, plaintext trimming and link generations are covered. Control entropy/timestamps, broader workloads, experiment configuration/export and AI Base acceptance remain open. |
+| M4 | NSCC gates actual data/retries; ACK_CC byte counters, independent TC queues, dequeue ECN, plaintext trimming and link generations are covered. Control entropy is shared with the appropriate CCC and ACK/NACK reflects the triggering packet. MAC timing, broader workloads, experiment configuration/export and AI Base acceptance remain open. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 
 Network access was restored on 2026-11-12. CMake/CTest, libfabric 2.0.0 and the
@@ -297,6 +297,9 @@ The first explicitly enabled NSCC integration, nominal-byte ACK clock and
 dequeue-ECN switch queues are described in [NSCC architecture](NSCC.md).
 This is an M4 increment, with remaining congestion/control acceptance tracked
 explicitly; the default legacy/reference experiments do not silently enable it.
+[Probe recovery](PDS-PROBE.md) and [triggering-packet feedback](PDS-FEEDBACK.md)
+explain control timers, peer-window progress and EV/CE/RETX attribution.
+
 The [trimming path](TRIMMING.md) documents switch admission, restricted parsing
 of unauthenticated truncated headers, and NACK recovery without PDC allocation.
 The independent [PDS windows](PDS-WINDOWS.md) explain local resources, the peer's

@@ -44,10 +44,10 @@ def integer(value, lower, upper, name):
     return value
 
 
-def identifiers(value, name, maximum):
+def identifiers(value, name, maximum, minimum=1):
     if not isinstance(value, list) or any(type(x) is not int for x in value):
         raise ValueError(f"{name} must be a list of integers")
-    result = [integer(x, 1, maximum, name) for x in value]
+    result = [integer(x, minimum, maximum, name) for x in value]
     if len(set(result)) != len(result):
         raise ValueError(f"duplicate {name}")
     return result
@@ -66,7 +66,7 @@ def validate(config):
     switches = identifiers(config.get("switches", []), "switches", 0xffffffff)
     if set(hosts) & set(switches):
         raise ValueError("host and switch IDs must be disjoint")
-    jobs = identifiers(config.get("jobs", [1]), "jobs", 0xffffff)
+    jobs = identifiers(config.get("jobs", [1]), "jobs", 0xffffff, minimum=0)
     if not jobs:
         raise ValueError("at least one JobID is required")
     seed = integer(config.get("seed", 42), 0, 2**64 - 1, "seed")
@@ -122,7 +122,7 @@ def validate(config):
             raise ValueError("initial runner operations are noop, write and send")
         source = integer(item.get("source"), 1, 0xffffffff, "source")
         target = integer(item.get("target"), 1, 0xffffffff, "target")
-        job = integer(item.get("job", 1), 1, 0xffffff, "job")
+        job = integer(item.get("job", 1), 0, 0xffffff, "job")
         if source not in hosts or target not in hosts or source == target or job not in jobs:
             raise ValueError("operation requires distinct declared hosts and a declared JobID")
         count = integer(item.get("bytes", 0 if kind == 0 else 257), 0, 16 * 1024 * 1024, "bytes")
@@ -137,7 +137,9 @@ def validate(config):
             raise ValueError("operation contexts must be unique")
         contexts.add(context)
         at = integer(item.get("at_ns", 0), 0, duration - 1, "at_ns")
-        expected = {"success": 0, "remote_error": 3, "timeout": 4}.get(item.get("expect", "success"))
+        # Native CompletionStatus includes local datagram outcomes before the
+        # reliable-operation errors; these are API values, not SES wire codes.
+        expected = {"success": 0, "remote_error": 5, "timeout": 6}.get(item.get("expect", "success"))
         if expected is None:
             raise ValueError("expect must be success, remote_error or timeout")
         if kind != 0 and count:
@@ -193,7 +195,9 @@ def main():
         config_path.write_text(normalized)
         metadata = provenance(root)
         metadata["scenario_sha256"] = hashlib.sha256(normalized.encode()).hexdigest()
-        metadata["status_codes"] = {"0": "success", "1": "unsupported", "2": "invalid_request", "3": "remote_error", "4": "timeout", "5": "cancelled", "6": "resource_exhausted"}
+        metadata["status_codes"] = {"0": "success", "1": "local_success", "2": "local_error", "3": "unsupported",
+                                    "4": "invalid_request", "5": "remote_error", "6": "timeout", "7": "cancelled",
+                                    "8": "resource_exhausted", "9": "truncated"}
         metadata["run_complete"] = False
         for artifact in ["result.json", "trace.jsonl", "packets.pcap", "protocol.log"]:
             (output / artifact).unlink(missing_ok=True)

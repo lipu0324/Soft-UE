@@ -43,7 +43,8 @@ modified_length 为零，MessageID 来自控制包 payload 高 16 位。源端�
 
 正文要求基址低三位为零，但图 3-81 使用未对齐的 1842，属于已记录的规范内部差异。
 发送端遵循正文；接收端按线上基址解释 bitmap，不增加无依据的整包拒绝规则。
-可选的 ACK 合并和 Probe 触发的 bitmap 仍需各自实现及验收，不能将逐包测试作为其证据。
+Probe 的专门基址规则及独立 bitmap 回归见 [PDS-PROBE.md](PDS-PROBE.md)。可选的 ACK 合并仍待实现，
+不能将逐包或 Probe 测试作为其证据。
 
 ## Clear 跨过缺口
 

@@ -59,9 +59,12 @@ struct Services {
     Time pending_request_timeout = 100*kMillisecond;
     Time resource_nack_retry_delay = 2*kMillisecond;
     bool standard_wire=true;
+    uint16_t default_wire_entropy=0; // Fixed path when CMS is disabled.
     std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.
     CMS::ICongestionControl* congestion_control=nullptr; // Optional explicit CMS configuration.
     uint32_t mpr_zero_override=0; // §3.5.11.13: zero means ignore received MPR=0.
+    uint16_t next_probe_opaque=0; // Host-scoped identifier persists across PDC reuse.
+    bool enable_automatic_window_probes=true; // May be disabled for isolated admission experiments.
 };
 
 class EventLoop final : public IClock, public ITimerQueue {

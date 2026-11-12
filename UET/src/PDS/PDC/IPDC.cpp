@@ -37,6 +37,7 @@
  */
 bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     resetCloseSafety();
+    resetProbe();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
     semantic_completed_tx_.clear();
@@ -204,6 +205,7 @@ void I_PDC::openChk(){
         rxNack(&p);      // Process negative acknowledgment packet
         }
     }
+    else if(probe_due_ || needsWindowProbe()) { progressProbe(); }
     else if(admissionRetryReady()) { retryAdmissionDeferred(); }
     else if(!rto_pkt_q.empty()){
         uint32_t psn = rto_pkt_q.front();
@@ -312,7 +314,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr);
+            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
 
@@ -326,20 +328,20 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         if(trim) {
             diagnostics() << getCurrentTimestamp() << "I_PDC packet trimmed, sending NACK" << std::endl;
             LOG_WARN(__FUNCTION__, "Packet trimmed, sending NACK");
-            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_TRIMMED,rx_cur_psn + 1,nullptr);
+            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_TRIMMED,rx_cur_psn + 1,nullptr,pkt);
         }
         else if(error_chk == ACK_ERROR) {
             diagnostics() << getCurrentTimestamp() << "I_PDC duplicate packet received, sending ACK" << std::endl;
             LOG_INFO(__FUNCTION__, "Duplicate packet, respond with ACK immediately");
-            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn)) {
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn,pkt)) {
                 const auto sequence=pkt->PDS_header.RUOD_req_header.psn;
                 const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
                     [sequence](const auto& request) { return request.second.psn==sequence; });
-                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr);
+                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr,pkt);
                 else if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Standard_Header) {
                     auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
-                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false);
-                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false);
+                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false,pkt);
+                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false,pkt);
             }
         }
         else if(error_chk == DROP) {
@@ -349,7 +351,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         else if(error_chk == OOO) {
             diagnostics() << getCurrentTimestamp() << "I_PDC out-of-order packet, sending NACK" << std::endl;
             LOG_WARN(__FUNCTION__, "Out-of-order packet, sending NACK");
-            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_ROD_OOO,rx_cur_psn + 1,nullptr);
+            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_ROD_OOO,rx_cur_psn + 1,nullptr,pkt);
         }
     }
     else{
@@ -398,7 +400,8 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
         return;
     }
     // Probe ACK's opaque value is not a PSN. It cannot retire data or Close.
-    if (pkt->PDS_header.RUOD_ack_header.flags.p) return;
+    if (pkt->PDS_header.RUOD_ack_header.flags.p) { receiveProbeAcknowledgment(*pkt); return; }
+    if (runtime_ && runtime_->standard_wire && pkt->PDS_header.RUOD_ack_header.flags.req==3) return;
 
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
@@ -496,6 +499,9 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
         {
         case Noop:
             rxCtrlNoop(pkt);
+            break;
+        case Probe:
+            receiveProbe(*pkt);
             break;
         case ACK_req:
             rxCtrlAckReq(pkt);
@@ -633,6 +639,7 @@ void I_PDC::sendClose(){
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
 
+    decorateControl(ctrl_pkt);
     tx_pkt_buffer.insert(std::make_pair(tx_cur_psn, ctrl_pkt));
 
     if(rtoEnabled()){

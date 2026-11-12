@@ -613,6 +613,12 @@ public:
         return true;
     }
 
+    bool requestConnectionProbe(uint16_t pdcid,uint32_t selective_base) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->requestProbe(selective_base);
+    }
+
     bool hasOutstandingPacket(uint16_t pdcid,uint32_t sequence) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=ipdc_processes.find(pdcid);

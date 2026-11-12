@@ -134,6 +134,9 @@ PDC::~PDC()
 uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
 {
     RX_pkt_meta meta = {};
+    meta.wire_entropy=pkt->wire_entropy;
+    meta.congestion_marked=pkt->network_ecn==3;
+    meta.arrival_time_ns=pkt->receive_time_ns;
     meta.type = pkt->PDS_header.RUOD_req_header.type;
     meta.next_hdr = pkt->PDS_header.RUOD_req_header.next_hdr;
     meta.spdcid = pkt->PDS_header.RUOD_req_header.spdcid;
@@ -160,10 +163,12 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
 }
 
 void PDC::releaseCongestionState() {
+    resetProbe();
     if (congestion_engaged_ && runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->closed(congestionConnection());
     congestion_engaged_=false;
     congestion_connection_.reset();
+    close_network_trigger_.reset();
     admission_deferred_retries_.clear();
 }
 
@@ -197,7 +202,7 @@ void PDC::processDeliveryAcknowledgment(const PDStoNET_pkt& packet) {
         const bool selective=acknowledgment.type==ACK_CC && selective_bit<64 &&
             (packet.congestion_ack.sack_bitmap&(uint64_t{1}<<selective_bit));
         if (distance && distance<outstanding_span &&
-            (cached.first==trigger_sequence || cumulative || selective)) {
+            ((!acknowledgment.flags.p && cached.first==trigger_sequence) || cumulative || selective)) {
             auto& metadata=tx_pkt_map.at(cached.first);
             metadata.delivery_confirmed=true;
             metadata.congestion_inflight=false;
@@ -212,7 +217,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     // §3.5.12.5: deliver the explicit semantic result before inferring defaults.
     // This preserves a guaranteed error when the same ACK advances CACK.
     const auto explicit_request=tx_pkt_buffer.find(explicit_sequence);
-    if (explicit_request!=tx_pkt_buffer.end() && explicit_request->second.PDS_type==RUOD_req_header &&
+    if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && explicit_request->second.PDS_type==RUOD_req_header &&
         acknowledgment.next_hdr==UET_HDR_RESPONSE && packet.SESpkt.bth_type==Semantic_Response_Header) {
         const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
         auto response=packet.SESpkt;
@@ -267,9 +272,46 @@ void PDC::decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt
         include(trigger_sequence);
 }
 
+void PDC::decorateAcknowledgmentNetwork(uint32_t sequence,const PDStoNET_pkt* trigger,PDStoNET_pkt& response) const {
+    if (!runtime_ || !runtime_->standard_wire) return;
+    uint16_t entropy=0; bool marked=false,retransmitted=false;
+    UET::Runtime::Time arrival=0;
+    if (trigger) {
+        entropy=trigger->wire_entropy; marked=trigger->network_ecn==3;
+        arrival=trigger->receive_time_ns;
+        if (trigger->PDS_type==RUOD_req_header) retransmitted=trigger->PDS_header.RUOD_req_header.flags.retx;
+        else if (trigger->PDS_type==RUOD_cp_header) retransmitted=trigger->PDS_header.RUOD_cp_header.flags.retx;
+    } else {
+        const auto metadata=std::find_if(rx_pkt_map.begin(),rx_pkt_map.end(),
+            [sequence](const auto& item) { return item.second.psn==sequence; });
+        if (metadata==rx_pkt_map.end()) return;
+        entropy=metadata->second.wire_entropy; marked=metadata->second.congestion_marked;
+        retransmitted=metadata->second.retx; arrival=metadata->second.arrival_time_ns;
+    }
+    // §3.5.12.2 / §3.5.12.7: ACK/NACK reflects the triggering packet, not
+    // the original request whose semantic result is being queried/replayed.
+    response.wire_entropy=entropy;
+    if (response.PDS_type==RUOD_ack_header) {
+        response.PDS_header.RUOD_ack_header.flags.m=marked;
+        response.PDS_header.RUOD_ack_header.flags.retx=retransmitted;
+        if (response.PDS_header.RUOD_ack_header.type==ACK_CC && runtime_->congestion_control)
+            response.congestion_ack.service_time=static_cast<uint16_t>(std::min<uint64_t>(0xffff,
+                (runtime_->clock.now()-std::min(arrival,runtime_->clock.now()))/128));
+    } else if (response.PDS_type==nack_header) {
+        response.PDS_header.nack_header.flags.m=marked;
+        response.PDS_header.nack_header.flags.retx=retransmitted;
+    }
+}
+
+void PDC::decorateControl(PDStoNET_pkt& packet) {
+    if (!runtime_) return;
+    packet.wire_entropy=runtime_->default_wire_entropy;
+    if (runtime_->congestion_control)
+        runtime_->congestion_control->decorate_control(congestionConnection(),packet);
+}
+
 void PDC::processPeerAcknowledgment(const PDStoNET_pkt& packet) {
     const auto& ack=packet.PDS_header.RUOD_ack_header;
-    if (ack.flags.p) return; // Probe's base CACK is not delivery state.
     if ((tx_cur_psn-1)-ack.cack_psn>=0x80000000u) return; // Never anchor a peer window on unsent future PSNs.
     if (!peer_sequence_window_) {
         if (ack.cack_psn-(start_psn-1)>tx_cur_psn-start_psn) return;
@@ -454,12 +496,14 @@ void PDC::reTx(uint32_t psn){
         control.type=CP; control.ctl_type=ACK_req; control.flags.ar=1;
         control.psn=psn; control.spdcid=SPDCID; control.dpdcid=DPDCID;
         control.payload=uint32_t{p.SESpkt.bth_header.Standard_Header.msg_id}<<16;
+        decorateControl(query);
         if (public_net_queue) public_net_queue->push(query); else tx_pkt_q.push(query);
         return;
     }
     if (p.PDS_type == RUOD_cp_header) {
         auto& control=p.PDS_header.RUOD_cp_header;
         control.flags.retx=1;
+        decorateControl(p);
         if (!SYN && (control.ctl_type==Noop || control.ctl_type==Negotiation)) {
             control.flags.syn=0; control.dpdcid=DPDCID;
         }
@@ -613,6 +657,20 @@ void PDC::pauseForResourceNack(uint32_t sequence) {
 
 void PDC::freePDC()
 {
+    // Queued fragments may never have acquired a PSN, so SES cannot associate
+    // them through RequestTransmitted/ConnectionClosed. Reject each queued
+    // message explicitly before erasing the context and its failure reason.
+    std::set<std::pair<uint32_t,uint16_t>> rejected_messages;
+    while (!tx_req_q.empty()) {
+        const auto& queued=tx_req_q.front();
+        if (queued.pkt.bth_type==Standard_Header) {
+            const auto& semantic=queued.pkt.bth_header.Standard_Header;
+            const std::pair<uint32_t,uint16_t> message{semantic.job_id,semantic.msg_id};
+            if (rejected_messages.insert(message).second)
+                emitPdcEvent(UET::Runtime::PdcEventKind::RequestRejected,tx_cur_psn,semantic.job_id,semantic.msg_id);
+        }
+        tx_req_q.pop();
+    }
     releaseCongestionState();
     peer_sequence_window_.reset();
     resetCloseSafety();
@@ -705,6 +763,9 @@ void PDC::txCtrl(){
         p.PDS_header.RUOD_cp_header.flags.isrod = 0;        // rsvd
         switch (requested_control)
         {
+        case PROBE:
+            requestProbe(clear_psn+1);
+            return;
         case NOOP:
             sendCtrlNoop(&p);
             break;
@@ -729,6 +790,7 @@ void PDC::txCtrl(){
         default:
             LOG_ERROR(__FUNCTION__, formatLogMessage("未知控制消息类型"));
         }
+        decorateControl(p);
         if(p.PDS_header.RUOD_cp_header.ctl_type == Noop ||
            p.PDS_header.RUOD_cp_header.ctl_type == Close_cmd ||
            p.PDS_header.RUOD_cp_header.ctl_type == Close_req ||
@@ -857,10 +919,10 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     const auto& header=packet->PDS_header.RUOD_cp_header;
     const bool carries_mode=header.ctl_type==Noop || header.ctl_type==Negotiation;
     if (carries_mode && bool(header.flags.isrod)!=(mode==ROD)) {
-        sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr); return false;
+        sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr,packet); return false;
     }
     if (header.flags.syn && header.psn-header.psn_off!=start_psn) {
-        sendNack(header.flags.retx,header.psn,UET_INVALID_SYN,0,nullptr); return false;
+        sendNack(header.flags.retx,header.psn,UET_INVALID_SYN,0,nullptr,packet); return false;
     }
     // Unique CP PSNs share the receive window with semantic requests. A NOOP
     // cannot leave a hole that would stall the following request's CACK.
@@ -869,17 +931,17 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     if (!since_clear || since_clear>=0x80000000u) return false;
     const bool duplicate=!distance || distance>=0x80000000u || received_rx_psns_.count(header.psn);
     if (duplicate) {
-        if (header.flags.retx) sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false);
+        if (header.flags.retx) sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false,packet);
         return false;
     }
     if (mode==ROD && distance!=1) {
-        sendNack(header.flags.retx,header.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr); return false;
+        sendNack(header.flags.retx,header.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr,packet); return false;
     }
     if (mode==RUD && distance>MPR) return false;
     received_rx_psns_.insert(header.psn); completed_rx_psns_.insert(header.psn);
     while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
     advanceCumulativeAck();
-    sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false);
+    sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false,packet);
     return true;
 }
 
@@ -898,11 +960,11 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
     // §3.5.16.2: a delayed request below Clear is silently discarded. Use
     // modular distance so this decision also works across the 32-bit wrap.
     if (requested_sequence-rx_clear_psn>=0x80000000u) return;
-    if (replaySemanticAck(requested_sequence)) return;
+    if (replaySemanticAck(requested_sequence,packet)) return;
     const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
         [requested_sequence](const auto& request) { return request.second.psn==requested_sequence; });
     if (processing) {
-        sendNack(0,requested_sequence,UET_RCVD_SES_PROCG,0,nullptr); return;
+        sendNack(0,requested_sequence,UET_RCVD_SES_PROCG,0,nullptr,packet); return;
     }
     const auto since_cumulative=requested_sequence-cack_psn;
     if (received_rx_psns_.count(requested_sequence) || !since_cumulative || since_cumulative>=0x80000000u) {
@@ -912,9 +974,9 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
         semantic.message_id=packet->PDS_header.RUOD_cp_header.payload>>16;
         // Table 3-69: ACK Request DEFAULT uses JobID=0, generation=0,
         // modified_length=0. The source recovers scope from its cached PSN.
-        sendAck(UET_HDR_RESPONSE,0,0,requested_sequence,&response,false); return;
+        sendAck(UET_HDR_RESPONSE,0,0,requested_sequence,&response,false,packet); return;
     }
-    sendNack(0,requested_sequence,UET_PKT_NOT_RCVD,rx_cur_psn+1,nullptr);
+    sendNack(0,requested_sequence,UET_PKT_NOT_RCVD,rx_cur_psn+1,nullptr,packet);
 }
 /**
  * @brief Process Clear_cmd control message 
@@ -967,7 +1029,7 @@ void PDC::sendCloseAck()
     pkt.PDS_header.RUOD_ack_header.ack_psn_off = 0;
     pkt.PDS_header.RUOD_ack_header.dpdcid = DPDCID;
     pkt.PDS_header.RUOD_ack_header.spdcid = SPDCID;
-
+    decorateAcknowledgmentNetwork(rx_cur_psn,close_network_trigger_?&*close_network_trigger_:nullptr,pkt);
 
     if (public_net_queue) {
         public_net_queue->push(pkt);
@@ -1297,7 +1359,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
  * @param pkt 包数据
  * @param gtd_del 保证传递标志
  */
-void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del){
+void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del,const PDStoNET_pkt* trigger){
     //FUNCTION_LOG_ENTRY();
 
     
@@ -1338,6 +1400,7 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->decorate_ack(congestionConnection(),psn,p);
     decorateSelectiveAcknowledgment(psn,p);
+    decorateAcknowledgmentNetwork(psn,trigger,p);
 
     
     std::stringstream ack_info;
@@ -1373,7 +1436,7 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
  * @param payload 载荷数据
  * @param pkt 包数据
  */
-void PDC::sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt){
+void PDC::sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt,const PDStoNET_pkt* trigger){
     //FUNCTION_LOG_ENTRY();
 
     
@@ -1420,6 +1483,7 @@ void PDC::sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, ui
         LOG_DEBUG(__FUNCTION__, "NACK包不包含SES层数据");
     }
 
+    decorateAcknowledgmentNetwork(nack_psn,trigger,p);
     if (public_net_queue) {
         public_net_queue->push(p);
     } else {

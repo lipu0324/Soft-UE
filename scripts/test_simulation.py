@@ -74,6 +74,15 @@ def main():
 
         leaf = yaml.safe_load((root / "examples" / "simulation" / "leaf-spine.yaml").read_text())
         run(leaf, "ipv6-udp")
+        job_zero = dict(base, jobs=[0], operations=[dict(operation, job=0) for operation in base["operations"]])
+        run(job_zero, "job-zero")
+        lost = {"version": 1, "hosts": [1, 2], "duration_ns": 100_000_000,
+                "links": [{"from": 1, "to": 2, "drop_ppm": 1_000_000}],
+                "operations": [{"type": "write", "source": 1, "target": 2, "bytes": 16, "expect": "timeout"}]}
+        lost_output, lost_result = run(lost, "permanent-loss-status")
+        metadata = json.loads((lost_output / "metadata.json").read_text())
+        check(lost_result["operations"][0]["status"] == 6 and metadata["status_codes"]["6"] == "timeout",
+              "runner must label the actual native timeout, not an obsolete enum position")
         large = {"version": 1, "seed": 42, "duration_ns": 100_000_000,
                  "hosts": list(range(1, 65)), "switches": list(range(100, 108)) + [200, 201],
                  "links": [], "operations": []}

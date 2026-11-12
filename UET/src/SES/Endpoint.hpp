@@ -386,9 +386,11 @@ private:
             discard_source(event.message_id);
             const auto pending=pending_.find(event.message_id);
             if (pending!=pending_.end() && pending->second.peer==event.peer && pending->second.job==event.job)
-                finish(event.message_id,CompletionStatus::ResourceExhausted,0,0);
-            // Rejected requests never acquired a transmit PSN. PDS has removed
-            // every queued fragment, so no late packet can use this message ID.
+                finish(event.message_id,event.failure==Runtime::PdcFailureReason::RetryExhausted?CompletionStatus::Timeout:
+                    (event.failure==Runtime::PdcFailureReason::None || event.failure==Runtime::PdcFailureReason::ResourcesUnavailable)?
+                    CompletionStatus::ResourceExhausted:CompletionStatus::RemoteError,0,0);
+            // Rejection either precedes transmission or follows context teardown.
+            // PDS has removed all queued fragments and retired the incarnation.
             message_leases_.erase(event.message_id);
             feed_submissions();
             return;

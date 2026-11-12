@@ -17,6 +17,7 @@ PDStoNET_pkt acknowledgment(uint32_t explicit_psn,uint32_t cumulative,uint8_t mp
 int main() {
     UET::Runtime::EventLoop loop; UET::Runtime::Services services{loop,loop,[]{}};
     services.mpr_zero_override=4;
+    services.enable_automatic_window_probes=false; // Inspect only data/retry admission; Probe recovery has its own regression.
     I_PDC sender(&services); CHECK(sender.initPDC(1)); sender.src_fep=1; sender.dst_fep=2;
     PDS_PDC_req request{}; request.next_hdr=UET_HDR_REQUEST_STD; request.delivery_mode=ROD;
     request.som=true; request.eom=true; request.pkt.bth_type=Standard_Header;

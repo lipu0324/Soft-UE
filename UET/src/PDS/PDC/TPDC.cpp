@@ -33,6 +33,7 @@
 bool T_PDC::initPDC(uint16_t id)
 {
     resetCloseSafety();
+    resetProbe();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
     semantic_completed_tx_.clear();
@@ -171,7 +172,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr);
+            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
     if (error_chk == OPEN)
@@ -189,12 +190,12 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         // The explicit legacy path retains its historical handshake behavior.
         if (!runtime_ || pkt->SESpkt.bth_type!=Standard_Header ||
             pkt->SESpkt.bth_header.Standard_Header.version!=0)
-            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false);
+            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false,pkt);
         LOG_INFO(__FUNCTION__, formatLogMessage("Send ACK - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", PSN: " + std::to_string(meta.psn)));
     }
     else
     { // Packet has error, send NACK and close
-        sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr);
+        sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr,pkt);
         // A later SYN packet may arrive before the starting packet. Keep the
         // newly allocated context so the missing PSN can establish it (§3.5.8.1).
     }
@@ -275,7 +276,8 @@ void T_PDC::openChk()
                 netRxCm(&p); // Handle control packet / Process control packet
             }
         }
-        else if(admissionRetryReady()) { retryAdmissionDeferred(); }
+        else if(probe_due_ || needsWindowProbe()) { progressProbe(); }
+    else if(admissionRetryReady()) { retryAdmissionDeferred(); }
         else if(!rto_pkt_q.empty()){
             uint32_t psn = rto_pkt_q.front();
             rto_pkt_q.pop();
@@ -520,6 +522,7 @@ void T_PDC::netRxCm(PDStoNET_pkt *pkt)
         clearAllPacketTimers();
         cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
         unack_cnt=0; allACK=true;
+        close_network_trigger_=*pkt;
         beginClose(); // Close command
     }
     else if (!bad_psn)
@@ -549,7 +552,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr);
+            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
 
@@ -565,21 +568,21 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
         {
             diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] trim is true" << std::endl;
             LOG_WARN(__FUNCTION__, formatLogMessage("Packet trimmed, send NACK"));
-            sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_TRIMMED, rx_cur_psn + 1,nullptr);
+            sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_TRIMMED, rx_cur_psn + 1,nullptr,pkt);
         }
         else if (error_chk == ACK_ERROR)
         {
             diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is ACK_ERROR" << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Duplicate packet, respond with ACK immediately"));
-            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn)) {
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn,pkt)) {
                 const auto sequence=pkt->PDS_header.RUOD_req_header.psn;
                 const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
                     [sequence](const auto& request) { return request.second.psn==sequence; });
-                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr);
+                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr,pkt);
                 else if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Standard_Header) {
                     auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
-                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false);
-                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false);
+                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false,pkt);
+                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false,pkt);
             }
         }
         else if (error_chk == DROP)
@@ -591,7 +594,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
         {
             diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is OOO" << std::endl;
             LOG_WARN(__FUNCTION__, formatLogMessage("Out of order packet, send NACK"));
-            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr); // Out of order packet / 乱序包
+            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr,pkt); // Out of order packet / 乱序包
         }
     }
     else
@@ -617,7 +620,8 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
 {
     // FUNCTION_LOG_ENTRY();
 
-    if (pkt->PDS_header.RUOD_ack_header.flags.p) return;
+    if (pkt->PDS_header.RUOD_ack_header.flags.p) { receiveProbeAcknowledgment(*pkt); return; }
+    if (runtime_ && runtime_->standard_wire && pkt->PDS_header.RUOD_ack_header.flags.req==3) return;
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
     if (runtime_ && runtime_->standard_wire) {
@@ -698,6 +702,9 @@ void T_PDC::rxCtrl(PDStoNET_pkt *pkt)
             // Optional negotiation is disabled; acknowledge the numbered CP
             // without enabling features or transferring SYN safety tracking.
             rxCtrlNoop(pkt);
+            break;
+        case Probe:
+            receiveProbe(*pkt);
             break;
         case ACK_req:
             rxCtrlAckReq(pkt);

@@ -20,6 +20,7 @@ public:
         : node_(node), loop_(loop), trace_(trace), port_(port),
           services_{loop, loop, [this] { wake(); }}, manager_(&services_), format_(format), network_(network) {
         services_.standard_wire=format_==WireFormat::Uet11;
+        services_.default_wire_entropy=network_.entropy;
         services_.pdc_event=[this](const PdcEvent& event) { context_events_.push_back(event); };
         if (!manager_.start()) throw std::runtime_error("PDS initialization failed");
         std::weak_ptr<int> life = lifetime_;
@@ -82,6 +83,10 @@ public:
         if (stopped_ || !manager_.requestConnectionClose(local_pdc_id)) return false;
         wake();
         return true;
+    }
+    bool request_connection_probe(uint16_t local_pdc_id,uint32_t selective_base) {
+        if (stopped_ || !manager_.requestConnectionProbe(local_pdc_id,selective_base)) return false;
+        wake(); return true;
     }
     void set_request_handler(std::function<void(const PDC_SES_req&)> callback) { request_handler_ = std::move(callback); }
     // Establish the transport without inventing an SES NO_OP message. The
@@ -187,12 +192,13 @@ private:
                 else {
                     auto options=network_;
                     options.source=address(packet.src_fep); options.destination=address(packet.dst_fep);
+                    const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header;
+                    if (services_.congestion_control || !data) options.entropy=packet.wire_entropy;
+                    frame.entropy=options.entropy; // ECMP uses the actual on-wire EV, including without CMS.
                     if (services_.congestion_control) {
-                        options.entropy=packet.wire_entropy; options.ecn=packet.network_ecn;
-                        frame.entropy=packet.wire_entropy;
+                        options.ecn=packet.network_ecn;
                         if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
                     }
-                    const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header;
                     if (trimming_ && data) options.dscp=trimming_->trimmable_dscp;
                     if ((services_.congestion_control || trimming_) && !data) {
                         frame.traffic_class=1;

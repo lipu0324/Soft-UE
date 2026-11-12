@@ -331,6 +331,9 @@ struct TX_pkt_meta
  */
 struct RX_pkt_meta
 {
+    uint16_t wire_entropy=0;
+    bool congestion_marked=false;
+    UET::Runtime::Time arrival_time_ns=0;
     PDS_type type;          /**< Packet type (Request/ACK/CP/NACK) */
     PDS_next_hdr next_hdr;  /**< SES header type */
     uint16_t spdcid;        /**< Receiver PDCID */
@@ -451,12 +454,14 @@ public:
     bool hasPendingWork() const {
         const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
                             (!tx_req_q.empty() && !pause_pdc && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
-                            !tx_rsp_q.empty() || admissionRetryReady();
+                            !tx_rsp_q.empty() || admissionRetryReady() || probe_due_ || needsWindowProbe();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    bool requestProbe(uint32_t selective_base);
+    bool probePending() const { return outstanding_probe_.has_value(); }
     bool awaitsSemantic(uint32_t psn) const {
         // The explicit legacy SES path uses version 2 and omits DC. Preserve
         // its semantic-response contract; standard wire requests use version 0.
@@ -468,7 +473,7 @@ public:
              found->second.SESpkt.bth_header.Standard_Header.version!=0) &&
             found->second.SESpkt.bth_header.Standard_Header.eom;
     }
-    bool replaySemanticAck(uint32_t psn) {
+    bool replaySemanticAck(uint32_t psn,const PDStoNET_pkt* trigger=nullptr) {
         const auto found = tx_ack_buffer.find(psn);
         if (found == tx_ack_buffer.end()) return false;
         auto ack = found->second;
@@ -476,12 +481,27 @@ public:
         if (runtime_ && runtime_->congestion_control)
             runtime_->congestion_control->decorate_ack(congestionConnection(),psn,ack);
         decorateSelectiveAcknowledgment(psn,ack);
+        decorateAcknowledgmentNetwork(psn,trigger,ack);
         if (public_net_queue) return public_net_queue->push(ack);
         tx_pkt_q.push(std::move(ack));
         return true;
     }
 
 protected:
+    // Probe has an opaque identifier and its own timer. PSN zero remains
+    // available to real data at wrap; Probe never occupies a TX data slot.
+    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint16_t retries=0; };
+    std::optional<ProbeAttempt> outstanding_probe_;
+    UET::Runtime::TimerId probe_timer_=0;
+    UET::Runtime::Time next_window_probe_time_=0;
+    bool probe_due_=false;
+    bool needsWindowProbe() const;
+    void progressProbe();
+    void sendProbeAttempt();
+    void armProbeWake(UET::Runtime::Time delay);
+    void resetProbe();
+    void receiveProbeAcknowledgment(const PDStoNET_pkt& packet);
+    void receiveProbe(const PDStoNET_pkt& packet);
     mutable bool congestion_engaged_=false;
     mutable std::optional<UET::CMS::Connection> congestion_connection_;
     std::set<uint32_t> admission_deferred_retries_;
@@ -528,6 +548,9 @@ protected:
     void processDeliveryAcknowledgment(const PDStoNET_pkt& packet);
     void processSemanticAcknowledgment(const PDStoNET_pkt& packet);
     void decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt& packet) const;
+    void decorateAcknowledgmentNetwork(uint32_t sequence,const PDStoNET_pkt* trigger,PDStoNET_pkt& response) const;
+    void decorateControl(PDStoNET_pkt& packet);
+    std::optional<PDStoNET_pkt> close_network_trigger_;
     void releaseCongestionState();
     void rejectTrimmed(const PDStoNET_pkt& packet);
     void observeCongestionDuplicate(const PDStoNET_pkt& packet) {
@@ -861,7 +884,8 @@ public:
      * @param pkt Packet data Packet data
      * @param gtd_del Guaranteed delivery flag Guaranteed delivery flag
      */
-    void sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del);
+    void sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del,
+                 const PDStoNET_pkt* trigger=nullptr);
     /**
      * @brief Send NACK packet Send NACK包
      * @param retx Retransmission flag Retransmission flag
@@ -870,7 +894,8 @@ public:
      * @param payload Payload data Payload data
      * @param pkt Packet data Packet data
      */
-    void sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt);
+    void sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt,
+                  const PDStoNET_pkt* trigger=nullptr);
     /**
      * @brief Send request to network layer Send request to network layer Send request to network layer
      * @param req Request packet Request packet
