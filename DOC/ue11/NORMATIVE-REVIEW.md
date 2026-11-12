@@ -298,16 +298,16 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0243-001 | §3.4.4.1.4，直接寻址 | Job 选择地址上下文，线端地址从对应基址开始；允许仅一个 Job。 | M8 缺失；不能把收到的地址直接转换成本机指针。 |
 | UE11-p0243-002 | §3.4.4.2，buffer 授权 | 每个 buffer 同时支持 exact Job 和 any Job 两种配置。 | native MR 与 provider 默认 any Job 已有回归；不同权限与撤销仍受检查，完整管理配置尚未完成。 |
 | UE11-p0243-003 | §3.4.4.3，消息响应 | 每条消息至少一个语义响应；最后收到包的响应等待此前所有包完成语义处理。 | 当前同步 WRITE/原子与延迟接收有覆盖；异步操作/扩展消息组合仍需验收。 |
-| UE11-p0244-001 | §3.4.4.3，DEFAULT 与保证传递 | DEFAULT 前完成处理；无法用 DEFAULT 表达的结果保证传递，并结合后述首错例外。 | PDS 区分 delivery/semantic/Clear；发现重复错误均设置 gtd，已用独立 8 包场景复现，修正待完成。 |
+| UE11-p0244-001 | §3.4.4.3，DEFAULT 与保证传递 | DEFAULT 前完成处理；无法用 DEFAULT 表达的结果保证传递，并结合后述首错例外。 | PDS 区分 delivery/semantic/Clear；普通消息已修正重复 gtd，实际 8 包场景检查单一保证归属；容量耗尽的无记录拒绝路径仍待完善。 |
 | UE11-p0244-002 | Informative Text | 重复说明每条消息需要响应，无新增独立规范义务。 | 归入解释材料，不重复计作 MUST。 |
-| UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | first-error sticky 已实现；重复 gtd 缺陷已确认。需区分显式错误、保证缓存与 NO_RESPONSE 占位。 |
+| UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | `reply_error` 独立选择显式错误和保证属性；RUD/ROD、丢失/重放及遇到顺序有针对性覆盖，容量耗尽 fallback 尚未完成。 |
 | UE11-p0245-001 | §3.4.4.3，提前 ACK | 未处理包提前 ACK 使用 NO_RESPONSE；DS 首包必须带实际语义响应。 | native RUD 缺口/DS-as-SEND 有回归；真正 DS/RTR M5 缺失。 |
 | UE11-p0245-002 | §3.4.4.3，DC | DC 等到整个消息 GO；“最后收到”不等同于带 EOM 的包。 | provider 各完成等级保守选择 GO，原生乱序缺口有回归；完整操作集尚未完成。 |
 | UE11-p0245-003 | §3.4.4.3，响应 ID | 回显 request message ID 或 read_request_message_id；请求无 ID 时响应 ID 为0。 | 标准请求路径回显已有覆盖；READ/紧凑格式缺失。 |
 | UE11-p0245-004 | §3.4.4.3，响应 Job | 请求有 Job 时响应回显，某些 PDS 控制查询例外。 | 当前 SES response 构造回显，管理/TSS 扩展仍待验收。 |
 | UE11-p0245-005 | §3.4.4.3，数据偏移 | SOM 响应 offset0，其余回显请求 offset。 | 带数据 codec 不能代替 READ/fetch 实际语义路径，M5 缺失。 |
 | UE11-p0245-006 | §3.4.4.3，显式响应 | 非 DEFAULT 无数据用 RESPONSE，有数据用 RESPONSE_W_DATA，并遵守保证传递规则及先述重复错误例外。 | 当前无数据显式响应有覆盖；数据响应生命周期与完整保证矩阵未完成。 |
-| UE11-p0245-007 | §3.4.4.3，首错优先 | 成功 RC_OK；首错按 SES 实际遇到顺序，非 PSN 顺序。 | native sticky error 与乱序错误测试已有覆盖；重复错误 gtd 另行修正。 |
+| UE11-p0245-007 | §3.4.4.3，首错优先 | 成功 RC_OK；首错按 SES 实际遇到顺序，非 PSN 顺序。 | native sticky error 与乱序错误测试已有覆盖；保证归属也按实际遇到次序检查，非 SOM 可先持有保证。 |
 | UE11-p0246-001 | §3.4.4.3，modified_length | 普通响应为整个接受长度；DS defer 为0，RTR 指定重发量。 | 普通接受/错误长度已实现；完整 DS/RTR 缺失。 |
 | UE11-p0246-002 | §3.4.4.3，响应 payload | payload_length 表示本包实际返回字节数。 | READ/fetch 缺失；codec round-trip 不构成完整操作验收。 |
 | UE11-p0246-003 | §3.4.4.4，local packed 响应 | ACK 中逐项对应请求，READ/fetch 返回数据；错误数据响应触发整组 ACK。 | M8 缺失，不能独立发送部分结果。 |

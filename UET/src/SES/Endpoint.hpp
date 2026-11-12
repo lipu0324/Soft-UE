@@ -239,6 +239,10 @@ private:
         bool relative_addressing=true;
         bool initialized=false,matched_receive=false,completion_reported=false,end_seen=false;
         std::optional<SemanticReturnCode> first_error;
+        // §3.4.4.3: only the first error response for a message owns a
+        // guaranteed-delivery slot. Later packets repeat the sticky error
+        // explicitly, without creating additional guaranteed responses.
+        bool error_response_generated=false;
         uint8_t error_generation=0;
         CompletionStatus target_error=CompletionStatus::RemoteError;
         std::shared_ptr<SparseMemory> unexpected;
@@ -491,11 +495,12 @@ private:
             finish(semantic_header.message_id,CompletionStatus::Success,it->second.completed_length,
                 semantic_header.return_code,it->second.returned_generation);
     }
-    void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool semantic=true,
-                std::optional<uint8_t> returned_generation={}) {
+    enum class ResponseDelivery { Guaranteed, BestEffort };
+    void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool explicit_response=true,
+                std::optional<uint8_t> returned_generation={},ResponseDelivery delivery=ResponseDelivery::Guaranteed) {
         SES_PDS_rsp response{}; response.PDCID=request.PDCID;
         response.rx_pkt_handle=request.rx_pkt_handle; response.rsp_len=12;
-        response.gtd_del=semantic;
+        response.gtd_del=explicit_response && delivery==ResponseDelivery::Guaranteed;
         response.rsp.bth_type=Semantic_Response_Header;
         auto& semantic_header=response.rsp.bth_header.Semantic_Response_Header;
         // A fully processed intermediate packet can return DEFAULT immediately
@@ -503,21 +508,28 @@ private:
         // as NO_RESPONSE (Table 3-24, RC_NULL); it cannot finish the message.
         // Deferrable-as-SEND instead signals acceptance with OK/full length
         // (§3.4.4.6.1); the source still needs results for every data packet.
-        const bool incomplete_end=!semantic && request.pkt.bth_header.Standard_Header.eom &&
+        const bool incomplete_end=!explicit_response && request.pkt.bth_header.Standard_Header.eom &&
             request.pkt.bth_header.Standard_Header.opcode!=0x08;
-        semantic_header.opcode=semantic?1:(incomplete_end?3:0);
+        semantic_header.opcode=explicit_response?1:(incomplete_end?3:0);
         semantic_header.version=0; semantic_header.return_code=incomplete_end?0:code;
         semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
         semantic_header.message_id=request.pkt.bth_header.Standard_Header.msg_id;
-        semantic_header.modified_length=!semantic && !incomplete_end?
+        semantic_header.modified_length=!explicit_response && !incomplete_end?
             request.pkt.bth_header.Standard_Header.request_length:length;
         semantic_header.ri_generation=returned_generation.value_or(request.pkt.bth_header.Standard_Header.ri_generation);
         if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected semantic response");
         host_.wake();
     }
-    void reply(const PDC_SES_req& request,SemanticReturnCode code,uint32_t length,bool semantic=true,
-                std::optional<uint8_t> returned_generation={}) {
-        reply(request,static_cast<uint8_t>(code),length,semantic,returned_generation);
+    void reply(const PDC_SES_req& request,SemanticReturnCode code,uint32_t length,bool explicit_response=true,
+                std::optional<uint8_t> returned_generation={},ResponseDelivery delivery=ResponseDelivery::Guaranteed) {
+        reply(request,static_cast<uint8_t>(code),length,explicit_response,returned_generation,delivery);
+    }
+    void reply_error(const PDC_SES_req& request,Incoming& message) {
+        const auto delivery=message.error_response_generated?ResponseDelivery::BestEffort:ResponseDelivery::Guaranteed;
+        // An error remains UET_RESPONSE even when it is not guaranteed. Using
+        // DEFAULT/NO_RESPONSE here would discard its code or imply success.
+        reply(request,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation,delivery);
+        message.error_response_generated=true;
     }
     static SemanticReturnCode memory_code(MemoryError error) {
         switch(error) {
@@ -563,7 +575,7 @@ private:
                 message.completed=message.end_seen;
                 report_receive_error(message);
                 if (message.deferred_response) {
-                    reply(*message.deferred_response,code,0,true,message.error_generation);
+                    reply_error(*message.deferred_response,message);
                     message.deferred_response.reset();
                 }
             };
@@ -617,12 +629,15 @@ private:
         }
         message.completed=message.end_seen;
         report_receive_error(message);
+        // The packet that exposed the error gets the first guarantee. A
+        // previously held EOM may also need an explicit result, but it must
+        // not steal that guarantee merely because its handle was deferred.
+        reply_error(request,message);
         if (message.deferred_response) {
             if (message.deferred_response->orig_psn!=request.orig_psn)
-                reply(*message.deferred_response,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation);
+                reply_error(*message.deferred_response,message);
             message.deferred_response.reset();
         }
-        reply(request,*message.first_error,static_cast<uint32_t>(message.received),true,message.error_generation);
     }
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }

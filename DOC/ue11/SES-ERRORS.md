@@ -16,6 +16,29 @@ initiator、Message ID 和该次连接的起始 PSN。同一个 PDCID 或 Messag
 新的接收请求，也不再访问注册内存。当前整数操作没有 informational error；其与
 unrecoverable error 的优先级组合仍待实现。
 
+## 首错保证传递与重复错误
+
+UE 1.1 §3.4.4.3 允许一条多包消息返回多个错误，但只允许首个错误响应保证传递。
+`Incoming::error_response_generated` 因此独立于 `first_error`：后者选择错误码，前者
+记录是否已经生成了持有保证传递状态的错误响应。两者都保存到该消息正常退休。
+
+`reply_error()` 对首错使用 `ResponseDelivery::Guaranteed`，后续错误使用
+`BestEffort`，并始终保持显式 `UET_RESPONSE`。保证传递位不能决定语义 opcode；
+将后续错误转换成 DEFAULT 会丢失错误，将它转换成 NO_RESPONSE 则会丢失处理结果。
+若先前还有一个等待处理的 EOM handle，当前暴露错误的包先获得保证，EOM 再返回
+不保证传递的同一错误。晚到 posting 引发的错误也通过同一个 helper。
+
+原 PDS 缓存首错响应，并阻止 CACK 越过它，直到源端 Clear。首错丢失后，有 SACK
+收据的源端可以发送 ACK Request；没有收据时可以重传原请求，两者都由 PDS 重放
+已缓存结果。后续错误副本丢失时，源端仍会得到保证传递的首错。非保证传递的尾部
+不必触发独立 Clear，消息记录可等到下条请求捎带的累计 Clear 后释放。
+
+`guaranteed_error_test` 通过实际网络包检查 RUD/ROD、NSCC 开关、首错丢失、首错
+与全部重复错误丢失、SACK 后查询、RUD 非 SOM 先到，以及后续请求清理状态。
+同一 PSN 的保证响应重放仍是同一个保证；测试按不同 PSN 检查恰好一个保证归属。
+消息记录容量耗尽时的无记录拒绝路径仍需独立完善，不能把普通记录路径的覆盖推广
+到所有资源耗尽错误。
+
 一个重要反例是：SEND 到达时没有 posting，随后应用投递了一个缓冲区。如果只在每个
 包上单独报错，这条已失败消息的尾部就可能写进新缓冲区。保留消息级错误状态能阻止
 这种错误；`semantic_error_test` 包含延迟尾包和重新投递的回归。

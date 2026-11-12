@@ -634,19 +634,20 @@
     },
     {
       "id": "SES-FIRST-ERROR",
-      "reference": "§3.4.6.1; §3.4.6.4.1",
+      "reference": "§3.4.4.3; §3.4.6.1; §3.4.6.4.1",
       "summary": "整条消息保留首错；IE/MSG_ERROR 不访问内存，终止尾部并保留错误完成数据",
       "status": "partial",
       "tests": [
         "semantic_error_test",
-        "libfabric_provider_processes"
+        "libfabric_provider_processes",
+        "guaranteed_error_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Late fragments cannot consume new postings; bounded failure-state exhaustion, IE, MSG_ERROR before SOM in RUD, error CQ header data, local reader exceptions, no reads after error and zero-placement SEND truncation tested. Informational error precedence, complete recovery/generation handling and other header formats remain open."
+      "evidence_note": "Late fragments cannot consume new postings; bounded failure-state exhaustion, IE, MSG_ERROR before SOM in RUD, error CQ header data, local reader exceptions, no reads after error and zero-placement SEND truncation tested. Informational error precedence, complete recovery/generation handling and other header formats remain open. Tracked messages guarantee only the first encountered error; repeated explicit errors are best effort, with cached replay/response-query and next-request Clear tested. Untracked bookkeeping-exhaustion rejection still needs message-scoped guarantee handling."
     },
     {
       "id": "PDS-CONTROL-OPEN",
