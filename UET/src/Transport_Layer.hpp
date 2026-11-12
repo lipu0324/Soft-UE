@@ -114,7 +114,8 @@ enum PDS_header_type{
     RUOD_req_header,    // RUOD request header
     RUOD_ack_header,    // RUOD acknowledgment header
     RUOD_cp_header,     // RUOD control packet header
-    nack_header         // Negative acknowledgment header
+    nack_header,        // Negative acknowledgment header
+    UUD_req_header      // Connectionless, unreliable datagram header (§3.5.10.14)
 };
 
 /**
@@ -152,6 +153,10 @@ enum PDS_next_hdr{
     UET_HDR_RESPONSE_DATA_SMALL,// Response header with small data
     UET_HDR_NONE                // No header
 };
+
+// Delivery modes shared by SES, PDS and runtime adapters. RUD preserves
+// exactly-once packet delivery; ROD additionally preserves packet order.
+enum pdc_mode { RUD, ROD, RUDI, UUD };
 
 /**
  * @brief PDS control type enumeration
@@ -234,7 +239,7 @@ struct PDS_RUOD_req_header
         uint8_t syn  : 1;           // PDC establishment request flag: 1 indicates PDC establishment request
         uint8_t rsvd1: 2;           // Reserved bits
     } PACKED flags;
-    uint16_t clear_psn_off;         // 16 bits, CLEAR_PSN offset encoding relative to PSN
+    int16_t clear_psn_off;          // §3.5.11.4.3: CLEAR_PSN = PSN + signed offset.
     uint32_t psn;                   // 32 bits, packet sequence number assigned to PDS request
     uint16_t spdcid;                // 16 bits, source PDCID, allocated by packet source
     uint16_t dpdcid;                // 16 bits, destination PDCID, allocated by packet destination
@@ -529,8 +534,13 @@ struct PDStoNET_pkt
         PDS_RUOD_ack_header RUOD_ack_header;    // RUOD acknowledgment header
         PDS_RUOD_cp_header RUOD_cp_header;      // RUOD control packet header
         PDS_nack_header nack_header;            // NACK header
+        struct {
+            ::PDS_type type;
+            PDS_next_hdr next_hdr;
+        } UUD_req_header; // Standard wire encoding is four bytes; no C++ serialization.
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
+    uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
 };
 
 
@@ -578,6 +588,7 @@ struct PDC_SES_req
     uint16_t orig_pdcid;     /**< DPDCID */
     uint32_t orig_psn;       /**< Original packet sequence number */
     uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
+    uint8_t delivery_mode = ROD; /**< UUD has no PDC and must never generate ACKs. */
 };
 /**
  * @struct PDC_SES_rsp
@@ -619,6 +630,7 @@ struct SES_PDC_rsp
  */
 struct PDS_PDC_req
 {
+    pdc_mode delivery_mode = ROD; /**< Context mode; carried locally, never serialized. */
     PDS_next_hdr next_hdr;  /**< Next header type */
     uint16_t tx_pkt_handle; /**< Transmit packet handle */
     SEStoPDS_pkt pkt;       /**< Request packet data */

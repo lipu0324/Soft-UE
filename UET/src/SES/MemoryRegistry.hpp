@@ -1,4 +1,5 @@
 #pragma once
+#include "IntegerAtomics.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -148,6 +149,29 @@ public:
         for (size_t i=0; i<8; ++i) bytes[i] = static_cast<uint8_t>(next >> (8*i));
         region.storage->write(offset,bytes.data(),bytes.size());
         return previous;
+    }
+    void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operands) {
+        const auto element_width=integer_atomic_width(datatype);
+        if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
+        if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
+        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic);
+        // §3.4.7.3: atomics need both read and write permission in addition
+        // to the explicit atomic capability of this simulator's MR model.
+        if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
+        for (size_t position=0;position<operands.size();position+=element_width) {
+            std::array<uint8_t,8> target_bytes{};
+            region.storage->read(offset+position,target_bytes.data(),element_width);
+            uint64_t target_value=0,operand_value=0;
+            for (size_t byte=0;byte<element_width;++byte) {
+                target_value|=uint64_t{target_bytes[byte]}<<(8*byte);
+                operand_value|=uint64_t{operands[position+byte]}<<(8*byte);
+            }
+            const auto result=integer_atomic_result(target_value,operand_value,operation,datatype);
+            for (size_t byte=0;byte<element_width;++byte) target_bytes[byte]=result>>(8*byte);
+            region.storage->write(offset+position,target_bytes.data(),element_width);
+        }
     }
 private:
     uint64_t next_key_ = 1;

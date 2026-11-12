@@ -53,13 +53,15 @@
       "summary": "Ethernet/IPv4/IPv6/原生 UET/UDP 封装",
       "status": "partial",
       "tests": [
-        "uet_wire_test"
+        "uet_wire_test",
+        "reference_wire_comparison"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "IPv4/IPv6/native/UDP and configurable native protocol tested; extension headers remain unsupported."
     },
     {
       "id": "WIRE-CRC",
@@ -67,13 +69,15 @@
       "summary": "CRC32C、网络序、UDP checksum 掩码、错误拒绝",
       "status": "partial",
       "tests": [
-        "uet_wire_test"
+        "uet_wire_test",
+        "reference_wire_comparison"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Network byte order, corruption and UDP checksum masking tested; trimmed/TSS/UFH cases remain open."
     },
     {
       "id": "WIRE-SES",
@@ -109,14 +113,16 @@
       "summary": "ROD 建连、数据和语义响应",
       "status": "partial",
       "tests": [
-        "endpoint_test",
-        "pds_fault_test"
+        "pds_recovery_test",
+        "pds_fault_test",
+        "pdc_lifecycle_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Missing-middle-packet go-back-N completes before RTO; duplicate and close-loss cases tested."
     },
     {
       "id": "PDS-RTO",
@@ -136,25 +142,32 @@
       "id": "PDS-RUD",
       "reference": "§3.5.20",
       "summary": "RUD 乱序窗口、重复消除及 SACK",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "pds_recovery_test",
+        "rud_window_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Out-of-order exactly-once delivery, holes, clear and wrap tested; SACK/ACK_CC variants remain open."
     },
     {
       "id": "PDS-UUD",
       "reference": "§3.5.7.5",
       "summary": "无连接 UUD 单包发送与本地完成",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "uud_delivery_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Single-packet local completion, loss without retry, missing receive and no PDC allocation tested."
     },
     {
       "id": "PDS-CLOSE",
@@ -162,13 +175,15 @@
       "summary": "完整 Clear/Close、资源复用与迟到报文",
       "status": "partial",
       "tests": [
-        "pds_fault_test"
+        "pdc_lifecycle_test",
+        "pds_recovery_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Normal close and lost command/ACK tested; SYN safety and complete late-packet/reuse matrix remain open."
     },
     {
       "id": "PDS-TRIM",
@@ -246,26 +261,32 @@
       "id": "SES-IMM",
       "reference": "Table 3-1",
       "summary": "WRITE IMM 与远端完成数据",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "native_atomic_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Fragmented WRITE immediate produces a separate target completion; complete addressing/profile matrix remains open."
     },
     {
       "id": "SES-ATOMIC",
       "reference": "Table 3-1; §3.4.2.5",
       "summary": "线上的非取回原子操作",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "native_atomic_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Signed/unsigned integer widths 8/16/32/64, non-fetching arithmetic/logical/bitwise/write; FP, fetch/CAS and semantic-control coverage remain open."
     },
     {
       "id": "SES-SIZE",
@@ -286,13 +307,14 @@
       "id": "API-FABRIC",
       "reference": "§2.2",
       "summary": "真实 libfabric 2.0 provider",
-      "status": "blocked",
+      "status": "missing",
       "tests": [],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "libfabric 2.0.0 dependency now builds; softue provider implementation and ABI tests remain missing."
     },
     {
       "id": "CMS-NSCC",
@@ -516,7 +538,8 @@
       "summary": "官方实现的进程级标准报文互通",
       "status": "blocked",
       "tests": [],
-      "profiles": []
+      "profiles": [],
+      "evidence_note": "Pinned official application builds; raw packet socket returns EPERM without CAP_NET_RAW. Parser comparison is not endpoint interoperability."
     }
   ]
 }

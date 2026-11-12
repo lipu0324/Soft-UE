@@ -1,6 +1,6 @@
 # UE 1.1 simulation implementation status
 
-This branch is the first working implementation increment of the agreed M0–M8
+This branch continues the implementation of the agreed M0–M8
 roadmap. It is **not a completed UE 1.1 stack** and does not claim conformance to
 AI Base, AI Full, HPC or Unified Local. Native capability discovery, the scenario
 validator and the machine-readable requirement inventory all keep those claims
@@ -15,17 +15,20 @@ by each regression, concrete remaining placeholders and the next gated work.
   clock, cancellable event timers and no per-PDC/manager threads in simulation
   mode. The original SES handler is exercised separately through the explicit
   legacy-wire regression.
-- A new asynchronous SES entry point supports experimental NO_OP, SEND into a
-  posted receive region, and fragmented WRITE into authorized registered memory.
+- A new asynchronous SES entry point supports NO_OP, SEND into a posted receive
+  region, fragmented WRITE, WRITE with immediate completion data, single-packet
+  DATAGRAM_SEND, and non-fetching 8/16/32/64-bit integer atomics.
   It uses the existing PDS/PDC implementation, not a replacement transport.
 - Registered memory is sparse, scoped by JobID and optionally PIDonFEP, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
-  immediate. Local unsigned-64 atomic storage primitives are tested; they are
-  **not yet exposed as network atomic operations**.
+  immediate. Network atomics support signed/unsigned integer types and min, max,
+  sum, difference, product, logical/bitwise operations and atomic write. Fetching,
+  compare-and-swap, floating-point types and semantic-control hints remain outside
+  this increment's advertised atomic capabilities.
 - A standard-wire subset explicitly encodes Ethernet, IPv4/IPv6, native UET/UDP,
-  CRC32C, RUD/ROD request headers, ACK, NACK, CP, standard SES requests and
+  CRC32C, RUD/ROD/UUD request headers, ACK, NACK, CP, standard SES requests and
   semantic responses. Encoding a header does not establish its complete protocol
-  implementation. Connectionless delivery, CC extensions, optimized/local
+  implementation. CC extensions, optimized/local
   headers, security and IPv6 extension headers are not implemented by this codec.
 - A deterministic store-and-forward fabric models directed links, serialization,
   propagation/FEC delay, bounded FIFO byte queues, tail/random packet loss,
@@ -87,15 +90,19 @@ wake callback without polling. Closing a host detaches both callbacks.
 
 `Endpoint::submit()` returns an operation ID; `poll_completion()` returns one
 completion per local operation, with a caller context and remote status where
-applicable. Unsupported READ/ATOMIC requests are rejected before transmission.
+applicable. Unsupported READ requests and unadvertised atomic operations/types
+are rejected before transmission. `LocalSuccess` for UUD means the local port
+accepted the datagram; it makes no claim about target receipt. `Success` for a
+reliable operation follows the semantic response. WRITE immediate data is
+delivered through a separate target completion without consuming a SEND receive.
 Posted SEND receive completions are separate from sender completions. A timeout
 does not prove that no remote bytes were written. Application code must not
 destroy its own endpoint or host reentrantly from a handler; it may close them
 and defer destruction to a later event.
 
 The current native endpoint uses PIDonFEP=1, Resource Index=1, standard SES
-headers and ROD. It does not implement complete relative/absolute addressing,
-all required memory-key formats, immediate data, tagged matching or full
+headers and ROD/RUD (or UUD for datagrams). It does not implement complete
+relative/absolute addressing, all required memory-key formats, tagged matching or full
 Profile message-size guarantees. Sparse storage tests at the 4GiB boundary do
 not establish an end-to-end 4GiB operation guarantee. Completed incoming message
 records are bounded at 4096; protocol-driven retirement and message-ID reuse
@@ -119,16 +126,32 @@ results are simulation parameters, not calibrated hardware performance.
 |---|---|
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
-| M2 | Working wire subset and selected ROD recovery cases; complete RUD/UUD, all close/reuse/error paths and official process interoperability remain open. |
-| M3 | Native NO_OP/SEND/WRITE and checked sparse memory; required atomic/immediate/addressing coverage and real libfabric provider remain open. |
+| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Full connection reuse/SYN safety, all control/error paths, CC ACK variants and official endpoint process interoperability remain open. |
+| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Complete addressing, all applicable AMO types/controls, long-running message retirement and real libfabric provider remain open. |
 | M4 | Basic packet-fabric substrate; congestion feedback and NSCC are not implemented. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 
-The implementation environment lacks CMake and the external libfabric build;
-package retrieval fails with proxy HTTP 503. Make-based builds and tests are
-the local validation path. CMake configuration, actual libfabric/provider ABI,
-and process-level interoperability with `uet-ref-prov` must be validated in an
-environment with those dependencies; they are not counted as passed here.
+Network access was restored on 2026-11-12. CMake/CTest, libfabric 2.0.0 and the
+pinned reference's `libuet_fabric.so`/`uet` application now build successfully.
+The actual `softue` libfabric provider is still unimplemented. The current cloud
+executor has no CAP_NET_RAW, so the reference application's raw-socket endpoint
+interoperability is not counted as passed. Parser comparison is separate evidence.
+
+The optional independent comparison builds a small C harness against the reference
+library, without linking the Soft-UE codec into that harness:
+
+```sh
+cmake -S . -B build/reference \
+  -DSOFTUE_REFERENCE_ROOT=/path/to/uet-ref-prov \
+  -DSOFTUE_LIBFABRIC_ROOT=/path/to/libfabric-2.0.0
+cmake --build build/reference -j2
+ctest --test-dir build/reference -R reference_wire_comparison --output-on-failure
+```
+
+It checks 24 native/UDP and IPv4/IPv6 fixtures across RUD, ROD, UUD, ACK, NACK
+and CP, including signed CLEAR/ACK offsets and CRC network byte order. It also
+rejects a corrupted payload. The pinned reference remains an external dependency;
+its private headers are used only by this optional test target.
 
 ## Traceability and normative review
 

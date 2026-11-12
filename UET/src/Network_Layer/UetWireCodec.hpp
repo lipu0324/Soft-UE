@@ -19,6 +19,7 @@ struct WireOptions {
     uint8_t dscp = 0;
     uint8_t ecn = 0;
     uint8_t hop_limit = 64;
+    uint8_t native_ip_protocol = 253; // Configurable fabric setting (§3.5.10).
 };
 struct DecodedPacket {
     WireOptions network;
@@ -32,7 +33,8 @@ class UetWireCodec {
 public:
     static uint32_t crc32c(const uint8_t* bytes, size_t length);
     static std::vector<uint8_t> encode(const PDStoNET_pkt& packet, const WireOptions& options);
-    static DecodedPacket decode(const uint8_t* bytes, size_t size, bool crc_enabled = true);
+    static DecodedPacket decode(const uint8_t* bytes, size_t size, bool crc_enabled = true,
+                                uint8_t native_ip_protocol = 253);
     static void mark_ecn(std::vector<uint8_t>& frame);
 };
 } // namespace UET::NetworkLayer

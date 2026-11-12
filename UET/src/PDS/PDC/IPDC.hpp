@@ -58,6 +58,9 @@ private:
    
 public:
     bool close_req;      /**< Close request flag */
+    bool hasPendingWork() const {
+        return (close_req && open_msg==0) || PDC::hasPendingWork();
+    }
 
     /**
      * @brief Initialize PDC instance

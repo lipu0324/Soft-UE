@@ -39,6 +39,7 @@
 #include <queue>
 #include <map>
 #include <set>
+#include <optional>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -58,13 +59,6 @@
  * @brief  PDC operation mode types
  * @details Defines the different modes of operation for PDC, including reliable unidirectional delivery, reliable ordered delivery, reliable unidirectional delivery - immediate, and unreliable unidirectional delivery  
  */
-enum pdc_mode
-{
-    RUD,   /**<  (Reliable Unidirectional Delivery) */
-    ROD,   /**<  (Reliable Ordered Delivery) */
-    RUDI,  /**< - (Reliable Unidirectional Delivery - Immediate) */
-    UUD    /**<  (Unreliable Unidirectional Delivery) */
-};
 
 /**
  * @enum pdc_state
@@ -474,6 +468,16 @@ public:
 
 protected:
     std::set<uint32_t> acknowledged_tx_;
+    // Suppress repeated go-back-N requests for the same missing PSN until it
+    // is acknowledged. RTO remains armed if that recovery burst is also lost.
+    std::optional<uint32_t> fast_retransmit_psn_;
+    // RUD's receive bitmap is represented by a bounded set in the behavioral
+    // model. Packet receipt and semantic completion are separate facts: a
+    // guaranteed response blocks CACK until the peer explicitly clears it.
+    std::set<uint32_t> received_rx_psns_;
+    std::set<uint32_t> completed_rx_psns_;
+    void clearReceivedPacketsThrough(uint32_t clear_through);
+    void advanceCumulativeAck();
     UET::Runtime::Services* runtime_ = nullptr;
 public:
 
@@ -512,12 +516,13 @@ public:
      */
     static bool isClose(PDS_Nack_Codes nack_code)
     {
-        return (nack_code == UET_NO_PDC_AVAIL || 
-                nack_code == UET_NO_CCC_AVAIL || 
-                nack_code == UET_NO_BITMAP || 
-                nack_code == UET_INV_DPDCID || 
+        // §3.5.12.7: resource shortages are retriable. Fatal connection errors
+        // invalidate the PDC; confusing these classes closes healthy flows.
+        return (nack_code == UET_INV_DPDCID ||
                 nack_code == UET_PDC_HDR_MISMATCH || 
-                nack_code == UET_NO_RESOURCE);
+                nack_code == UET_CLOSING || nack_code == UET_CLOSING_IN_ERR ||
+                nack_code == UET_GTD_RESP_UNAVAIL || nack_code == UET_INVALID_SYN ||
+                nack_code == UET_PDC_MODE_MISMATCH || nack_code == UET_UNEXP_EVENT);
     }
 
     // ==================== Common implemented functions ====================

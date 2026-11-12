@@ -33,6 +33,9 @@ bool T_PDC::initPDC(uint16_t id)
 {
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    fast_retransmit_psn_.reset();
+    received_rx_psns_.clear();
+    completed_rx_psns_.clear();
     // FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -143,9 +146,11 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     if (!secure_psn)
     {
         DPDCID = pkt->PDS_header.RUOD_req_header.spdcid; // Set destination PDC ID
+        start_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off;
+        mode = pkt->PDS_header.RUOD_req_header.type==RUD_REQ?RUD:ROD;
         // Determine starting receive PSN based on SYN packet
         rx_cur_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off - 1;
-        cack_psn = rx_cur_psn - 1;
+        cack_psn = rx_cur_psn;
         tx_cur_psn = rx_cur_psn;
         clear_psn = tx_cur_psn - 1;
         rx_clear_psn = rx_cur_psn; // Record TX clear PSN
@@ -172,8 +177,8 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     else
     { // Packet has error, send NACK and close
         sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr);
-        state = CLOSED;
-        processClose();
+        // A later SYN packet may arrive before the starting packet. Keep the
+        // newly allocated context so the missing PSN can establish it (§3.5.8.1).
     }
 }
 
@@ -462,17 +467,9 @@ void T_PDC::netRxAck(PDStoNET_pkt *pkt)
     // FUNCTION_LOG_EXIT();
 }
 
-void T_PDC::netRxNack(PDStoNET_pkt *pkt)
+void T_PDC::netRxNack(PDStoNET_pkt* packet)
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] net rx nack" << std::endl;
-    if (pkt->PDS_header.nack_header.nack_code == 0x01)
-    {
-        rxNack(pkt); // Handle retransmittable NACK
-    }
-    else if (isClose(pkt->PDS_header.nack_header.nack_code))
-    {
-        reqClose(); // NACK code indicates connection needs to be closed
-    }
+    rxNack(packet);
 }
 
 void T_PDC::netRxCm(PDStoNET_pkt *pkt)
@@ -484,6 +481,12 @@ void T_PDC::netRxCm(PDStoNET_pkt *pkt)
             rx_cur_psn = pkt->PDS_header.RUOD_cp_header.psn;
             LOG_INFO(__FUNCTION__, formatLogMessage("TPDC received close command packet with correct PSN, update rx_cur_psn:" + std::to_string(rx_cur_psn)));
         }
+        // §3.5.8.3: Close Command is an implicit clear of forward PSNs and
+        // an ACK for all return PSNs. A lost Clear CP must not deadlock close.
+        tx_ack_buffer.clear(); tx_pkt_buffer.clear(); tx_pkt_map.clear();
+        clearAllPacketTimers();
+        cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
+        unack_cnt=0; allACK=true;
         beginClose(); // Close command
     }
     else if (!bad_psn)
@@ -505,7 +508,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     std::stringstream pkt_info;
     pkt_info << "Process request packet - PSN: " << pkt->PDS_header.RUOD_req_header.psn
                 << ", rx_cur_psn: " << rx_cur_psn
-                << ", clear_psn: " << pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.clear_psn_off;
+                << ", clear_psn: " << pkt->PDS_header.RUOD_req_header.psn + pkt->PDS_header.RUOD_req_header.clear_psn_off;
     LOG_DEBUG(__FUNCTION__, formatLogMessage(pkt_info.str()));
 
     chkRxError(pkt); // Check receive packet error

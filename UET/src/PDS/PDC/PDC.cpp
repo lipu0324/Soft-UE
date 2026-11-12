@@ -28,6 +28,7 @@
 
 
 #include "PDC.hpp"
+#include <algorithm>
 #include <functional>
 
 /**
@@ -131,7 +132,7 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
     meta.next_hdr = pkt->PDS_header.RUOD_req_header.next_hdr;
     meta.spdcid = pkt->PDS_header.RUOD_req_header.spdcid;
     meta.psn = pkt->PDS_header.RUOD_req_header.psn;
-    meta.clear_psn = meta.psn - pkt->PDS_header.RUOD_req_header.clear_psn_off;
+    meta.clear_psn = meta.psn + pkt->PDS_header.RUOD_req_header.clear_psn_off;
     meta.syn = pkt->PDS_header.RUOD_req_header.flags.syn;
     meta.retx = pkt->PDS_header.RUOD_req_header.flags.retx;
     meta.ar = pkt->PDS_header.RUOD_req_header.flags.ar;
@@ -223,6 +224,8 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
             if (unack_cnt > 0) --unack_cnt;
         } else ++it;
     }
+    if (fast_retransmit_psn_ && !tx_pkt_buffer.count(*fast_retransmit_psn_))
+        fast_retransmit_psn_.reset();
     while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
     pause_pdc = unack_cnt >= MPR;
     if ((ack_req_flag & 1u) && (valid_explicit || valid_cumulative)) gen_cm = CLR_CMD;
@@ -234,84 +237,49 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
  * @brief Update RX PSN tracker
  * @param meta Received packet metadata
  */
-void PDC::updateRxPsnTracker(RX_pkt_meta *meta){
-    //FUNCTION_LOG_ENTRY();
-
-    if(!meta) {
-        LOG_ERROR(__FUNCTION__, "接收包元数据指针为空");
-        //FUNCTION_LOG_EXIT();
-        return;
-    }
-
-    uint32_t psn = meta->psn;
-    uint32_t cpsn = meta->clear_psn;
-    rx_clear_psn = std::max(rx_clear_psn, meta->clear_psn); 
-    
-    std::stringstream before_state;
-    before_state << "Before update state - rx_cur_psn: " << rx_cur_psn
-                    << ", cack_psn: " << cack_psn
-                    << ", Received psn: " << psn
-                    << ", Received clear_psn: " << cpsn;
-    LOG_DEBUG(__FUNCTION__, before_state.str());
-
-    if(psn == rx_cur_psn + 1){
-        rx_cur_psn = psn;
-        std::cout << getCurrentTimestamp() << "I_PDC update RX PSN - rx_cur_psn: " << rx_cur_psn << std::endl;
-        LOG_INFO(__FUNCTION__, "Receive PSN sequential update");
-    }
-
-    if(cpsn > cack_psn){
-        uint32_t old_cack = cack_psn;
-        
-        for (uint32_t i = cack_psn; i < cpsn; i++)
-        {
-            if (tx_ack_buffer.count(i))
-            {
-                tx_pkt_map.erase(i);
-                tx_ack_buffer.erase(i);
-            }
-        }
-        cack_psn = cpsn;    
-        std::stringstream cack_update;
-        cack_update << "Cumulative ACK PSN update - old cack_psn: " << old_cack << ", New cack_psn: " << cack_psn;
-        LOG_INFO(__FUNCTION__, cack_update.str());
-        std::cout << getCurrentTimestamp() << "I_PDC update cumulative ACK PSN - cack_psn: " << cack_psn << std::endl;
-    }
-
-    if(Enb_ACK_Per_Pkt && meta->som == false){
-        uint16_t pl = meta->payload_len;
-        if(pl >= ACK_Gen_Min_Pkt_Add) ACK_GEN_COUNT += pl;
-        else ACK_GEN_COUNT += ACK_Gen_Min_Pkt_Add;
-        
-        if(ACK_GEN_COUNT >= ACK_Gen_Trigger){
-            gen_ack = true;
-            ACK_GEN_COUNT = 0;
-            LOG_INFO(__FUNCTION__, "ACK generation threshold reached, set generate ACK flag");
-        std::cout << getCurrentTimestamp() << "I_PDC reached ACK generation threshold, preparing to generate ACK" << std::endl;
-        }
-    }
-
-//FUNCTION_LOG_EXIT();
-}
-
-/**
- * @brief Update RX PSN tracker with guaranteed delivery
- * @param meta Received packet metadata
- * @param gtd_del Guaranteed delivery flag
- */
-void PDC::updateRxPsnTracker(RX_pkt_meta *meta, bool gtd_del)
+void PDC::advanceCumulativeAck()
 {
-    if (!gtd_del)
-    {
-        cack_psn = meta->psn;
-    }
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] update_rx_psn_tracker,rx_cur_psn:" << rx_cur_psn << "cack_psn:" << cack_psn << std::endl;
-    if (rx_cur_psn == cack_psn)
-        allACK = true;
-    else
-        allACK = false;
+    // §3.5.12.5: CACK cannot skip either a missing packet or a guaranteed
+    // semantic response that the peer has not yet cleared.
+    while (completed_rx_psns_.erase(cack_psn+1)) ++cack_psn;
+    allACK = cack_psn == rx_cur_psn;
 }
 
+void PDC::clearReceivedPacketsThrough(uint32_t clear_through)
+{
+    const uint32_t advance = clear_through-rx_clear_psn;
+    if (advance>=0x80000000u) return;
+    // A clear may cover only already received contiguous PSNs. Otherwise a
+    // malformed peer could silently discard a hole in the RUD receive window.
+    if (clear_through-rx_cur_psn && clear_through-rx_cur_psn<0x80000000u) return;
+    rx_clear_psn=clear_through;
+    for (auto entry=tx_ack_buffer.begin();entry!=tx_ack_buffer.end();) {
+        if (clear_through-entry->first<0x80000000u) {
+            completed_rx_psns_.insert(entry->first);
+            entry=tx_ack_buffer.erase(entry);
+        } else ++entry;
+    }
+    for (auto sequence=received_rx_psns_.begin();sequence!=received_rx_psns_.end();) {
+        if (clear_through-*sequence<0x80000000u) sequence=received_rx_psns_.erase(sequence);
+        else ++sequence;
+    }
+    advanceCumulativeAck();
+}
+
+void PDC::updateRxPsnTracker(RX_pkt_meta* metadata)
+{
+    if (!metadata) return;
+    received_rx_psns_.insert(metadata->psn);
+    while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
+    clearReceivedPacketsThrough(metadata->clear_psn);
+}
+
+void PDC::updateRxPsnTracker(RX_pkt_meta* metadata, bool guaranteed_delivery)
+{
+    if (!metadata) return;
+    if (!guaranteed_delivery) completed_rx_psns_.insert(metadata->psn);
+    advanceCumulativeAck();
+}
 
 /**
  * @brief Retransmit specified PSN packet
@@ -373,6 +341,9 @@ void PDC::freePDC()
 {
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    fast_retransmit_psn_.reset();
+    received_rx_psns_.clear();
+    completed_rx_psns_.clear();
     closing = false;
     close_error = false;
     gen_cm = NONE;
@@ -524,6 +495,7 @@ void PDC::fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt)
     req.orig_psn = meta.psn;
     req.orig_pdcid = meta.spdcid;
     req.source_fep = dst_fep;
+    req.delivery_mode = mode;
 
     if (public_ses_req_queue) {
         public_ses_req_queue->push(req);
@@ -564,26 +536,27 @@ void PDC::fwdRsp2SES(SEStoPDS_pkt *pkt)
  * @brief Check reception error
  * @param pkt Received packet
  */
-void PDC::chkRxError(PDStoNET_pkt *pkt)
+void PDC::chkRxError(PDStoNET_pkt* packet)
 {
-    uint32_t psn = pkt->PDS_header.RUOD_req_header.psn;
-
-    if (psn > rx_cur_psn + 1) {
-        std::cout << getCurrentTimestamp() << formatLogMessage("收到预期外的psn") << std::endl;
-        if (pkt->PDS_header.RUOD_req_header.flags.syn == 1)
-            error_chk = INV_SYN;
-        else
-            error_chk = OOO;
-    } else if (psn < rx_clear_psn) {
-        std::cout << getCurrentTimestamp() << formatLogMessage("PSN less than clear_psn, discard") << std::endl;
-        error_chk = DROP;
-    } else if (psn >= rx_clear_psn && psn <= rx_cur_psn) {
-        std::cout << getCurrentTimestamp() << formatLogMessage("重复包") << std::endl;
-        error_chk = ACK_ERROR;
-    } else {
-        std::cout << getCurrentTimestamp() << formatLogMessage("包正常") << std::endl;
-        error_chk = OPEN;
-    }
+    const auto& header=packet->PDS_header.RUOD_req_header;
+    const uint32_t sequence=header.psn;
+    const uint32_t distance_from_clear=sequence-rx_clear_psn;
+    const uint32_t distance_from_contiguous=sequence-rx_cur_psn;
+    if ((header.type==RUD_REQ)!=(mode==RUD)) {
+        error_chk=INV_SYN;
+    } else if (header.flags.syn && sequence-header.psn_off!=start_psn) {
+        error_chk=INV_SYN;
+    } else if (!distance_from_clear || distance_from_clear>=0x80000000u) {
+        error_chk=DROP;
+    } else if (received_rx_psns_.count(sequence) || !distance_from_contiguous ||
+               distance_from_contiguous>=0x80000000u) {
+        error_chk=ACK_ERROR;
+    } else if (mode==ROD && distance_from_contiguous>1) {
+        error_chk=OOO;
+    } else if (mode==RUD && distance_from_contiguous>MPR) {
+        // Bounded receive state is the simulator's configured packet window.
+        error_chk=DROP;
+    } else error_chk=OPEN;
 }
 
 /**
@@ -654,58 +627,16 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt *p)
  * @brief Process Clear_cmd control message 
  * @param p Data packet to process // 需要处理的数据包
  */
-void PDC::rxCtrlClearCmd(PDStoNET_pkt *p)
+void PDC::rxCtrlClearCmd(PDStoNET_pkt* packet)
 {
-    if (!p) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("输入数据包指针为空"));
-        return;
-    }
-
-    uint32_t clear_psn_cmd = p->PDS_header.RUOD_cp_header.payload;
-
-    std::stringstream cmd_info;
-    cmd_info << "Receive Clear Command - CLEAR_PSN: " << clear_psn_cmd
-                << ", SPDCID: " << p->PDS_header.RUOD_cp_header.spdcid
-                << ", DPDCID: " << p->PDS_header.RUOD_cp_header.dpdcid;
-    LOG_INFO(__FUNCTION__, formatLogMessage(cmd_info.str()));
-
-    std::cout << getCurrentTimestamp() << formatLogMessage("rx_ctrl_clear_cmd - CLEAR_PSN: ") << clear_psn_cmd << std::endl;
-
-    if ((clear_psn_cmd - rx_cur_psn) != 0 && (clear_psn_cmd - rx_cur_psn) < 0x80000000u) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("PSN in Clear Command exceeds current cumulative acknowledgment PSN"));
-        std::cout << getCurrentTimestamp() << formatLogMessage("Invalid CLEAR_PSN: ") << clear_psn_cmd
-                    << ", Current cack_psn: " << cack_psn << std::endl;
-        return;
-    }
-
-    std::cout << getCurrentTimestamp() << formatLogMessage("Clear ACK buffer, range: ") << cack_psn
-                << " 到 " << clear_psn_cmd << std::endl;
-
-    auto it = tx_ack_buffer.begin();
-    while (it != tx_ack_buffer.end()) {
-        if (it->first <= clear_psn_cmd) {
-            std::cout << getCurrentTimestamp() << formatLogMessage("Delete PSN from ACK buffer: ") << it->first << std::endl;
-            LOG_DEBUG(__FUNCTION__, formatLogMessage("Delete PSN from ACK buffer: " + std::to_string(it->first)));
-            tx_pkt_map.erase(it->first);
-            it = tx_ack_buffer.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    if ((clear_psn_cmd - cack_psn) < 0x80000000u) cack_psn = clear_psn_cmd;
-
-    std::stringstream state_info;
-    state_info << "Clear Command processing complete - Clear range: 0 到 " << clear_psn_cmd
-                << ", Remaining ACK buffer size: " << tx_ack_buffer.size();
-    LOG_INFO(__FUNCTION__, formatLogMessage(state_info.str()));
-
-    std::cout << getCurrentTimestamp() << formatLogMessage("Clear Command处理完成，Remaining ACK buffer size: ")
-                << tx_ack_buffer.size() << std::endl;
-
-    if (p->PDS_header.RUOD_cp_header.flags.ar) {
-        LOG_WARN(__FUNCTION__, formatLogMessage("Clear Command包含AR标志，这可能是协议违规"));
-        std::cout << getCurrentTimestamp() << formatLogMessage("Warning: Clear Command set AR flag") << std::endl;
-    }
+    if (!packet) return;
+    const auto previous_cumulative_ack=cack_psn;
+    clearReceivedPacketsThrough(packet->PDS_header.RUOD_cp_header.payload);
+    // §3.5.11.4: publish a newly advanced CACK even when no SES traffic is
+    // pending. In RUD, clearing one response can release later packets that
+    // were processed out of order, including the end-of-message packet.
+    if (cack_psn!=previous_cumulative_ack)
+        sendAck(UET_HDR_NONE,0,0,cack_psn,nullptr,false);
 }
 
 /**
@@ -849,8 +780,8 @@ void PDC::sendCloseAck()
     pkt.PDS_type = RUOD_ack_header;
     pkt.PDS_header.RUOD_ack_header.type = ACK;
     pkt.PDS_header.RUOD_ack_header.next_hdr = UET_HDR_NONE;
-    pkt.PDS_header.RUOD_ack_header.cack_psn = cack_psn + 1;
-    pkt.PDS_header.RUOD_ack_header.ack_psn_off = rx_cur_psn - cack_psn - 1;
+    pkt.PDS_header.RUOD_ack_header.cack_psn = rx_cur_psn;
+    pkt.PDS_header.RUOD_ack_header.ack_psn_off = 0;
     pkt.PDS_header.RUOD_ack_header.dpdcid = DPDCID;
     pkt.PDS_header.RUOD_ack_header.spdcid = SPDCID;
 
@@ -1067,57 +998,49 @@ void PDC::getCloseStatus(int& unack_cnt_out, bool& allACK_out, int& open_msg_out
  * @brief 处理接收到的NACK包
  * @param pkt NACK包
  */
-void PDC::rxNack(PDStoNET_pkt *pkt){
-    //FUNCTION_LOG_ENTRY();
-
-    if(!pkt) {
-        LOG_ERROR(__FUNCTION__, "输入数据包指针为空");
-        //FUNCTION_LOG_EXIT();
+void PDC::rxNack(PDStoNET_pkt* packet)
+{
+    if (!packet) return;
+    const auto& negative_ack = packet->PDS_header.nack_header;
+    if (isClose(negative_ack.nack_code)) {
+        close_error = true;
         return;
     }
 
-    uint32_t psn = pkt->PDS_header.nack_header.nack_psn;
-
-    
-    std::stringstream nack_info;
-    nack_info << "接收NACK - PSN: " << psn
-                << ", nack_code: " << pkt->PDS_header.nack_header.nack_code;
-    LOG_WARN(__FUNCTION__, nack_info.str());
-    std::cout << getCurrentTimestamp() << "PDC接收NACK - PSN: " << psn << std::endl;
-
-    if(isClose(pkt->PDS_header.nack_header.nack_code)){
-        LOG_INFO(__FUNCTION__, "收到关闭NACK，设置关闭错误标志");
-        std::cout << getCurrentTimestamp() << "PDC收到关闭NACK，触发关闭错误" << std::endl;
-        close_error = true;
-    }else{
-        if(tx_pkt_map.find(psn) == tx_pkt_map.end()) {
-            LOG_ERROR(__FUNCTION__, "未找到对应PSN的发送包元数据");
-            //FUNCTION_LOG_EXIT();
-            return;
-        }
-
-        TX_pkt_meta meta = tx_pkt_map.at(psn);
-
-        if(meta.retry_cnt < Max_RTO_Retx_Cnt){
-            meta.retry_cnt ++;
-            meta.rto = Base_RTO * (1 << meta.retry_cnt) ;
-        
-            std::stringstream retry_info;
-            retry_info << "Retransmit packet - PSN: " << psn
-                        << ", retry_cnt: " << meta.retry_cnt
-                        << ", new_rto: " << meta.rto;
-            LOG_INFO(__FUNCTION__, retry_info.str());
-            std::cout << getCurrentTimestamp() << "I_PDCRetransmit packet - PSN: " << psn
-                        << ", retry_cnt: " << meta.retry_cnt << std::endl;
-        
-            reTx(psn);
-        }else{
-            LOG_ERROR(__FUNCTION__, "重传次数超限，设置关闭错误标志");
-            std::cout << getCurrentTimestamp() << "I_PDC重传次数超限，触发关闭错误" << std::endl;
-            close_error = true;
-        }
+    if (negative_ack.nack_code == UET_ROD_OOO) {
+        // §3.5.12.7: the payload is the receiver's next expected PSN.
+        // Retransmitting only nack_psn would repeatedly send the packet that
+        // arrived too early, leaving the actual gap to wait for its RTO.
+        const uint32_t expected_psn = negative_ack.payload;
+        const uint32_t outstanding_span = tx_cur_psn - clear_psn;
+        const uint32_t expected_distance = expected_psn - clear_psn;
+        if (!expected_distance || expected_distance >= outstanding_span ||
+            !tx_pkt_buffer.count(expected_psn) || fast_retransmit_psn_ == expected_psn) return;
+        fast_retransmit_psn_ = expected_psn;
+        std::vector<uint32_t> recovery_sequences;
+        for (const auto& outstanding : tx_pkt_buffer)
+            if (outstanding.first - expected_psn < tx_cur_psn - expected_psn)
+                recovery_sequences.push_back(outstanding.first);
+        // Unsigned distance preserves transmit order across the 32-bit wrap.
+        std::sort(recovery_sequences.begin(),recovery_sequences.end(),[expected_psn](uint32_t left,uint32_t right) {
+            return left - expected_psn < right - expected_psn;
+        });
+        for (const auto sequence : recovery_sequences) txRto(sequence);
+        return;
     }
-    //FUNCTION_LOG_EXIT();
+
+    switch (negative_ack.nack_code) {
+    case UET_TRIMMED: case UET_TRIMMED_LASTHOP: case UET_TRIMMED_ACK:
+    case UET_NO_PKT_BUFFER: case UET_NO_GTD_DEL_AVAIL: case UET_NO_SES_MSG_AVAIL:
+    case UET_PSN_OOR_WINDOW: case UET_PKT_NOT_RCVD: case UET_ACK_WITH_DATA:
+    case UET_RCVR_INFER_LOSS:
+        txRto(negative_ack.nack_psn);
+        break;
+    default:
+        // Resource/SES-processing notifications retain the existing RTO.
+        // Immediate resend here can make two zero-time endpoints livelock.
+        break;
+    }
 }
 
 /**
@@ -1135,12 +1058,12 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     p.dst_fep = dst_fep;
     p.src_fep = src_fep;
     p.PDS_type = RUOD_req_header;
-    p.PDS_header.RUOD_req_header.type = ROD_REQ;
+    p.PDS_header.RUOD_req_header.type = mode==RUD?RUD_REQ:ROD_REQ;
     p.PDS_header.RUOD_req_header.next_hdr = next_hdr;
     p.PDS_header.RUOD_req_header.flags.syn = syn;
     p.PDS_header.RUOD_req_header.flags.retx = retx;
     p.PDS_header.RUOD_req_header.flags.ar = ar;
-    p.PDS_header.RUOD_req_header.clear_psn_off =psn - clear_psn ;
+    p.PDS_header.RUOD_req_header.clear_psn_off = static_cast<int16_t>(clear_psn-psn);
     p.PDS_header.RUOD_req_header.psn = psn;
     p.PDS_header.RUOD_req_header.spdcid = SPDCID;
     if(syn == 0)p.PDS_header.RUOD_req_header.dpdcid = DPDCID;
@@ -1326,6 +1249,7 @@ void PDC::txReq(PDS_PDC_req *req){
         return;
     }
 
+    if (tx_cur_psn==start_psn) mode=req->delivery_mode;
     uint32_t psn = setPsn();
 
     

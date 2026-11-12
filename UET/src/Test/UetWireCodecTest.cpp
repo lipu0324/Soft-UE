@@ -37,6 +37,12 @@ int main() {
             CHECK(decoded.packet.SESpkt.payload==packet.SESpkt.payload);
             CHECK(decoded.network.ipv6==ipv6); CHECK(decoded.network.udp==udp);
             CHECK(decoded.network.entropy==0xbeef);
+            if (udp) {
+                auto nonzero_checksum=bytes;
+                const size_t udp_header=14+(ipv6?40:20);
+                nonzero_checksum[udp_header+6]=0x12; nonzero_checksum[udp_header+7]=0x34;
+                CHECK(UetWireCodec::decode(nonzero_checksum.data(),nonzero_checksum.size(),crc).packet.SESpkt.payload==packet.SESpkt.payload);
+            }
             UetWireCodec::mark_ecn(bytes);
             CHECK(UetWireCodec::decode(bytes.data(),bytes.size(),crc).network.ecn==3);
             if (!ipv6) {
@@ -61,6 +67,10 @@ int main() {
         CHECK(UetWireCodec::decode(control_bytes.data(),control_bytes.size()).packet.PDS_header.RUOD_cp_header.ctl_type==9);
         auto unsupported=packet; unsupported.SESpkt.bth_header.Standard_Header.version=1;
         check_throws<std::invalid_argument>([&] { UetWireCodec::encode(unsupported,{}); });
+        WireOptions configured; configured.native_ip_protocol=252;
+        const auto configured_frame=UetWireCodec::encode(packet,configured);
+        CHECK(UetWireCodec::decode(configured_frame.data(),configured_frame.size(),true,252).packet.SESpkt.payload==packet.SESpkt.payload);
+        check_throws<std::invalid_argument>([&] { UetWireCodec::decode(configured_frame.data(),configured_frame.size()); });
         std::cout << "PASS: golden PDS/SES bytes, eight IP/UDP/CRC combinations, corruption, ECN and truncation\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

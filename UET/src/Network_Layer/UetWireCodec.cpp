@@ -67,6 +67,12 @@ void put_semantic(Bytes& out, const PDStoNET_pkt& packet, PDS_next_hdr next) {
         if (h.som) put(out,h.diff.som_true.header_data,8);
         else put(out,(uint64_t{h.diff.som_false.payload_length}<<32)|h.diff.som_false.message_offset,8);
         put(out,h.request_length,4);
+        if (h.opcode==3) {
+            const auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
+            if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
+            put(out,atomic.atomic_opcode,1); put(out,atomic.atomic_datatype,1);
+            put(out,atomic.semantic_contol,1); put(out,0,1);
+        }
     } else if (next == UET_HDR_RESPONSE) {
         if (packet.SESpkt.bth_type != Semantic_Response_Header) throw std::invalid_argument("SES header type mismatch");
         const auto& h = packet.SESpkt.bth_header.Semantic_Response_Header;
@@ -107,6 +113,13 @@ void get_semantic(Reader& r, PDStoNET_pkt& packet, PDS_next_hdr next) {
             h.diff.som_false.message_offset=data&0xffffffff;
         }
         h.request_length=r.take(4);
+        if (h.opcode==3) {
+            packet.SESpkt.eth_type=Atomic_Operation_Extension_Header;
+            auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
+            atomic.atomic_opcode=r.take(1); atomic.atomic_datatype=r.take(1);
+            atomic.semantic_contol=r.take(1);
+            if (r.take(1)) throw std::invalid_argument("reserved atomic extension bits");
+        }
     } else if (next == UET_HDR_RESPONSE) {
         packet.SESpkt.bth_type=Semantic_Response_Header;
         auto& h=packet.SESpkt.bth_header.Semantic_Response_Header;
@@ -155,6 +168,12 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         put(out,(11<<11)|(h.ctl_type<<7)|(h.flags.isrod<<5)|(h.flags.retx<<4)|(h.flags.ar<<3)|(h.flags.syn<<2),2);
         put(out,h.probe_opaque,2); put(out,h.psn,4); put(out,h.spdcid,2);
         put(out,h.flags.syn ? (h.pdc_info<<12)|h.psn_off : h.dpdcid,2); put(out,h.payload,4);
+    } else if (packet.PDS_type == UUD_req_header) {
+        next=packet.PDS_header.UUD_req_header.next_hdr;
+        if (packet.PDS_header.UUD_req_header.type!=UUD_REQ)
+            throw std::invalid_argument("invalid UUD packet type");
+        // §3.5.10.14: no sequence, connection ID or acknowledgement state.
+        put(out,(6u<<11)|(next_wire(next)<<7),2); put(out,0,2);
     } else throw std::invalid_argument("PDS wire format not implemented");
     put_semantic(out,packet,next);
     return out;
@@ -168,7 +187,7 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         packet.PDS_type=RUOD_req_header; auto& h=packet.PDS_header.RUOD_req_header;
         h.type=static_cast<PDS_type>(type); h.next_hdr=next;
         h.flags.retx=(flags>>4)&1; h.flags.ar=(flags>>3)&1; h.flags.syn=(flags>>2)&1;
-        h.clear_psn_off=r.take(2); h.psn=r.take(4); h.spdcid=r.take(2);
+        h.clear_psn_off=static_cast<int16_t>(r.take(2)); h.psn=r.take(4); h.spdcid=r.take(2);
         const auto destination=r.take(2);
         if (h.flags.syn) { h.pdc_info=destination>>12; h.psn_off=destination&0xfff; }
         else h.dpdcid=destination;
@@ -193,6 +212,12 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         const auto destination=r.take(2);
         if (h.flags.syn) { h.pdc_info=destination>>12; h.psn_off=destination&0xfff; } else h.dpdcid=destination;
         h.payload=r.take(4); next=UET_HDR_NONE;
+    } else if (type==6) {
+        // UUD flags/reserved bits are ignored on reception (§3.5.10.14).
+        r.take(2);
+        packet.PDS_type=UUD_req_header;
+        packet.PDS_header.UUD_req_header.type=UUD_REQ;
+        packet.PDS_header.UUD_req_header.next_hdr=next;
     } else throw std::invalid_argument("PDS wire format not implemented");
     get_semantic(r,packet,next);
     return packet;
@@ -218,11 +243,11 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
     const size_t ip_begin=out.size();
     if (o.ipv6) {
         put(out,(6u<<28)|((uint32_t{o.dscp}<<2|o.ecn)<<20),4);
-        put(out,ip_length-40,2); put(out,o.udp?17:253,1); put(out,o.hop_limit,1);
+        put(out,ip_length-40,2); put(out,o.udp?17:o.native_ip_protocol,1); put(out,o.hop_limit,1);
         out.insert(out.end(),o.source.ip.begin(),o.source.ip.end()); out.insert(out.end(),o.destination.ip.begin(),o.destination.ip.end());
     } else {
         put(out,0x45,1); put(out,(o.dscp<<2)|o.ecn,1); put(out,ip_length,2);
-        put(out,0,2); put(out,0x4000,2); put(out,o.hop_limit,1); put(out,o.udp?17:253,1); put(out,0,2);
+        put(out,0,2); put(out,0x4000,2); put(out,o.hop_limit,1); put(out,o.udp?17:o.native_ip_protocol,1); put(out,0,2);
         out.insert(out.end(),o.source.ip.begin(),o.source.ip.begin()+4);
         out.insert(out.end(),o.destination.ip.begin(),o.destination.ip.begin()+4);
         const auto checksum=ip_checksum(out.data()+ip_begin);
@@ -235,15 +260,15 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
     if (o.crc) {
         const auto start=ip_begin+(o.ipv6?8:12);
         const auto crc=crc32c(out.data()+start,out.size()-start);
-        for (size_t i=0;i<4;++i) out.push_back(static_cast<uint8_t>(crc>>(8*i)));
+        put(out,crc,4); // §3.5.26: CRC trailer uses network byte order.
     }
     return out;
 }
 
-DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled) {
+DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol) {
     if (!bytes || size<34) throw std::invalid_argument("truncated Ethernet/IP frame");
     DecodedPacket result;
-    auto& o=result.network; o.crc=crc_enabled;
+    auto& o=result.network; o.crc=crc_enabled; o.native_ip_protocol=native_ip_protocol;
     std::copy_n(bytes,6,o.destination.mac.begin()); std::copy_n(bytes+6,6,o.source.mac.begin());
     const auto ether=get(bytes+12,2);
     if (ether!=0x0800 && ether!=0x86dd) throw std::invalid_argument("unsupported EtherType");
@@ -262,21 +287,28 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         end=ip_begin+get(ip+2,2); protocol=ip[9]; o.hop_limit=ip[8]; o.dscp=ip[1]>>2; o.ecn=ip[1]&3;
         std::copy_n(ip+12,4,o.source.ip.begin()); std::copy_n(ip+16,4,o.destination.ip.begin());
     }
-    if (protocol!=17 && protocol!=253) throw std::invalid_argument("unsupported IP protocol");
+    if (protocol!=17 && protocol!=native_ip_protocol) throw std::invalid_argument("unsupported IP protocol");
     o.udp=protocol==17;
     const size_t transport=o.udp?8:4, start=ip_begin+ip_size;
     if (!o.hop_limit || end>size || end<start+transport+2+(crc_enabled?4:0))
         throw std::invalid_argument("invalid IP length or hop limit");
     o.entropy=get(bytes+start,2);
     if (o.udp) {
-        if (get(bytes+start+2,2)!=49150 || get(bytes+start+4,2)!=end-start || get(bytes+start+6,2)!=0)
+        if (get(bytes+start+2,2)!=49150 || get(bytes+start+4,2)!=end-start)
             throw std::invalid_argument("unsupported or invalid UET UDP header");
     } else if (get(bytes+start+2,2)!=0) throw std::invalid_argument("reserved entropy bits");
     if (crc_enabled) {
         const auto crc_start=ip_begin+(o.ipv6?8:12);
-        const auto crc=crc32c(bytes+crc_start,end-crc_start-4);
-        uint32_t actual=0;
-        for (size_t i=0;i<4;++i) actual|=uint32_t{bytes[end-4+i]}<<(8*i);
+        uint32_t crc;
+        if (o.udp) {
+            // §3.5.10: ignore UDP checksum on receive. §3.5.26 requires
+            // treating it as zero when verifying the UET CRC as well.
+            Bytes protected_bytes(bytes+crc_start,bytes+end-4);
+            protected_bytes[start+6-crc_start]=0;
+            protected_bytes[start+7-crc_start]=0;
+            crc=crc32c(protected_bytes.data(),protected_bytes.size());
+        } else crc=crc32c(bytes+crc_start,end-crc_start-4);
+        const uint32_t actual=static_cast<uint32_t>(get(bytes+end-4,4));
         if (crc!=actual) throw std::invalid_argument("UET CRC mismatch");
     }
     result.packet=decode_pds(bytes+start+transport,end-start-transport-(crc_enabled?4:0));

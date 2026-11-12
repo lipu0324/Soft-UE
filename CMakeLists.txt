@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SOFTUE_ENABLE_RDMA "Build the legacy InfiniBand RC adapter" OFF)
 option(SOFTUE_ENABLE_SANITIZERS "Enable address and undefined-behavior sanitizers" OFF)
+set(SOFTUE_REFERENCE_ROOT "" CACHE PATH "Pinned uet-ref-prov checkout for optional differential tests")
+set(SOFTUE_LIBFABRIC_ROOT "" CACHE PATH "Built libfabric 2.0 source tree used by the reference provider")
 find_package(Threads REQUIRED)
 include(CTest)
 
@@ -65,6 +67,11 @@ if(BUILD_TESTING)
   softue_test(uet_wire_test UetWireCodecTest.cpp)
   softue_test(pdc_ack_test PdcAckTest.cpp)
   softue_test(pds_fault_test PdsFaultTest.cpp)
+  softue_test(pds_recovery_test PdsRecoveryTest.cpp)
+  softue_test(uud_delivery_test UudDeliveryTest.cpp)
+  softue_test(rud_window_test RudWindowTest.cpp)
+  softue_test(pdc_lifecycle_test PdcLifecycleTest.cpp)
+  softue_test(native_atomic_test NativeAtomicTest.cpp)
   softue_test(pds_allocation_test PdsAllocationTest.cpp)
   softue_test(pds_simulation_test PdsSimulationTest.cpp)
   softue_test(endpoint_test EndpointTest.cpp)
@@ -84,4 +91,24 @@ if(BUILD_TESTING)
   add_test(NAME requirement_inventory COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_requirements.py)
   set_tests_properties(requirement_inventory PROPERTIES TIMEOUT 10)
+  if(SOFTUE_REFERENCE_ROOT)
+    enable_language(C)
+    add_executable(reference_wire_oracle ${CORE}/Test/ReferenceWireOracle.c)
+    target_compile_definitions(reference_wire_oracle PRIVATE _GNU_SOURCE)
+    target_include_directories(reference_wire_oracle PRIVATE
+      ${SOFTUE_REFERENCE_ROOT} ${SOFTUE_REFERENCE_ROOT}/util
+      ${SOFTUE_REFERENCE_ROOT}/imp_shim ${SOFTUE_REFERENCE_ROOT}/nic_shim
+      ${SOFTUE_REFERENCE_ROOT}/crypto
+      ${SOFTUE_LIBFABRIC_ROOT} ${SOFTUE_LIBFABRIC_ROOT}/include)
+    target_link_libraries(reference_wire_oracle PRIVATE
+      ${SOFTUE_REFERENCE_ROOT}/libuet_fabric.so
+      ${SOFTUE_LIBFABRIC_ROOT}/src/.libs/libfabric.so)
+    add_executable(reference_wire_fixtures ${CORE}/Test/ReferenceWireFixtures.cpp)
+    target_link_libraries(reference_wire_fixtures PRIVATE softue_message)
+    add_test(NAME reference_wire_comparison COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_reference_wire.py
+      --fixtures $<TARGET_FILE:reference_wire_fixtures>
+      --oracle $<TARGET_FILE:reference_wire_oracle>)
+    set_tests_properties(reference_wire_comparison PROPERTIES TIMEOUT 30)
+  endif()
 endif()

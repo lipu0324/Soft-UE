@@ -133,6 +133,14 @@ public:
         LOG_DEBUG(__FUNCTION__, "PDS process manager initialized");
     }
 
+    // The initiator owns graceful PDC close (§3.5.8.3). This is a control
+    // request; the owning progress loop performs the actual transition.
+    bool requestConnectionClose(uint16_t local_pdc_id) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && local_pdc_id<MAX_PDC &&
+            pds_process_info->pds_instance->IPDC_Processmanager.sendCloseReq(local_pdc_id);
+    }
+
     /**
      * @brief Destructor
      */

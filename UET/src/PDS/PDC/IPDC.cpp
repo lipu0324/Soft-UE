@@ -37,6 +37,9 @@
 bool I_PDC::initPDC(uint16_t id){
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    fast_retransmit_psn_.reset();
+    received_rx_psns_.clear();
+    completed_rx_psns_.clear();
     //FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -145,7 +148,12 @@ void I_PDC::openChk(){
 
     //std::cout << getCurrentTimestamp() << "I_PDC open_chk state: " << STATE_STR(state) << std::endl;
 
-    if(gen_cm != NONE) {
+    if (close_error && state==CLOSE_ACK_WAIT) {
+        // A fatal reply to a retransmitted Close Command means this context
+        // cannot continue. Release it instead of starting another close cycle.
+        close();
+    }
+    else if(gen_cm != NONE) {
         std::cout << getCurrentTimestamp() << "I_PDC tx_control processing - gen_cm: " << CM_TYPE_STR(gen_cm) << std::endl;
         LOG_INFO(__FUNCTION__, "Process control message generation");
         txCtrl();
@@ -372,7 +380,7 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
     std::cout << getCurrentTimestamp() << "I_PDC receive ACK packet - ack_psn: " << ack_psn
                 << ", cack_psn: " << cack_psn << std::endl;
 
-    if(closing && ack_psn == close_psn){
+    if(state==CLOSE_ACK_WAIT && ack_psn == close_psn){
         LOG_INFO(__FUNCTION__, "Close confirmation ACK received, execute closure");
         close();
     }
@@ -398,7 +406,7 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
         updateTxPsnTracker(acknowledged, pkt->PDS_header.RUOD_ack_header.flags.req, cack_psn);
 
         //update_ccc();
-        if(pkt->PDS_header.RUOD_ack_header.flags.req == 0x10){//CLOSE_REQ
+        if(pkt->PDS_header.RUOD_ack_header.flags.req & 0x2u){//CLOSE_REQ
             std::cout << getCurrentTimestamp() << "I_PDC close request received - PSN: " << ack_psn << std::endl;
             LOG_WARN(__FUNCTION__, "Close request flag received, trigger close process");
             closeReq();
@@ -437,6 +445,9 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
             break;
         case Clear_req:
             rxCtrlClearReq(pkt);
+            break;
+        case Close_req:
+            closeReq();
             break;
             // case
         }

@@ -28,12 +28,11 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
 |---|---|---|
 | `SES/SES.hpp` 的 `validate_job_id`、`validate_rkey`、`validate_header_type`、`validate_data_length`、`validate_pdc_status` | 部分返回固定成功；旧版本校验使用 version 2 | M3 完成原 SES 与受检内存/能力服务的统一；当前 `SES/Endpoint.hpp` 独立校验所支持的子集 |
 | `SES/SES.hpp` 的 `validate_msn` | 旧表按 JobID 建索引，不能作为多消息完整上下文 | M3 消息生命周期、并发及分片约束 |
-| `PDS_Manager/PDSManager.hpp::checkRxPkt` | 原入口仅检查非空，不是完整的连接元组/头部验证 | M2 补齐管理器及上下文检查；新 wire decoder 的长度、保留位、CRC 检查不能替代它 |
-| `PDS_Manager/PDSManager.hpp::checkUnexpectEvent` | 默认示例 NACK 原因，尚无完整错误分类 | M2 将错误原因和恢复行为对应到规范 |
-| `PDS_Manager/PDSManager.hpp::rxPkt` | NACK 分发尚不完整 | M2 验证 NACK 的接收、重传及关闭；当前只声明 NACK 编解码 |
+| `PDS_Manager/PDSManager.hpp::checkRxPkt` | 已校验基础头类型及端点/PDC 元组；完整代次、SYN 安全时间与迟到报文仍待实现 | M2 不以元组校验代替完整生命周期验证 |
+| `PDS_Manager/PDSManager.hpp::rxPkt` | NACK 已分发到原 PDC；ROD 按缺失 PSN go-back-N，RUD 按接收窗口去重，资源通知保留 RTO | 完整 NACK 分类、重建连接及组合故障仍待验收 |
 | `PDS_Manager/PDSManager.hpp::fwdRsp2PDC` | `nack_payload` 传播仍有 TODO | M2/M3 错误完成必须经过真实错误路径 |
 | `PDC/TPDC.cpp` 的关闭/PSN 保存/校验及控制逻辑 | 有 TODO；关闭后的迟到报文、重连代次、序号全路径回绕未完成 | M2 连接生命周期退出条件 |
-| `PDC/IPDC.cpp::rxAck` / `rxCtrl` | Close 请求的所有编码及分支未完成（包括旧代码的 `req == 0x10` 比较） | M2 标准控制报文、关闭 ACK 丢失与重用测试 |
+| `PDC/IPDC.cpp::rxAck` / `rxCtrl` | 已修正两位 `flags.req` 的 Close 位，接入 Close Request；正常关闭及关闭包/ACK 丢失测试通过 | SYN 安全时间、连接复用与全部迟到报文测试仍待实现 |
 | `PDC/PDC.cpp` 的 Credit、部分 Clear/Close 逻辑 | 信用和所有回绕边界未完成 | M2/M5 分别按 PDS/CMS 模式验证 |
 | `SES/Endpoint.hpp::incoming_` | 已完成消息记录有上限，尚无完整协议退休/消息 ID 重用机制 | M2/M3；不能把顺利完成少量事务当作长期运行保证 |
 
@@ -63,6 +62,7 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
 3. 补齐 M3 的寻址、immediate、非取回原子、完成语义及真实 libfabric 2.0 provider。
 4. 通过上述门槛后，实施 M4 NSCC 并验收 AI Base，然后依原计划推进 M5–M8。
 
-当前环境没有 CMake、libfabric/libibverbs 开发依赖；包获取遇到代理 HTTP 503。
-Make 仿真回归无需这些依赖。CMake/CTest、provider ABI、真实网络互通与硬件适配
-仍须单独验证，不能记为已通过。
+2026-11-12 续开发时网络已恢复，CMake/CTest、libfabric 2.0 与官方参考程序均已构建。
+新增官方解析器/CRC 差分覆盖 24 组报文；这不是官方端点进程互通。
+当前执行环境创建 raw packet socket 返回 EPERM，未提供 CAP_NET_RAW；veth/raw-socket
+互通仍须在具备对应能力的环境验证。实际 softue provider ABI 与硬件 RDMA 适配仍待实现/验证。

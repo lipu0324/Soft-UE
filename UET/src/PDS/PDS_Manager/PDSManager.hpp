@@ -147,6 +147,16 @@ public:
 
 private:
     UET::Runtime::Services* runtime_ = nullptr;
+    // A PDC ID is meaningful only within its peer endpoint tuple (§3.5.8).
+    // IDs can collide across peers; validating just dpdcid would deliver a
+    // forged or delayed packet into an unrelated connection.
+    struct ConnectionIdentity {
+        uint32_t local_endpoint = 0;
+        uint32_t remote_endpoint = 0;
+        uint16_t remote_pdc_id = 0;
+        bool remote_pdc_known = false;
+    };
+    ConnectionIdentity connection_identities_[MAX_PDC * 2];
     std::map<std::tuple<uint32_t,uint32_t,uint8_t,uint8_t>,uint16_t> tx_contexts_;
     std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
     std::unique_ptr<UET::NetworkLayer::PdsQueueTransport> network_transport_;
@@ -224,90 +234,68 @@ public:
 
     void rxPkt()
     {
-        LOG_INFO("rx_pkt", "=====================Processing Network Layer Packet=====================");
-        bool is_fwd_pkt = false; // Default: cannot forward
-        uint16_t pdc_id = 0;
-        // Process receive request logic
-        PDStoNET_pkt packet{};
-        if (!Net_rx_pkt_q.pop(packet)) return;
-        PDStoNET_pkt *rx = &packet;
+        PDStoNET_pkt received_packet{};
+        if (!Net_rx_pkt_q.pop(received_packet)) return;
+        if (received_packet.PDS_type == UUD_req_header) {
+            // §3.5.7.5: datagrams bypass connection allocation, sequence
+            // tracking and acknowledgements. SES validates the operation.
+            if (received_packet.PDS_header.UUD_req_header.type != UUD_REQ) return;
+            PDC_SES_req datagram{};
+            datagram.PDCID=UINT16_MAX; datagram.delivery_mode=UUD;
+            datagram.source_fep=received_packet.src_fep;
+            datagram.next_hdr=received_packet.PDS_header.UUD_req_header.next_hdr;
+            datagram.pkt=std::move(received_packet.SESpkt);
+            PDCtoSES_req.push(datagram);
+            return;
+        }
+        if (!checkRxPkt(&received_packet)) return;
 
-        if (checkRxPkt(rx))
-        {
-            LOG_INFO("rx_pkt", "RX packet valid, starting processing...");
-            if (rx->PDS_type == RUOD_req_header || rx->PDS_type == RUOD_cp_header)
-            { // If request
-                if (rx->PDS_type == RUOD_req_header)
-                    pdc_id = rx->PDS_header.RUOD_req_header.dpdcid;
-                else if (rx->PDS_type == RUOD_cp_header)
-                    pdc_id = rx->PDS_header.RUOD_cp_header.dpdcid;
+        const bool is_request = received_packet.PDS_type == RUOD_req_header;
+        const bool is_control = received_packet.PDS_type == RUOD_cp_header;
+        const bool is_acknowledgement = received_packet.PDS_type == RUOD_ack_header;
+        const bool is_negative_acknowledgement = received_packet.PDS_type == nack_header;
+        const bool starts_connection = is_request
+            ? received_packet.PDS_header.RUOD_req_header.flags.syn
+            : is_control && received_packet.PDS_header.RUOD_cp_header.flags.syn;
+        const auto remote_pdc_id = getSPDCID(received_packet);
+        uint16_t local_pdc_id = UINT16_MAX;
+        if (is_request) local_pdc_id = received_packet.PDS_header.RUOD_req_header.dpdcid;
+        else if (is_control) local_pdc_id = received_packet.PDS_header.RUOD_cp_header.dpdcid;
+        else if (is_acknowledgement) local_pdc_id = received_packet.PDS_header.RUOD_ack_header.dpdcid;
+        else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
 
-                if ((rx->PDS_type == RUOD_req_header && rx->PDS_header.RUOD_req_header.flags.syn == 0) ||
-                    (rx->PDS_type == RUOD_cp_header && rx->PDS_header.RUOD_cp_header.flags.syn == 0))
-                {
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(pdc_id));
-                }
-                else
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD establishment request ");
-
-                if (pdc_id < MAX_PDC * 2 && rx->PDS_header.RUOD_req_header.flags.syn == 0 && pdc_list[pdc_id].is_open)
-                { // If PDC is already open
-                    LOG_INFO("rx_pkt", "RX packet target PDC is open");
-                    is_fwd_pkt = true; // If packet is valid, can forward
-                }
-                else // if(rx->PDS_header.RUOD_req_header.flags.syn == 1)
-                {    // PDC not open
-                    LOG_INFO("rx_pkt", "RX packet target PDC is not open");
-                    if (rx->PDS_header.RUOD_req_header.flags.syn == 1)
-                    { // Connection initiation packet
-                        if (isOOR())
-                        {
-                            is_fwd_pkt = false; // PDC full, cannot establish new PDC
-                            LOG_WARN("rx_pkt", "PDC full, cannot establish new connection, dropping");
-                        }
-                        else
-                        {
-                            uint16_t new_pdcid = muxRx2PDCID(rx->src_fep, rx->dst_fep, rx->PDS_header.RUOD_req_header.spdcid);
-                            if (new_pdcid >= MAX_PDC * 2 ||
-                                (!pdc_list[new_pdcid].is_open && !allocPDC(new_pdcid, rx->src_fep, rx->dst_fep))) return;
-                            pdc_id = new_pdcid;
-                            LOG_INFO("rx_pkt", "Allocate PDC, ID: " + std::to_string(pdc_id));
-                            is_fwd_pkt = true;
-                        }
-                    }
-                    else
-                    {
-                        LOG_INFO("rx_pkt", "Non-connection initiation packet, illegal, dropping");
-                    }
-                }
-            }
-            else if (rx->PDS_type == RUOD_ack_header)
-            { // ACK NACK
-                if (rx->PDS_header.RUOD_ack_header.dpdcid < MAX_PDC * 2 && pdc_list[rx->PDS_header.RUOD_ack_header.dpdcid].is_open)
-                { // If PDC is already open
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(rx->PDS_header.RUOD_ack_header.dpdcid));
-                    pdc_id = rx->PDS_header.RUOD_ack_header.dpdcid;
-                    is_fwd_pkt = true; // If packet is valid, can forward
-                }
+        if (starts_connection) {
+            // SYN carries pdc_info/psn_off in place of dpdcid. Resolve it by
+            // {source FEP, destination FEP, source PDCID}, never by that union.
+            local_pdc_id = muxRx2PDCID(received_packet.src_fep,
+                                     received_packet.dst_fep, remote_pdc_id);
+            if (local_pdc_id >= MAX_PDC * 2 ||
+                (!pdc_list[local_pdc_id].is_open &&
+                 !allocPDC(local_pdc_id,received_packet.src_fep,received_packet.dst_fep))) {
+                sendNack(&received_packet,UET_NO_PDC_AVAIL);
+                return;
             }
         }
-        else
-        {
-            is_fwd_pkt = false; // If packet is invalid, cannot forward
-            LOG_ERROR("rx_pkt", "RX packet invalid");
-        }
 
-        if (is_fwd_pkt)
-        {
-            LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(pdc_id));
-            fwdPkt2PDC(rx, pdc_id); // Send request to PDC
+        if (local_pdc_id >= MAX_PDC * 2 || !pdc_list[local_pdc_id].is_open) {
+            // Never answer an unexpected ACK/NACK with another NACK. Only
+            // requests and controls can elicit this response (§3.5.12.7).
+            if (is_request || is_control) sendNack(&received_packet,UET_INV_DPDCID);
+            return;
         }
-        else
-        {
-            // Invalid packet enters UNEXPECTED RX OOR
-            LOG_WARN("rx_pkt", "Unexpected RX packet, entering RX OOR processing");
-            unexpectedOrRxOOR(rx); // Enter RX OOR queue
+        auto& identity = connection_identities_[local_pdc_id];
+        const bool establishment_failure = is_negative_acknowledgement && remote_pdc_id == 0;
+        if (identity.local_endpoint != received_packet.dst_fep ||
+            identity.remote_endpoint != received_packet.src_fep ||
+            (identity.remote_pdc_known && identity.remote_pdc_id != remote_pdc_id && !establishment_failure)) {
+            if (is_request || is_control) sendNack(&received_packet,UET_PDC_HDR_MISMATCH);
+            return;
         }
+        if (!establishment_failure && !identity.remote_pdc_known) {
+            identity.remote_pdc_id = remote_pdc_id;
+            identity.remote_pdc_known = true;
+        }
+        fwdPkt2PDC(&received_packet,local_pdc_id);
     }
 
     /**
@@ -315,16 +303,19 @@ public:
      * @param rx Pointer to received PDStoNET_pkt structure, containing received packet information
      * @return true if packet is valid, false otherwise
      */
-    bool checkRxPkt(PDStoNET_pkt *rx)
+    bool checkRxPkt(PDStoNET_pkt* packet)
     {
-        // Check if received packet is valid, don't know how to handle, assume valid for now
-        if (rx != nullptr)
-        {
-            return true; // Valid packet
-        }
-        else
-        {
-            return false; // Invalid packet
+        if (!packet) return false;
+        switch (packet->PDS_type) {
+        case RUOD_req_header:
+            return packet->PDS_header.RUOD_req_header.type == ROD_REQ ||
+                   packet->PDS_header.RUOD_req_header.type == RUD_REQ;
+        case RUOD_cp_header: return packet->PDS_header.RUOD_cp_header.type == CP;
+        case RUOD_ack_header: return packet->PDS_header.RUOD_ack_header.type == ACK;
+        case nack_header:
+            return packet->PDS_header.nack_header.type == NACK &&
+                   !packet->PDS_header.nack_header.flags.nt;
+        default: return false;
         }
     }
 
@@ -336,7 +327,7 @@ public:
     PDS_Nack_Codes checkUnexpectEvent(PDStoNET_pkt *rx)
     {
         if (rx != nullptr)
-            return UET_TRIMMED; // This will return different NACK types based on packet content, temporarily return an example value
+            return UET_INV_DPDCID; // An unknown connection is not evidence of trimming.
         else
             return reserved;
     }
@@ -380,7 +371,7 @@ public:
     void sendNack(PDStoNET_pkt *rx, PDS_Nack_Codes nack_type)
     {
         // Send NACK packet
-        PDStoNET_pkt nack_pkt;
+        PDStoNET_pkt nack_pkt{};
         nack_pkt.src_fep = rx->dst_fep;
         nack_pkt.dst_fep = rx->src_fep;
         nack_pkt.PDS_type = PDS_header_type::nack_header;
@@ -392,10 +383,11 @@ public:
         nack_pkt.PDS_header.nack_header.flags.nt = 0;
         nack_pkt.PDS_header.nack_header.nack_code = nack_type;
         nack_pkt.PDS_header.nack_header.vendor_code = 0; // Unknown purpose
-        nack_pkt.PDS_header.nack_header.nack_psn = rx->PDS_header.RUOD_req_header.psn;
+        nack_pkt.PDS_header.nack_header.nack_psn = rx->PDS_type == RUOD_cp_header
+            ? rx->PDS_header.RUOD_cp_header.psn : rx->PDS_header.RUOD_req_header.psn;
         // TODO: If PDC establishment error, set spdcid to 0 here
-        nack_pkt.PDS_header.nack_header.spdcid = rx->PDS_header.RUOD_req_header.dpdcid;
-        nack_pkt.PDS_header.nack_header.dpdcid = rx->PDS_header.RUOD_req_header.spdcid;
+        nack_pkt.PDS_header.nack_header.spdcid = 0; // No matching local PDC exists.
+        nack_pkt.PDS_header.nack_header.dpdcid = getSPDCID(*rx);
         nack_pkt.PDS_header.nack_header.payload = 0;
         // Temporarily put in send queue like this?
         PDStoNet.push(nack_pkt);
@@ -413,6 +405,15 @@ public:
         // Get request from queue
         SES_PDS_req tx = SES_tx_req_q.front(); // Get queue
         SES_tx_req_q.pop();                      // Pop queue head element
+        if (tx.mode == UUD) {
+            PDStoNET_pkt datagram{};
+            datagram.src_fep=tx.src_fep; datagram.dst_fep=tx.dst_fep;
+            datagram.PDS_type=UUD_req_header;
+            datagram.PDS_header.UUD_req_header={UUD_REQ,tx.next_hdr};
+            datagram.SESpkt=std::move(tx.pkt); datagram.local_tx_handle=tx.tx_pkt_handle;
+            PDStoNet.push(datagram);
+            return;
+        }
         // Select PDC based on tx to execute task, first check if PDC is available or can be allocated
         // Try to allocate PDC based on tx
         uint16_t pdc_id;
@@ -476,6 +477,7 @@ public:
         if (pdc_id >= MAX_PDC * 2) return false;
         if (!pdc_list[pdc_id].is_open)
         {
+            connection_identities_[pdc_id] = {src_fep,dst_fep,0,false};
             if (pdc_id >= MAX_PDC)
             { // TPDC
                 if (TPDC_Processmanager.createTPDCProcess(pdc_id, dst_fep, src_fep))
@@ -608,6 +610,7 @@ public:
         LOG_INFO("fwd_pkt_to_pdc", "Forwarding packet to PDC ID: " + std::to_string(pdc_id));
         // Package as PDS_PDC_req
         PDS_PDC_req req = {}; // value-initialize to ensure nack_payload is default-initialized
+        req.delivery_mode=static_cast<pdc_mode>(pkt->mode);
         req.next_hdr = pkt->next_hdr;
         req.tx_pkt_handle = pkt->tx_pkt_handle;
         req.pkt = pkt->pkt;

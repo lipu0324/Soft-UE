@@ -28,7 +28,8 @@ public:
                 if (format_ == WireFormat::LegacySup1)
                     packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
                 else {
-                    auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),network_.crc);
+                    auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
+                        network_.crc,network_.native_ip_protocol);
                     if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                         decoded.network.source.ip != address(frame.source).ip ||
                         decoded.network.destination.ip != address(node_).ip)
@@ -49,8 +50,16 @@ public:
     PdsHost& operator=(const PdsHost&) = delete;
 
     PDSProcessManager& manager() { return manager_; }
+    bool request_connection_close(uint16_t local_pdc_id) {
+        if (stopped_ || !manager_.requestConnectionClose(local_pdc_id)) return false;
+        wake();
+        return true;
+    }
     void set_request_handler(std::function<void(const PDC_SES_req&)> callback) { request_handler_ = std::move(callback); }
     void set_response_handler(std::function<void(const PDC_SES_rsp&)> callback) { response_handler_ = std::move(callback); }
+    void set_datagram_transmit_handler(std::function<void(uint16_t,SendResult)> callback) {
+        datagram_transmit_handler_ = std::move(callback);
+    }
     bool submit(const SES_PDS_req& request) {
         if (stopped_ || request.src_fep != node_) return false;
         if (!manager_.pushSESRequest(request)) return false;
@@ -89,7 +98,13 @@ private:
     std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
     TimerId pending_ = 0;
     bool stopped_ = false;
-    std::deque<Frame> outbound_;
+    struct OutboundFrame {
+        Frame frame;
+        bool is_datagram;
+        uint16_t local_tx_handle;
+    };
+    std::deque<OutboundFrame> outbound_;
+    std::function<void(uint16_t,SendResult)> datagram_transmit_handler_;
     std::function<void(const PDC_SES_req&)> request_handler_;
     std::function<void(const PDC_SES_rsp&)> response_handler_;
     WireFormat format_;
@@ -122,18 +137,22 @@ private:
                     options.source=address(packet.src_fep); options.destination=address(packet.dst_fep);
                     frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                 }
-                outbound_.push_back(std::move(frame));
+                outbound_.push_back({std::move(frame),packet.PDS_type==UUD_req_header,packet.local_tx_handle});
                 trace_.record(node_, "pds_tx", static_cast<uint64_t>(packet.PDS_type));
                 worked = true;
             }
             while (!outbound_.empty()) {
-                const auto result = port_.try_send(outbound_.front());
+                const auto result = port_.try_send(outbound_.front().frame);
                 if (result == SendResult::WouldBlock) {
                     // No busy polling: external adapters call wake() when writable.
                     return;
                 }
                 if (result != SendResult::Accepted) trace_.record(node_, "port_drop", static_cast<uint64_t>(result));
+                const auto transmitted=std::move(outbound_.front());
                 outbound_.pop_front();
+                if (transmitted.is_datagram && datagram_transmit_handler_)
+                    datagram_transmit_handler_(transmitted.local_tx_handle,result);
+                if (stopped_) return;
             }
             if (request_handler_) {
                 PDC_SES_req request{};

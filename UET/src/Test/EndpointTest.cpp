@@ -45,13 +45,24 @@ int main() {
         CHECK(source.poll_completion(completion)); CHECK(completion.status==CompletionStatus::RemoteError);
         CHECK(completion.remote_code==0x1c);
         CHECK(target.memory().read(1,1,region.key,0,16)==before);
-        Operation unsupported; unsupported.type=OperationType::Atomic; unsupported.peer=2;
+        Operation unsupported; unsupported.type=OperationType::Read; unsupported.peer=2;
         source.submit(unsupported);
         CHECK(source.poll_completion(completion)); CHECK(completion.status==CompletionStatus::Unsupported);
-        CHECK(!source.capabilities().ai_base); CHECK(!source.capabilities().atomic);
+        CHECK(!source.capabilities().ai_base); CHECK(source.capabilities().atomic);
         Operation noop; noop.type=OperationType::Noop; noop.peer=2;
         source.submit(noop); loop.run_until(25*kMillisecond);
         CHECK(source.poll_completion(completion)); CHECK(completion.status==CompletionStatus::Success);
+
+        // Both jobs exist, but an MR scoped to job 1 cannot be used from job 2.
+        // Table 3-25 distinguishes this permission failure from an unknown JobID.
+        source.memory().add_job(2); target.memory().add_job(2);
+        Operation cross_job_write;
+        cross_job_write.type=OperationType::Write; cross_job_write.peer=2;
+        cross_job_write.job=2; cross_job_write.remote_key=region.key; cross_job_write.payload={0xfe};
+        source.submit(cross_job_write); loop.run_until(27*kMillisecond);
+        CHECK(source.poll_completion(completion));
+        CHECK(completion.status==CompletionStatus::RemoteError && completion.remote_code==0x17);
+        CHECK(target.memory().read(1,1,region.key,0,16)==before);
 
         // Unsupported address/header interpretations must be rejected on the
         // receiver, even when a peer bypasses the native submit validator.
@@ -69,11 +80,12 @@ int main() {
             auto& h=request.pkt.bth_header.Standard_Header;
             h.opcode=1; h.som=1; h.eom=1; h.dc=1; h.rel=variant!=0;
             h.hd=variant==1; h.ri_generation=variant==2;
+            if (variant==1) h.opcode=2; // READ remains unsupported on this native interface.
             h.msg_id=60000+variant; h.job_id=1; h.PIDonFEP=1; h.resource_index=1;
             h.initiator=1; h.match_bits=region.key; h.request_length=1;
             request.pkt.payload={0x99};
             CHECK(a.submit(request)); loop.run_until((30+variant*5)*kMillisecond);
-            CHECK(codes.size()==variant+1); CHECK(codes.back()==(variant==2?0x1a:0x06));
+            CHECK(codes.size()==variant+1); CHECK(codes.back()==(variant==2?0x02:0x06));
             CHECK(target.memory().read(1,1,region.key,0,16)==before);
         }
         source.close(); target.close(); a.close(); b.close();
