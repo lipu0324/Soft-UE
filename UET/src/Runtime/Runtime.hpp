@@ -1,4 +1,5 @@
 #pragma once
+#include "PdcEvents.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -7,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <queue>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -42,6 +44,21 @@ struct Services {
     ITimerQueue& timers;
     std::function<void()> wake;
     uint16_t rto_ms = 1;
+    // §3.5.5 / §3.5.8.3: a lost SYN remains potentially live in the network.
+    // Plaintext connections wait this long before closing; authenticated
+    // anti-replay paths may explicitly configure zero when they are active.
+    Time syn_retransmission_safety_time = 65*kMillisecond;
+    // This callback must enqueue an event, never synchronously re-enter SES.
+    std::function<void(const PdcEvent&)> pdc_event;
+    // Simulator resource policy, not protocol constants. Each direction owns
+    // an independent PDC ID pool; tests can exhaust small pools reproducibly.
+    uint16_t initiator_context_limit = 512;
+    uint16_t target_context_limit = 512;
+    size_t pending_request_limit = 16384;
+    Time pending_request_timeout = 100*kMillisecond;
+    Time resource_nack_retry_delay = 2*kMillisecond;
+    bool standard_wire=true;
+    std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.
 };
 
 class EventLoop final : public IClock, public ITimerQueue {
@@ -153,6 +170,7 @@ class Trace {
 public:
     explicit Trace(const IClock& clock, size_t limit = 1000000) : clock_(clock), limit_(limit) {}
     void record(uint32_t node, std::string event, uint64_t value = 0) {
+        if (!limit_) return; // Explicitly disabled for long-running provider use.
         if (events_.size() == limit_) throw std::runtime_error("trace record budget exhausted");
         events_.push_back({clock_.now(), events_.size(), node, std::move(event), value});
     }

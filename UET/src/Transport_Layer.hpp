@@ -151,7 +151,8 @@ enum PDS_next_hdr{
     UET_HDR_RESPONSE,           // Response header
     UET_HDR_RESPONSE_DATA,      // Response header with data
     UET_HDR_RESPONSE_DATA_SMALL,// Response header with small data
-    UET_HDR_NONE                // No header
+    UET_HDR_NONE,               // No header
+    UET_HDR_CP_ACK              // Standard value 0x09; translated explicitly by the codec.
 };
 
 // Delivery modes shared by SES, PDS and runtime adapters. RUD preserves
@@ -541,6 +542,10 @@ struct PDStoNET_pkt
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
     uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
+    struct {
+        uint8_t cp_ack_type=0,cp_ack_length=2,start_psn_method=0,reserved=0;
+        uint32_t expected_psn=0;
+    } control_ack; // §3.5.16.4.1: local representation, never memcpy'd to wire.
 };
 
 
@@ -589,6 +594,7 @@ struct PDC_SES_req
     uint32_t orig_psn;       /**< Original packet sequence number */
     uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
     uint8_t delivery_mode = ROD; /**< UUD has no PDC and must never generate ACKs. */
+    uint32_t connection_start_psn = 0; /**< Local context generation, not an SES wire field. */
 };
 /**
  * @struct PDC_SES_rsp
@@ -598,6 +604,7 @@ struct PDC_SES_req
  */
 struct PDC_SES_rsp
 {
+    uint32_t original_sequence=0,connection_start_psn=0; // Local response association, never wire fields.
     uint16_t PDCID;          /**< SPDC identifier */
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */

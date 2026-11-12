@@ -31,6 +31,10 @@ public:
                 return SendResult::Accepted;
             }
         }
+        if (!source_ && faults_.closing_started && packet.PDS_type==RUOD_ack_header) {
+            CHECK(packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_CP_ACK);
+            CHECK(packet.control_ack.cp_ack_type==Close_cmd && packet.control_ack.cp_ack_length==2);
+        }
         if (!source_ && faults_.closing_started && faults_.drop_acknowledgement &&
             packet.PDS_type==RUOD_ack_header) {
             faults_.drop_acknowledgement=false; ++faults_.dropped;

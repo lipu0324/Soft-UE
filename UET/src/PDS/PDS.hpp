@@ -70,6 +70,7 @@ struct pend_node
     uint32_t pend_time;  // Pend time
     uint32_t start_time; // Start time
     uint32_t end_time;   // End time
+    uint64_t deadline_ns=0; // Injected-clock deadline; independent of 32-bit millisecond wrap.
 };
 
 // pdc structure definition

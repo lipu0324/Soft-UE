@@ -27,6 +27,7 @@ flowchart LR
 |---|---|---|
 | 原生 SES | 操作 ID、消息分片、接收缓冲区、内存授权、应用完成 | `UET/src/SES/Endpoint.hpp` |
 | 内存注册表 | JobID、PID、key、访问权限、边界、撤销、稀疏存储 | `UET/src/SES/MemoryRegistry.hpp` |
+| 资源目录 | 相对 PID 映射、节点范围 PID、独立索引空间、generation 与启用状态 | `UET/src/SES/ResourceDirectory.hpp` |
 | PDS Manager | 将报文分发到正确的端点/PDC 元组；分配和回收上下文 | `UET/src/PDS/PDS_Manager/PDSManager.hpp` |
 | Initiator/Target PDC | 建连、PSN、ACK/NACK、重复消除、RTO、Clear/Close | `UET/src/PDS/PDC/` |
 | Wire codec | 显式位宽、网络字节序、保留位、长度和 CRC；不决定重传 | `UET/src/Network_Layer/UetWireCodec.cpp` |
@@ -50,6 +51,15 @@ flowchart LR
    地址或偏移，不能转换为进程指针。有效片段写入稀疏存储。
 6. 全部片段处理后，SES 生成语义响应。保证交付的响应由 PDC 保存，直到对端 Clear。
    发起端收到响应后，才产生可靠操作的应用完成。
+
+PDS 会把响应关联到原始 PSN。收到中间片段的默认响应只确认该片段，不能提前完成
+整条消息；EOM 已发送后，才能根据 EOM 的默认响应或显式全长响应报告成功。RUD
+的显式全长响应可能随最后补齐缺口的包返回。应用先收到错误时，消息 ID 仍保持租约，直到
+剩余片段发送并被 CACK 覆盖，或上下文终止，防止迟到报文混入重用后的消息。
+
+相对寻址先用 JobID 和相对 PID 选择资源；绝对寻址直接选择节点范围 PID。两者的
+buffer_offset 都是受检区域内的偏移。注册应用真实缓冲区只发生在本地 API，远端
+无法指定主机指针。libfabric 适配器的进程路径见 [PROVIDER.md](PROVIDER.md)。
 
 WRITE immediate 的 `header_data` 随消息保存；全部数据落地后产生单独的远端完成。
 普通 WRITE 不消耗 SEND 的接收缓冲区。非取回原子操作经过同一条路径，原子扩展头
@@ -93,5 +103,12 @@ RUDI 与 RODL 不能直接套用这三种路径；它们仍在后续实施范围
   以及 WRITE immediate 的远端完成。
 - `reference_wire_comparison`：独立链接官方解析器和 CRC 实现，检查 24 组报文。
   这是报文差分，不代表两个协议端点进程已经互通。
+- `reference_process_interop`：独立进程中的原样参考 SES/PDS 经过测试 NIC，验证
+  WRITE/SEND、返回 SEND 和 Clear；不覆盖 raw NIC 驱动。
+- `context_reuse_test`、`message_retirement_test`：上下文重用、旧报文拒绝、SYN 安全
+  时间，以及跨越 16 位消息 ID 空间的 66,000 次真实原子更新。
+- `message_completion_test`：延迟 EOM，在中间默认响应之后仍不能提前报告成功。
+- `resource_lifecycle_test`：小容量上下文池、待分配超时、重调度、资源 NACK 暂停与恢复。
+- `addressing_test`：相对/绝对 PID、generation、禁用资源、索引隔离和跨 JobID 权限。
 
 这些测试说明对应行为有证据，不能替代整份 Profile 的规范验收。

@@ -18,6 +18,8 @@ public:
             NetworkLayer::WireOptions network = {})
         : node_(node), loop_(loop), trace_(trace), port_(port),
           services_{loop, loop, [this] { wake(); }}, manager_(&services_), format_(format), network_(network) {
+        services_.standard_wire=format_==WireFormat::Uet11;
+        services_.pdc_event=[this](const PdcEvent& event) { context_events_.push_back(event); };
         if (!manager_.start()) throw std::runtime_error("PDS initialization failed");
         std::weak_ptr<int> life = lifetime_;
         port_.set_writable_handler([this, life] { if (!life.expired()) wake(); });
@@ -41,6 +43,8 @@ public:
                     throw std::invalid_argument("frame and packet addressing disagree");
                 if (!manager_.pushNetworkPacket(packet)) throw std::runtime_error("PDS inbound queue rejected frame");
                 trace_.record(node_, "pds_rx", static_cast<uint64_t>(packet.PDS_type));
+                if (packet.PDS_type==nack_header)
+                    trace_.record(node_,"pds_nack",packet.PDS_header.nack_header.nack_code);
                 wake();
             } catch (const std::invalid_argument&) { trace_.record(node_, "malformed_frame"); }
         });
@@ -50,6 +54,9 @@ public:
     PdsHost& operator=(const PdsHost&) = delete;
 
     PDSProcessManager& manager() { return manager_; }
+    // Configure before submitting work. The owning runtime remains responsible
+    // for progress; changing resource policy does not create background work.
+    Services& services() { return services_; }
     bool request_connection_close(uint16_t local_pdc_id) {
         if (stopped_ || !manager_.requestConnectionClose(local_pdc_id)) return false;
         wake();
@@ -59,6 +66,9 @@ public:
     void set_response_handler(std::function<void(const PDC_SES_rsp&)> callback) { response_handler_ = std::move(callback); }
     void set_datagram_transmit_handler(std::function<void(uint16_t,SendResult)> callback) {
         datagram_transmit_handler_ = std::move(callback);
+    }
+    void set_context_event_handler(std::function<void(const PdcEvent&)> callback) {
+        context_event_handler_=std::move(callback);
     }
     bool submit(const SES_PDS_req& request) {
         if (stopped_ || request.src_fep != node_) return false;
@@ -86,6 +96,7 @@ public:
         port_.set_writable_handler({});
         manager_.stop(); // Destroys PDCs and cancels their virtual timers.
         outbound_.clear();
+        context_events_.clear();
         trace_.record(node_, "host_closed");
     }
 private:
@@ -105,6 +116,8 @@ private:
     };
     std::deque<OutboundFrame> outbound_;
     std::function<void(uint16_t,SendResult)> datagram_transmit_handler_;
+    std::deque<PdcEvent> context_events_;
+    std::function<void(const PdcEvent&)> context_event_handler_;
     std::function<void(const PDC_SES_req&)> request_handler_;
     std::function<void(const PDC_SES_rsp&)> response_handler_;
     WireFormat format_;
@@ -125,6 +138,14 @@ private:
     void pump() {
         for (size_t step=0; step<256; ++step) {
             bool worked = manager_.progressOne();
+            // Retire old semantic state before delivering requests that may
+            // reuse an identifier cleared by the same PDS progress step.
+            while (!context_events_.empty()) {
+                const auto event=context_events_.front(); context_events_.pop_front();
+                if (context_event_handler_) context_event_handler_(event);
+                if (stopped_) return;
+                worked=true;
+            }
             PDStoNET_pkt packet{};
             while (manager_.popNetworkPacket(packet)) {
                 Frame frame;
@@ -139,6 +160,8 @@ private:
                 }
                 outbound_.push_back({std::move(frame),packet.PDS_type==UUD_req_header,packet.local_tx_handle});
                 trace_.record(node_, "pds_tx", static_cast<uint64_t>(packet.PDS_type));
+                if (packet.PDS_type==RUOD_cp_header)
+                    trace_.record(node_,"pds_control",packet.PDS_header.RUOD_cp_header.ctl_type);
                 worked = true;
             }
             while (!outbound_.empty()) {
@@ -166,7 +189,7 @@ private:
             if (response_handler_) {
                 PDC_SES_rsp response{};
                 while (manager_.popSESResponse(response)) {
-                    trace_.record(node_, "ses_response");
+                    trace_.record(node_, "ses_response",response.original_sequence);
                     response_handler_(response);
                     if (stopped_) return;
                     worked = true;

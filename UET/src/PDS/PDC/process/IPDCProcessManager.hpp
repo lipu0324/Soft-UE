@@ -115,6 +115,9 @@ private:
 
     // Manager member variables
     std::unordered_map<uint16_t, std::unique_ptr<IPDC_ProcessInfo>> ipdc_processes;
+    // §3.5.8.2: Start_PSN follows the last transmitted PSN for this local ID,
+    // independently of destination. Destroying a context must not reset it.
+    std::unordered_map<uint16_t,uint32_t> next_start_psns_;
     std::mutex manager_mutex;                    // Manager mutex
     std::atomic<bool> manager_running;           // Manager running status
     std::unique_ptr<std::thread> monitor_thread; // Monitoring thread
@@ -230,7 +233,9 @@ public:
         auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid, runtime_);
 
         // Initialize IPDC instance
-        if (!process_info->ipdc_instance->initPDC(pdcid))
+        const auto retained=next_start_psns_.find(pdcid);
+        const auto initial_psn=retained==next_start_psns_.end()?1000:retained->second;
+        if (!process_info->ipdc_instance->initPDC(pdcid,initial_psn))
         {
             LOG_ERROR(__FUNCTION__, "Failed to initialize IPDC instance, PDCID: " + std::to_string(pdcid));
             return false;
@@ -289,6 +294,8 @@ public:
         }
 
         process_info->state.store(STOPPED);
+        next_start_psns_[pdcid]=process_info->ipdc_instance->tx_cur_psn;
+        ipdc_processes.erase(it);
         LOG_DEBUG(__FUNCTION__, "Successfully stopped IPDC process, PDCID: " + std::to_string(pdcid));
         return true;
     }
@@ -582,8 +589,22 @@ public:
         {
             return false;
         }
-        process_info->ipdc_instance->close_req = true;
+        process_info->ipdc_instance->closeReq();
         return true;
+    }
+
+    bool isConnectionClosing(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() &&
+            (found->second->ipdc_instance->close_req || found->second->ipdc_instance->closing ||
+             found->second->ipdc_instance->state.load()==CLOSE_ACK_WAIT);
+    }
+
+    bool hasOutstandingPacket(uint16_t pdcid,uint32_t sequence) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->tx_pkt_buffer.count(sequence);
     }
 
     /**

@@ -31,6 +31,7 @@
 
 bool T_PDC::initPDC(uint16_t id)
 {
+    resetCloseSafety();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
     fast_retransmit_psn_.reset();
@@ -111,7 +112,7 @@ bool T_PDC::initPDC(uint16_t id)
                 << ", open_msg: " << open_msg;
     LOG_INFO(__FUNCTION__, formatLogMessage(init_state.str()));
 
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Establish T_PDC:" << id << " - Complete initialization" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Establish T_PDC:" << id << " - Complete initialization" << std::endl;
 
     FUNCTION_LOG_EXIT();
     return true;
@@ -119,7 +120,7 @@ bool T_PDC::initPDC(uint16_t id)
 
 void T_PDC::processOpen1(PDStoNET_pkt *pkt)
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process open1" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process open1" << std::endl;
     if (chkTrim())
     { // Check if packet is trimmed
         trim = true;
@@ -142,7 +143,7 @@ void T_PDC::processOpen1(PDStoNET_pkt *pkt)
 
 void T_PDC::processOpen2(PDStoNET_pkt *pkt)
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process open2" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process open2" << std::endl;
     if (!secure_psn)
     {
         DPDCID = pkt->PDS_header.RUOD_req_header.spdcid; // Set destination PDC ID
@@ -151,7 +152,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         // Determine starting receive PSN based on SYN packet
         rx_cur_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off - 1;
         cack_psn = rx_cur_psn;
-        tx_cur_psn = rx_cur_psn;
+        tx_cur_psn = start_psn; // Forward and return directions start at the same PSN.
         clear_psn = tx_cur_psn - 1;
         rx_clear_psn = rx_cur_psn; // Record TX clear PSN
         bad_psn = false;
@@ -162,6 +163,12 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         state = PENDING; // Waiting for secure PSN verification
 
     chkRxError(pkt); // Check receive packet error
+    if (error_chk==INV_SYN) {
+        const auto& header=pkt->PDS_header.RUOD_req_header;
+        sendNack(header.flags.retx,header.psn,
+            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr);
+        return;
+    }
     if (error_chk == OPEN)
     { // Packet is normal, process receive request
         uint16_t handle = processRxReq(pkt);
@@ -171,7 +178,14 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
         LOG_DEBUG(__FUNCTION__, formatLogMessage(forward_info.str()));
         fwdReq2SES(handle, meta, &pkt->SESpkt); // Forward to SES layer
         updateRxPsnTracker(&meta);
-        sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false);
+        // The final request needs its SES response. Sending a separate plain
+        // ACK first can release the initiator's packet-to-message association
+        // before that response arrives. Intermediate packets may be ACKed here;
+        // the explicit legacy path retains its historical handshake behavior.
+        if (!runtime_ || pkt->SESpkt.bth_type!=Standard_Header ||
+            pkt->SESpkt.bth_header.Standard_Header.version!=0 ||
+            !pkt->SESpkt.bth_header.Standard_Header.eom)
+            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false);
         LOG_INFO(__FUNCTION__, formatLogMessage("Send ACK - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", PSN: " + std::to_string(meta.psn)));
     }
     else
@@ -203,33 +217,37 @@ void T_PDC::openChk()
     //             << ", tx_req_q: " << tx_req_q.size();
     // LOG_DEBUG(__FUNCTION__, formatLogMessage(queue_state.str()));
 
-    //std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] open_chk state: " << STATE_STR(state) << std::endl;
+    //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] open_chk state: " << STATE_STR(state) << std::endl;
 
     if (state != CLOSED)
     {
-        //std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] unack_cnt:" << unack_cnt << ",allACK:" << allACK << std::endl;
+        //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] unack_cnt:" << unack_cnt << ",allACK:" << allACK << std::endl;
         if (gen_cm != NONE)
         { // Prioritize control message generation
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] gen_cm:" << CM_TYPE_STR(gen_cm) << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] gen_cm:" << CM_TYPE_STR(gen_cm) << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Process control message generation"));
             txCtrl();
         }
         else if (close_error)
-        { // Handle close error
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] close_error" << std::endl;
-            LOG_WARN(__FUNCTION__, formatLogMessage("Close error detected, request close"));
-            reqClose();
+        {
+            // §3.5.8.3 permits terminal close in error after fatal replies or
+            // retry exhaustion. Repeating Close Requests here would otherwise
+            // keep an event-driven host runnable forever at one timestamp.
+            emitPdcEvent(UET::Runtime::PdcEventKind::ConnectionClosed,rx_cur_psn);
+            freePDC();
+            state=CLOSED;
+            if (public_close_queue) public_close_queue->push(SPDCID);
         }
         else if (closing && unack_cnt == 0 && allACK)
         { // Check if close can be completed
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] closing && unack_cnt == 0 && allACK" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] closing && unack_cnt == 0 && allACK" << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Close conditions met, execute close"));
             close();
         }
         else if (!rx_pkt_q.empty())
         { // Handle received packets
             LOG_DEBUG(__FUNCTION__, formatLogMessage("Process data packets in receive queue"));
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx_pkt_q size:" << rx_pkt_q.size() << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx_pkt_q size:" << rx_pkt_q.size() << std::endl;
             PDStoNET_pkt p;
             if (!rx_pkt_q.pop(p)) return;
             if (p.PDS_type == nack_header)
@@ -261,14 +279,14 @@ void T_PDC::openChk()
         }
         else if (!tx_rsp_q.empty())
         { // Handle SES layer response transmission
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] tx_rsp_q size:" << tx_rsp_q.size() << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] tx_rsp_q size:" << tx_rsp_q.size() << std::endl;
             LOG_DEBUG(__FUNCTION__, formatLogMessage("Process SES layer response transmission"));
             sesTxRsp(&tx_rsp_q.front());
             tx_rsp_q.pop();
         }
         else if (state == ESTABLISHED && pause_pdc == false)
         { // Packet transmission can only be done in established state
-            //std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] state == ESTABLISHED && pause_pdc == false" << std::endl;
+            //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] state == ESTABLISHED && pause_pdc == false" << std::endl;
             if (!tx_req_q.empty())
             { // Handle PDS layer request transmission
                 LOG_DEBUG(__FUNCTION__, formatLogMessage("Process PDS layer request transmission"));
@@ -277,12 +295,12 @@ void T_PDC::openChk()
             }
         }
         else
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error" << std::endl;
     }
     else
     {
         LOG_DEBUG(__FUNCTION__, formatLogMessage("Connection closed state, only process receive packets"));
-        std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Connection closed state, only process receive packets" << rx_pkt_q.size() << std::endl;
+        diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Connection closed state, only process receive packets" << rx_pkt_q.size() << std::endl;
         if (!rx_pkt_q.empty())
         { // Handle received packets
             PDStoNET_pkt p;
@@ -300,20 +318,21 @@ void T_PDC::openChk()
 
 void T_PDC::reqClose()
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] req close" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] req close" << std::endl;
     sendCloseReq();      // Send close request
 }
 
 void T_PDC::beginClose()
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] begin close" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] begin close" << std::endl;
     closing = true;        // Set closing flag
     state = ACK_WAIT;      // Wait for ACK state
 }
 
 void T_PDC::close()
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] close" << std::endl;
+    emitPdcEvent(UET::Runtime::PdcEventKind::ConnectionClosed,rx_cur_psn);
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] close" << std::endl;
     sendCloseAck();  // Send close acknowledgment
     saveExpectedPSN(); // Save expected PSN
     // Delay 50ms
@@ -337,23 +356,23 @@ void T_PDC::processClose()
 {
     closing = false;
     req_closing = false;
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process close" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process close" << std::endl;
 }
 
 void T_PDC::processSecurePsn1(PDStoNET_pkt *pkt)
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process secure psn" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process secure psn" << std::endl;
     DPDCID = pkt->PDS_header.RUOD_req_header.spdcid;     // Set destination PDC ID
     processRxReq(pkt);                                 // Process receive request
     chkSecurePsn(pkt->PDS_header.RUOD_req_header.psn); // Check PSN security
     if (bad_psn)
     {
-        std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] psn is bad" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] psn is bad" << std::endl;
         // TODO: Complete PSN verification failure handling process
     }
     else
     {
-        std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] psn not bad" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] psn not bad" << std::endl;
         processOpen2(pkt); // PSN verification passed, continue establishment process
     }
 }
@@ -386,13 +405,13 @@ void T_PDC::chkSecurePsn(uint32_t psn)
 void T_PDC::saveExpectedPSN()
 {
     // TODO: Implement PSN save logic
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Save expected PSN: " << rx_cur_psn + 1 << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Save expected PSN: " << rx_cur_psn + 1 << std::endl;
 }
 
 void T_PDC::netRxReq(PDStoNET_pkt *pkt)
 {
     // FUNCTION_LOG_ENTRY();
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] net rx req" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] net rx req" << std::endl;
     // Parameter check
     if (!pkt)
     {
@@ -438,7 +457,7 @@ void T_PDC::netRxReq(PDStoNET_pkt *pkt)
 void T_PDC::netRxAck(PDStoNET_pkt *pkt)
 {
     // FUNCTION_LOG_ENTRY();
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] net rx ack" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] net rx ack" << std::endl;
     if (!pkt)
     {
         LOG_ERROR(__FUNCTION__, formatLogMessage("Input packet pointer is null"));
@@ -496,7 +515,7 @@ void T_PDC::netRxCm(PDStoNET_pkt *pkt)
 void T_PDC::rxReq(PDStoNET_pkt *pkt)
 {
     // FUNCTION_LOG_ENTRY();
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx req" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx req" << std::endl;
     if (!pkt)
     {
         LOG_ERROR(__FUNCTION__, formatLogMessage("Input packet pointer is null"));
@@ -512,6 +531,12 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     LOG_DEBUG(__FUNCTION__, formatLogMessage(pkt_info.str()));
 
     chkRxError(pkt); // Check receive packet error
+    if (error_chk==INV_SYN) {
+        const auto& header=pkt->PDS_header.RUOD_req_header;
+        sendNack(header.flags.retx,header.psn,
+            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr);
+        return;
+    }
 
     // Record error check results
     std::stringstream error_info;
@@ -523,25 +548,25 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     {
         if (trim)
         {
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] trim is true" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] trim is true" << std::endl;
             LOG_WARN(__FUNCTION__, formatLogMessage("Packet trimmed, send NACK"));
             sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_TRIMMED, rx_cur_psn + 1,nullptr);
         }
         else if (error_chk == ACK_ERROR)
         {
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is ACK_ERROR" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is ACK_ERROR" << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Duplicate packet, respond with ACK immediately"));
             if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn))
                 sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, pkt->PDS_header.RUOD_req_header.psn, nullptr, false);
         }
         else if (error_chk == DROP)
         {
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is DROP" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is DROP" << std::endl;
             LOG_WARN(__FUNCTION__, formatLogMessage("Drop packet"));
         } // Drop packet / Drop packet
         else if (error_chk == OOO)
         {
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is OOO" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is OOO" << std::endl;
             LOG_WARN(__FUNCTION__, formatLogMessage("Out of order packet, send NACK"));
             sendNack(pkt->PDS_header.RUOD_req_header.flags.retx, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr); // Out of order packet / 乱序包
         }
@@ -549,7 +574,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     else
     { // Packet is normal, process request / Packet normal, process request
         LOG_INFO(__FUNCTION__, formatLogMessage("Packet normal, process request"));
-        std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx req ok" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx req ok" << std::endl;
         uint16_t handle = processRxReq(pkt);
         RX_pkt_meta meta = rx_pkt_map.at(handle);
         updateRxPsnTracker(&meta);
@@ -571,7 +596,7 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
 
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx ack,ack_psn:" << ack_psn << ",cack_psn:" << cack_psn << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx ack,ack_psn:" << ack_psn << ",cack_psn:" << cack_psn << std::endl;
     // Record ACK processing information
     std::stringstream ack_process_info;
     ack_process_info << "Process ACK - ack_psn: " << ack_psn
@@ -587,16 +612,18 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
 
     if (pkt->PDS_header.RUOD_ack_header.next_hdr != UET_HDR_NONE)
     {
-        std::cout << getCurrentTimestamp() << "ack has rsp" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "ack has rsp" << std::endl;
         LOG_DEBUG(__FUNCTION__, formatLogMessage("Forward response to SES layer"));
-        fwdRsp2SES(&pkt->SESpkt); // Forward response to SES layer
+        if (pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE ||
+            pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE_DATA)
+            fwdRsp2SES(&pkt->SESpkt,ack_psn);
     }
     // FUNCTION_LOG_EXIT();
 }
 
 void T_PDC::sesTxReq(PDS_PDC_req *req)
 {
-    std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] ses tx req" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] ses tx req" << std::endl;
     if (!bad_psn)
         txReq(req); // Process request transmission when PSN is normal
 }
@@ -611,7 +638,7 @@ void T_PDC::sesTxRsp(SES_PDC_rsp *rsp)
         }
         else
         {
-            std::cout << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] ses tx rsp" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] ses tx rsp" << std::endl;
             txRsp(rsp);
         }
     } // Process response transmission when PSN is normal

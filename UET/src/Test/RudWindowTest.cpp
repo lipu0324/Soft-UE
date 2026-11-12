@@ -33,6 +33,8 @@ int main() {
         };
         auto last=receive(0,false); // Arrives first, after the sequence-number wrap.
         CHECK(target.rx_cur_psn==UINT32_MAX-2 && target.cack_psn==UINT32_MAX-2);
+        target.chkRxError(&last); CHECK(target.error_chk==DROP); // Network duplicate without RETX.
+        last.PDS_header.RUOD_req_header.flags.retx=1;
         target.chkRxError(&last); CHECK(target.error_chk==ACK_ERROR);
         receive(UINT32_MAX-1,true); // A response now blocks cumulative acknowledgement.
         receive(UINT32_MAX,false);

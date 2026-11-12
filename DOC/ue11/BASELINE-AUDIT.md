@@ -28,13 +28,13 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
 |---|---|---|
 | `SES/SES.hpp` 的 `validate_job_id`、`validate_rkey`、`validate_header_type`、`validate_data_length`、`validate_pdc_status` | 部分返回固定成功；旧版本校验使用 version 2 | M3 完成原 SES 与受检内存/能力服务的统一；当前 `SES/Endpoint.hpp` 独立校验所支持的子集 |
 | `SES/SES.hpp` 的 `validate_msn` | 旧表按 JobID 建索引，不能作为多消息完整上下文 | M3 消息生命周期、并发及分片约束 |
-| `PDS_Manager/PDSManager.hpp::checkRxPkt` | 已校验基础头类型及端点/PDC 元组；完整代次、SYN 安全时间与迟到报文仍待实现 | M2 不以元组校验代替完整生命周期验证 |
-| `PDS_Manager/PDSManager.hpp::rxPkt` | NACK 已分发到原 PDC；ROD 按缺失 PSN go-back-N，RUD 按接收窗口去重，资源通知保留 RTO | 完整 NACK 分类、重建连接及组合故障仍待验收 |
+| `PDS_Manager/PDSManager.hpp::checkRxPkt` | 已校验基础头类型及端点/PDC 元组；已加入起始 PSN 代次、SYN 安全等待和旧 SYN/ACK 拒绝；完整组合矩阵仍待验收 | M2 不以元组校验代替完整生命周期验证 |
+| `PDS_Manager/PDSManager.hpp::rxPkt` | NACK 已分发到原 PDC；ROD 按缺失 PSN go-back-N，RUD 按接收窗口去重，零 SPDCID 的资源 NACK 暂停数据并按注入的重试定时器恢复 | 完整 NACK 分类、重建连接及组合故障仍待验收 |
 | `PDS_Manager/PDSManager.hpp::fwdRsp2PDC` | `nack_payload` 传播仍有 TODO | M2/M3 错误完成必须经过真实错误路径 |
 | `PDC/TPDC.cpp` 的关闭/PSN 保存/校验及控制逻辑 | 有 TODO；关闭后的迟到报文、重连代次、序号全路径回绕未完成 | M2 连接生命周期退出条件 |
-| `PDC/IPDC.cpp::rxAck` / `rxCtrl` | 已修正两位 `flags.req` 的 Close 位，接入 Close Request；正常关闭及关闭包/ACK 丢失测试通过 | SYN 安全时间、连接复用与全部迟到报文测试仍待实现 |
+| `PDC/IPDC.cpp::rxAck` / `rxCtrl` | 已修正两位 `flags.req` 的 Close 位，接入 Close Request；正常关闭及关闭包/ACK 丢失测试通过 | SYN 安全时间、连接复用和旧 SYN/ACK 已有回归；全部控制与迟到报文矩阵仍待验收 |
 | `PDC/PDC.cpp` 的 Credit、部分 Clear/Close 逻辑 | 信用和所有回绕边界未完成 | M2/M5 分别按 PDS/CMS 模式验证 |
-| `SES/Endpoint.hpp::incoming_` | 已完成消息记录有上限，尚无完整协议退休/消息 ID 重用机制 | M2/M3；不能把顺利完成少量事务当作长期运行保证 |
+| `SES/Endpoint.hpp::incoming_` | 已按 Clear/Close 退休并为消息 ID 租约关联 EOM PSN；66,000 次操作回归跨越 ID 空间 | M2/M3；不能把顺利完成少量事务当作长期运行保证 |
 
 本次已修复的原问题包括：两个 PDC ID 空间的数组越界、首个 TPDC 边界、
 哈希碰撞导致的上下文混用、重复 ACK 记账、最后一个包的 ACK 清理、
@@ -48,8 +48,8 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
   `sng` 是用于上层开发的 stop-and-go ROD，不能用于替代完整 PDS 验收。
 - 官方 README 的 Congestion Control 节声明 NSCC 是基于 v0.6 的部分实现，
   多路径未完整支持。因此 M4 必须按 UE 1.1 重建要求与闭环测试。
-- 共同支持的报文应在固定版本下做独立解析/差分及进程互通；目前尚未运行
-  官方 provider 进程互通，没有把 codec 自往返测试记为互通通过。
+- 固定版本下的解析/CRC 差分与独立进程 WRITE/SEND 往返测试均已运行。
+  进程测试只替换参考栈 NIC I/O，SES/PDS 保持原样；raw NIC、更多封装与故障组合仍待验收。
 - RODL/Unified Local、UE 1.1 新增路径不因参考实现缺失而从范围中删除。
 - §3.3 与第 8 章 Profile 命名差异、表 3-4 与 §3.4.3.7 语义响应长度差异，
   已在 [IMPLEMENTATION.md](IMPLEMENTATION.md) 记录，不能用来宣称完整合规。
@@ -65,4 +65,4 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
 2026-11-12 续开发时网络已恢复，CMake/CTest、libfabric 2.0 与官方参考程序均已构建。
 新增官方解析器/CRC 差分覆盖 24 组报文；这不是官方端点进程互通。
 当前执行环境创建 raw packet socket 返回 EPERM，未提供 CAP_NET_RAW；veth/raw-socket
-互通仍须在具备对应能力的环境验证。实际 softue provider ABI 与硬件 RDMA 适配仍待实现/验证。
+互通仍须在具备对应能力的环境验证。softue 动态 provider 已通过公开 fi_* API 的独立进程测试，当前支持范围见 [PROVIDER.md](PROVIDER.md)；硬件 RDMA 适配仍待验证。

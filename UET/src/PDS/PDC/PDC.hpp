@@ -312,6 +312,7 @@ struct TX_pkt_meta
     uint16_t tx_pkt_handle; /**< Sending packet handle */
     uint16_t rto;           /**< Retransmission timeout time */
     uint16_t retry_cnt;     /**< Retry count */
+    UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
     // Add any other metadata you need to store here 
 };
 
@@ -445,15 +446,18 @@ public:
                             (!tx_req_q.empty() && !pause_pdc) || !tx_rsp_q.empty();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
-            (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK) || queued;
+            (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
     bool awaitsSemantic(uint32_t psn) const {
+        // The explicit legacy SES path uses version 2 and omits DC. Preserve
+        // its semantic-response contract; standard wire requests use version 0.
         const auto found = tx_pkt_buffer.find(psn);
         return runtime_ && found != tx_pkt_buffer.end() &&
             found->second.PDS_type == RUOD_req_header &&
             found->second.SESpkt.bth_type == Standard_Header &&
-            found->second.SESpkt.bth_header.Standard_Header.dc &&
+            (found->second.SESpkt.bth_header.Standard_Header.dc ||
+             found->second.SESpkt.bth_header.Standard_Header.version!=0) &&
             found->second.SESpkt.bth_header.Standard_Header.eom;
     }
     bool replaySemanticAck(uint32_t psn) {
@@ -467,6 +471,37 @@ public:
     }
 
 protected:
+    std::ostream& diagnostics() const {
+        if (!runtime_) return std::cout;
+        if (runtime_->diagnostic_output) return *runtime_->diagnostic_output;
+        class DiscardBuffer final : public std::streambuf {
+            int overflow(int value) override { return traits_type::not_eof(value); }
+        };
+        static thread_local DiscardBuffer discarded;
+        static thread_local std::ostream sink(&discarded);
+        return sink;
+    }
+    UET::Runtime::PdcFailureReason failure_reason_=UET::Runtime::PdcFailureReason::None;
+    void emitPdcEvent(UET::Runtime::PdcEventKind kind,uint32_t sequence,
+                      uint32_t job=0,uint16_t message_id=0,bool end_of_message=false) {
+        if (runtime_ && runtime_->pdc_event)
+            runtime_->pdc_event({kind,SPDCID,dst_fep,start_psn,sequence,job,message_id,failure_reason_,end_of_message});
+    }
+    UET::Runtime::Time syn_safety_deadline_=0;
+    UET::Runtime::TimerId close_safety_wake_=0;
+    std::shared_ptr<int> lifetime_guard_=std::make_shared<int>(0);
+    bool closeSafetyReady() const {
+        return !runtime_ || runtime_->clock.now()>=syn_safety_deadline_;
+    }
+    void armCloseSafetyWake();
+    void resetCloseSafety();
+    // §3.5.8.2: a zero-SPDCID NACK pauses data, including retransmits.
+    bool nack_traffic_paused_=false;
+    UET::Runtime::TimerId nack_retry_wake_=0;
+    std::set<uint32_t> deferred_nack_retransmits_;
+    void pauseForResourceNack(uint32_t sequence);
+    void resumeNackTraffic();
+    void resetNackPause();
     std::set<uint32_t> acknowledged_tx_;
     // Suppress repeated go-back-N requests for the same missing PSN until it
     // is acknowledged. RTO remains armed if that recovery burst is also lost.
@@ -597,7 +632,7 @@ public:
      * @brief Forward response to SES layer Forward response to SES layer Forward response to SES layer
      * @param pkt Response packet pointer Response packet指针
      */
-    void fwdRsp2SES(SEStoPDS_pkt *pkt);
+    void fwdRsp2SES(SEStoPDS_pkt *pkt,uint32_t original_sequence=0);
 
     /**
      * @brief Check reception error Check reception error Check reception error

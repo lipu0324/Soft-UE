@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SOFTUE_ENABLE_RDMA "Build the legacy InfiniBand RC adapter" OFF)
 option(SOFTUE_ENABLE_SANITIZERS "Enable address and undefined-behavior sanitizers" OFF)
+option(SOFTUE_ENABLE_LIBFABRIC "Build the experimental manual-progress softue provider" OFF)
+set(SOFTUE_PROVIDER_LIBFABRIC_ROOT "" CACHE PATH "Installed libfabric 2.0 prefix for the softue provider")
 set(SOFTUE_REFERENCE_ROOT "" CACHE PATH "Pinned uet-ref-prov checkout for optional differential tests")
 set(SOFTUE_LIBFABRIC_ROOT "" CACHE PATH "Built libfabric 2.0 source tree used by the reference provider")
 find_package(Threads REQUIRED)
@@ -51,6 +53,16 @@ target_link_libraries(rdma_message_test PRIVATE softue_message)
 add_executable(softue_sim ${CORE}/Runtime/SimMain.cpp)
 target_link_libraries(softue_sim PRIVATE softue_protocol softue_message)
 
+if(SOFTUE_ENABLE_LIBFABRIC)
+  find_path(SOFTUE_FABRIC_INCLUDE rdma/providers/fi_prov.h HINTS ${SOFTUE_PROVIDER_LIBFABRIC_ROOT}/include REQUIRED)
+  find_library(SOFTUE_FABRIC_LIBRARY fabric HINTS ${SOFTUE_PROVIDER_LIBFABRIC_ROOT}/lib ${SOFTUE_PROVIDER_LIBFABRIC_ROOT}/src/.libs REQUIRED)
+  set_target_properties(softue_protocol softue_message PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  add_library(softue_fabric MODULE ${CORE}/Provider/SoftueProvider.cpp)
+  target_include_directories(softue_fabric PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+  target_link_libraries(softue_fabric PRIVATE softue_protocol softue_message ${SOFTUE_FABRIC_LIBRARY})
+  set_target_properties(softue_fabric PROPERTIES OUTPUT_NAME softue-fi)
+endif()
+
 if(BUILD_TESTING)
   function(softue_test name source)
     add_executable(${name} ${CORE}/Test/${source})
@@ -72,6 +84,15 @@ if(BUILD_TESTING)
   softue_test(rud_window_test RudWindowTest.cpp)
   softue_test(pdc_lifecycle_test PdcLifecycleTest.cpp)
   softue_test(native_atomic_test NativeAtomicTest.cpp)
+  softue_test(context_reuse_test ContextReuseTest.cpp)
+  softue_test(message_retirement_test MessageRetirementTest.cpp)
+  softue_test(addressing_test AddressingTest.cpp)
+  softue_test(resource_lifecycle_test ResourceLifecycleTest.cpp)
+  softue_test(control_ack_test ControlAckTest.cpp)
+  softue_test(message_completion_test MessageCompletionTest.cpp)
+  add_executable(realtime_endpoint_peer ${CORE}/Test/RealtimeEndpointPeer.cpp)
+  target_link_libraries(realtime_endpoint_peer PRIVATE softue_protocol softue_message)
+  set_tests_properties(message_retirement_test PROPERTIES TIMEOUT 300)
   softue_test(pds_allocation_test PdsAllocationTest.cpp)
   softue_test(pds_simulation_test PdsSimulationTest.cpp)
   softue_test(endpoint_test EndpointTest.cpp)
@@ -81,6 +102,19 @@ if(BUILD_TESTING)
   softue_test(pds_process_loopback_test PdsProcessLoopbackTest.cpp)
   softue_test(PDS_fulltest PDS_fulltest.cpp)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  if(SOFTUE_ENABLE_LIBFABRIC)
+    enable_language(C)
+    add_executable(libfabric_provider_peer ${CORE}/Test/LibfabricProviderPeer.c)
+    target_include_directories(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_test(NAME libfabric_provider_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_provider_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_provider_processes PROPERTIES TIMEOUT 40)
+  endif()
+  add_test(NAME realtime_endpoint_processes COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_realtime_endpoint.py --binary $<TARGET_FILE:realtime_endpoint_peer>)
+  set_tests_properties(realtime_endpoint_processes PROPERTIES TIMEOUT 40)
   add_test(NAME interactive_udp COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_interactive_udp.py
     --binary $<TARGET_FILE:rdma_message_test>)
@@ -110,5 +144,24 @@ if(BUILD_TESTING)
       --fixtures $<TARGET_FILE:reference_wire_fixtures>
       --oracle $<TARGET_FILE:reference_wire_oracle>)
     set_tests_properties(reference_wire_comparison PROPERTIES TIMEOUT 30)
+    add_executable(reference_interop_target ${CORE}/Test/ReferenceInteropTarget.c)
+    target_compile_definitions(reference_interop_target PRIVATE _GNU_SOURCE)
+    target_include_directories(reference_interop_target PRIVATE
+      ${SOFTUE_REFERENCE_ROOT} ${SOFTUE_REFERENCE_ROOT}/util
+      ${SOFTUE_REFERENCE_ROOT}/imp_shim ${SOFTUE_REFERENCE_ROOT}/nic_shim
+      ${SOFTUE_REFERENCE_ROOT}/crypto
+      ${SOFTUE_LIBFABRIC_ROOT} ${SOFTUE_LIBFABRIC_ROOT}/include)
+    target_link_libraries(reference_interop_target PRIVATE
+      ${SOFTUE_REFERENCE_ROOT}/libuet_fabric.so
+      ${SOFTUE_LIBFABRIC_ROOT}/src/.libs/libfabric.so)
+    # Export the executable's test NIC entry point so the unchanged reference
+    # shared library resolves its NIC initialization through this adapter.
+    target_link_options(reference_interop_target PRIVATE -Wl,--export-dynamic)
+    add_executable(reference_interop_peer ${CORE}/Test/ReferenceInteropPeer.cpp)
+    target_link_libraries(reference_interop_peer PRIVATE softue_protocol softue_message)
+    add_test(NAME reference_process_interop COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_reference_interop.py
+      --reference $<TARGET_FILE:reference_interop_target> --peer $<TARGET_FILE:reference_interop_peer>)
+    set_tests_properties(reference_process_interop PROPERTIES TIMEOUT 40)
   endif()
 endif()

@@ -40,6 +40,8 @@
 #include <memory>
 #include <tuple>
 #include <limits>
+#include <deque>
+#include <set>
 
 class PDS_Manager
 {
@@ -49,6 +51,10 @@ private:
 public:
     explicit PDS_Manager(UET::Runtime::Services* runtime = nullptr)
         : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {}
+    ~PDS_Manager() {
+        lifetime_.reset();
+        if (runtime_ && pending_deadline_timer_) runtime_->timers.cancel(pending_deadline_timer_);
+    }
     TPDCProcessManager TPDC_Processmanager;
     IPDCProcessManager IPDC_Processmanager;
     pdc pdc_list[MAX_PDC * 2];             // PDC list
@@ -159,14 +165,67 @@ private:
     ConnectionIdentity connection_identities_[MAX_PDC * 2];
     std::map<std::tuple<uint32_t,uint32_t,uint8_t,uint8_t>,uint16_t> tx_contexts_;
     std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
+    using PeerTuple=std::tuple<uint32_t,uint32_t,uint16_t>;
+    struct RetiredReceiveContext { uint32_t final_psn; UET::Runtime::Time expires; };
+    std::map<PeerTuple,RetiredReceiveContext> retired_receive_contexts_;
+    using OutgoingMessage=std::tuple<uint32_t,uint32_t,uint8_t,uint8_t,uint16_t>;
+    std::set<OutgoingMessage> quiesced_messages_;
+    std::map<uint16_t,std::deque<SES_PDS_req>> deferred_close_requests_;
     std::unique_ptr<UET::NetworkLayer::PdsQueueTransport> network_transport_;
+    std::shared_ptr<int> lifetime_=std::make_shared<int>(0);
+    UET::Runtime::TimerId pending_deadline_timer_=0;
+    bool resource_check_due_=false, checking_resources_=false;
+
+    uint16_t initiatorCapacity() const {
+        return runtime_?std::min<uint16_t>(runtime_->initiator_context_limit,MAX_PDC):MAX_PDC;
+    }
+    uint16_t targetCapacity() const {
+        return runtime_?std::min<uint16_t>(runtime_->target_context_limit,MAX_PDC):MAX_PDC;
+    }
+    void armPendingDeadline() {
+        if (!runtime_) return;
+        if (pending_deadline_timer_) runtime_->timers.cancel(pending_deadline_timer_);
+        pending_deadline_timer_=0;
+        if (pend_q.empty()) return;
+        std::weak_ptr<int> life=lifetime_;
+        pending_deadline_timer_=runtime_->timers.at(pend_q.front().deadline_ns,[this,life] {
+            if (life.expired()) return;
+            pending_deadline_timer_=0;
+            resource_check_due_=true;
+            if (runtime_->wake) runtime_->wake();
+        });
+    }
+    void rejectPendingMessage(const SES_PDS_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        if (runtime_ && runtime_->pdc_event)
+            runtime_->pdc_event({UET::Runtime::PdcEventKind::RequestRejected,UINT16_MAX,
+                request.dst_fep,0,0,header.job_id,header.msg_id,UET::Runtime::PdcFailureReason::ResourcesUnavailable});
+        // A fragmented operation is one application request. Remove all of its
+        // unsent fragments before SES is allowed to release its message ID.
+        const auto same_message=[&](const SES_PDS_req& queued) {
+            const auto& other=queued.pkt.bth_header.Standard_Header;
+            return queued.dst_fep==request.dst_fep && other.job_id==header.job_id && other.msg_id==header.msg_id;
+        };
+        std::queue<pend_node> retained;
+        while (!pend_q.empty()) {
+            auto node=std::move(pend_q.front()); pend_q.pop();
+            if (!same_message(node.tx_req)) retained.push(std::move(node));
+        }
+        pend_q=std::move(retained); pend_cnt=static_cast<int>(pend_q.size());
+        std::queue<SES_PDS_req> retained_requests;
+        while (!SES_tx_req_q.empty()) {
+            auto queued=std::move(SES_tx_req_q.front()); SES_tx_req_q.pop();
+            if (!same_message(queued)) retained_requests.push(std::move(queued));
+        }
+        SES_tx_req_q=std::move(retained_requests);
+    }
 
 public:
 
     bool progressOne() {
         if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
         const bool queued = !SES_tx_rsp_q.empty() || !Net_rx_pkt_q.empty() ||
-                            !SES_tx_req_q.empty() || !PDC_close_q.empty();
+                            !SES_tx_req_q.empty() || !PDC_close_q.empty() || resource_check_due_;
         if (queued) mainChk();
         const bool initiator = IPDC_Processmanager.progressOne();
         const bool target = TPDC_Processmanager.progressOne();
@@ -176,6 +235,7 @@ public:
     // IDLE, TX_READY, TX_PROCESSING, PDC and ERROR -> idle
     void mainChk()
     {
+        resource_check_due_=false;
         if (!SES_eager_req_q.empty())
         {
             // State machine not written, leave it for now
@@ -203,7 +263,8 @@ public:
          else if(!PDS_error_q.empty()){
              LOG_INFO(__FUNCTION__,"PDS error event processing");
              pdsError();
-         }*/
+        }*/
+        resourceCheck();
     }
 
     void sesTxRsp()
@@ -265,6 +326,19 @@ public:
         else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
 
         if (starts_connection) {
+            const PeerTuple peer{received_packet.src_fep,received_packet.dst_fep,remote_pdc_id};
+            const auto retired=retired_receive_contexts_.find(peer);
+            if (runtime_ && retired!=retired_receive_contexts_.end()) {
+                if (runtime_->clock.now()>=retired->second.expires) retired_receive_contexts_.erase(retired);
+                else {
+                    const auto sequence=is_request?received_packet.PDS_header.RUOD_req_header.psn:
+                        received_packet.PDS_header.RUOD_cp_header.psn;
+                    if (sequence-retired->second.final_psn==0 || sequence-retired->second.final_psn>=0x80000000u) {
+                        sendNack(&received_packet,UET_CLOSING);
+                        return;
+                    }
+                }
+            }
             // SYN carries pdc_info/psn_off in place of dpdcid. Resolve it by
             // {source FEP, destination FEP, source PDCID}, never by that union.
             local_pdc_id = muxRx2PDCID(received_packet.src_fep,
@@ -284,6 +358,12 @@ public:
             return;
         }
         auto& identity = connection_identities_[local_pdc_id];
+        if (!identity.remote_pdc_known && local_pdc_id<MAX_PDC && (is_acknowledgement || is_negative_acknowledgement)) {
+            const uint32_t sequence=is_acknowledgement
+                ? received_packet.PDS_header.RUOD_ack_header.cack_psn+received_packet.PDS_header.RUOD_ack_header.ack_psn_off
+                : received_packet.PDS_header.nack_header.nack_psn;
+            if (!IPDC_Processmanager.hasOutstandingPacket(local_pdc_id,sequence)) return;
+        }
         const bool establishment_failure = is_negative_acknowledgement && remote_pdc_id == 0;
         if (identity.local_endpoint != received_packet.dst_fep ||
             identity.remote_endpoint != received_packet.src_fep ||
@@ -414,43 +494,26 @@ public:
             PDStoNet.push(datagram);
             return;
         }
-        // Select PDC based on tx to execute task, first check if PDC is available or can be allocated
-        // Try to allocate PDC based on tx
-        uint16_t pdc_id;
-        if (assignPDC(tx.pkt.bth_header.Standard_Header.job_id, tx.dst_fep, tx.tc, tx.mode, tx.pkt.bth_header.Standard_Header.msg_id, &pdc_id))
-        { // Allocate PDC
-            if (!PDCOpen(pdc_id) && !isOOR())
-            {
-                // If PDC is not open and not in OOR state
-                // Try to allocate PDC
-                if (allocPDC(pdc_id, tx.dst_fep, tx.src_fep))
-                {
-                    LOG_INFO("ses_tx_req", "PDC allocation successful, ID: " + std::to_string(pdc_id) + ", current open count: " + std::to_string(open_cnt));
-                }
-                else
-                {
-                    LOG_ERROR("ses_tx_req", "Unexpected error: PDC allocation failed");
-                }
-            }
-            if (isOOR())
-            {
-                // If in OOR state, enter wait queue
-                txOORPendEnqueue(&tx);
-            }
-            else
-            {
-                // if (tx->pkt.bth_header.Standard_Header.som == 1)
-                //     msgmap(tx->pkt.bth_header.Standard_Header.msg_id, pdc_id); // Associate each message ID with PDC of message start (som), unclear how to associate for now
-                // LOG_INFO("ses_tx_req", "PDC is open and not in OOR state, adding to PDC processing");
-                fwdPkt2PDC(&tx, pdc_id); // Send request to PDC
-            }
+        if (!tryForwardRequest(tx)) txOORPendEnqueue(&tx);
+    }
+
+    // Allocation and resource retry use exactly the same path. An established
+    // context remains usable even when every other ID in its pool is occupied.
+    bool tryForwardRequest(SES_PDS_req& request) {
+        const auto& semantic=request.pkt.bth_header.Standard_Header;
+        uint16_t local_pdc;
+        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id,&local_pdc)) return false;
+        const OutgoingMessage message{semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id};
+        if (quiesced_messages_.count(message) ||
+            (semantic.som && IPDC_Processmanager.isConnectionClosing(local_pdc))) {
+            // §3.5.8.3: finish existing messages before starting a new context.
+            quiesced_messages_.insert(message);
+            deferred_close_requests_[local_pdc].push_back(std::move(request));
+            return true;
         }
-        else
-        {
-            LOG_WARN("ses_tx_req", "PDC cannot be allocated, entering TX OOR & PEND queue");
-            // If PDC is unavailable or cannot be allocated, enter wait queue
-            txOORPendEnqueue(&tx);
-        }
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,request.dst_fep,request.src_fep)) return false;
+        fwdPkt2PDC(&request,local_pdc);
+        return true;
     }
 
     /**
@@ -475,6 +538,8 @@ public:
         // PDC application logic
         // Simple simulation here, actual logic needs implementation based on specific requirements
         if (pdc_id >= MAX_PDC * 2) return false;
+        if (pdc_id<MAX_PDC && IPDC_Processmanager.getActiveProcessCount()>=initiatorCapacity()) return false;
+        if (pdc_id>=MAX_PDC && TPDC_Processmanager.getActiveProcessCount()>=targetCapacity()) return false;
         if (!pdc_list[pdc_id].is_open)
         {
             connection_identities_[pdc_id] = {src_fep,dst_fep,0,false};
@@ -550,19 +615,16 @@ public:
      */
     void txOORPendEnqueue(SES_PDS_req *tx)
     {
-        // Enter wait queue
-        LOG_INFO("tx_oor_pend_enqueue", "=====================TX OOR & PEND Request Enqueue=====================");
-        // Calculate maximum wait end_time
-        pend_node node = createPendNode(*tx); // Create pend_node
-        pend_q.push(node);
-        pend_cnt++; // Pending counter increment by 1
-        if (pendQFull())
-        {
-            pause_ses = true; // If pending queue is full, pause SES, haven't figured out how to notify SES yet
-            LOG_WARN("tx_oor_pend_enqueue", "Wait queue is full, SES paused");
+        const size_t limit=runtime_?runtime_->pending_request_limit:MAX_PEND;
+        if (pend_q.size()>=limit) {
+            rejectPendingMessage(*tx);
+            armPendingDeadline();
+            return;
         }
-        // Enter resource checking
-        resourceCheck(); // Check if resources are available, whether need to close some PDCs to release pending data packets
+        pend_q.push(createPendNode(*tx));
+        pend_cnt=static_cast<int>(pend_q.size());
+        pause_ses=pendQFull();
+        resourceCheck();
     }
 
     /**
@@ -571,7 +633,7 @@ public:
      */
     bool pendQFull()
     {
-        return pend_cnt >= MAX_PEND; // If pending queue is full, return true
+        return pend_q.size() >= (runtime_?runtime_->pending_request_limit:MAX_PEND); // If pending queue is full, return true
     }
 
     /**
@@ -592,7 +654,8 @@ public:
         uint32_t pend_end_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_end.time_since_epoch()).count());
         LOG_INFO("create_pend_node", "Wait start time: " + std::to_string(pend_start_ms));
         LOG_INFO("create_pend_node", "Wait end time: " + std::to_string(pend_end_ms));
-        pend_node node = {tx, pend_time, pend_start_ms, pend_end_ms}; // Create pend_node
+        pend_node node = {tx, pend_time, pend_start_ms, pend_end_ms};
+        if (runtime_) node.deadline_ns=UET::Runtime::add_time(runtime_->clock.now(),runtime_->pending_request_timeout); // Create pend_node
         return node;                                                  // Return pend_node
     }
 
@@ -695,42 +758,30 @@ public:
        */
     void resourceCheck()
     {
-        // Check if resources are available
-        LOG_INFO("resource_check", "=====================Resource Check=====================");
-
-        if (pend_cnt > 0 || (open_cnt - closing_cnt > Close_Thresh))
-        {
-            // Add timeout check logic, first confirm if queued tasks have timed out, drop them if timed out
-            while (!pend_q.empty())
-            {
-                if (isPendNodeOverTime(pend_q.front()))
-                {
-                    // Directly pop if timed out, drop it
-                    LOG_WARN("resource_check", "First wait node timed out, removed, remaining wait count: " + std::to_string(pend_cnt));
-                    pend_node node = pend_q.front();
-                    pend_q.pop();
-                    pendTimeOut(node);
-                }
-            }
-            uint16_t sPDCID = selectPDC2Close(); // Select PDC to close
-            if (sPDCID == -1)
-            {
-                LOG_WARN("resource_check", "No PDC available to close, not closing for now");
-            }
-            else
-            {
-                IPDC_Processmanager.sendCloseReq(sPDCID); // Send close request to IPDC
-                // Enter main request processing
-                closing_cnt++; // Counter increment by 1
-
-                LOG_INFO("resource_check", "Resource check: closing PDC, closing count: " + std::to_string(closing_cnt));
-            }
+        if (checking_resources_) return;
+        checking_resources_=true;
+        while (!pend_q.empty() && isPendNodeOverTime(pend_q.front())) {
+            const auto expired=pend_q.front(); pend_q.pop();
+            ++event_cnt;
+            rejectPendingMessage(expired.tx_req);
         }
-        else
-        {
-            // If no PDC needs to be closed, do nothing
-            LOG_INFO("resource_check", "Resource check: no need to close PDC");
+        while (!pend_q.empty()) {
+            // Copy until accepted: a failed allocation leaves the original
+            // deadline and queue order intact instead of restarting the timer.
+            auto request=pend_q.front().tx_req;
+            if (!tryForwardRequest(request)) break;
+            pend_q.pop();
         }
+        pend_cnt=static_cast<int>(pend_q.size());
+        pause_ses=pendQFull();
+        if (!pend_q.empty()) {
+            // Simulator policy: reclaim one idle initiator context under
+            // pressure. Targets are reclaimed only by their owning initiator.
+            const int candidate=selectPDC2Close();
+            if (candidate>=0 && IPDC_Processmanager.sendCloseReq(static_cast<uint16_t>(candidate))) ++closing_cnt;
+        }
+        armPendingDeadline();
+        checking_resources_=false;
     }
 
     /**
@@ -739,49 +790,20 @@ public:
      */
     void pendTimeOut(pend_node node)
     {
-        // Process timed out pend_node
-        LOG_WARN("pend_timeout", "Processing timed out wait node");
-        pend_cnt--;
-        event_cnt++;
-        // dropPkt(); // Placeholder, temporarily empty
-        dropPkt(node);
-
-        // ses -> pkt fail event
-        sendError2SES(); // Send error report to SES, this function is empty for now
+        ++event_cnt;
+        rejectPendingMessage(node.tx_req);
+        armPendingDeadline();
     }
 
-    /**
-     * @brief Send error report to SES
-     */
-    void sendError2SES()
-    {
-        // Send error to SES, will be improved based on actual requirements later
-        LOG_INFO("send_error_to_ses", "Sending error message to SES");
-    }
-
-    /**
-     * @brief Drop error packet
-     * @return Send error packet
-     */
-    void dropPkt(pend_node node)
-    {
-        // Placeholder, temporarily empty
-        LOG_DEBUG("drop_packet", "node :" + std::to_string(node.tx_req.pkt.bth_header.Standard_Header.msg_id) + " dropped");
-        // Note: Do not call free on stack objects, nodes will be automatically destroyed when scope ends
-    }
-
-    /**
-     * @brief Check if timeout occurred
-     * @return true or false
-     */
+    // Runtime nanoseconds avoid the legacy millisecond counter's wraparound.
     bool isPendNodeOverTime(pend_node node)
     {
-        // Check if exceeds expected time limit
+        if (runtime_) return runtime_->clock.now()>=node.deadline_ns;
         auto pend_end = runtime_
             ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(runtime_->clock.now()))
             : std::chrono::steady_clock::now();
         uint32_t time_now_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_end.time_since_epoch()).count());
-        return static_cast<int32_t>(time_now_ms - node.end_time) > 0;
+        return static_cast<int32_t>(time_now_ms - node.end_time) >= 0;
     }
 
     /**
@@ -870,11 +892,13 @@ public:
         const auto key = std::make_tuple(job_id,dest_fa,trafficclass,deliverymode);
         auto found = tx_contexts_.find(key);
         if (found != tx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint16_t capacity=initiatorCapacity();
+        if (!capacity) return -1;
         const uint64_t hash_key = (uint64_t{job_id} << 32) ^ dest_fa ^
                                  (uint64_t{trafficclass} << 56) ^ (uint64_t{deliverymode} << 48);
-        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % MAX_PDC;
-        for (uint16_t offset=0;offset<MAX_PDC;++offset) {
-            const uint16_t id = (first+offset)%MAX_PDC;
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % capacity;
+        for (uint16_t offset=0;offset<capacity;++offset) {
+            const uint16_t id = (first+offset)%capacity;
             if (!pdc_list[id].is_open) {
                 for (auto old=tx_contexts_.begin();old!=tx_contexts_.end();)
                     if (old->second==id) old=tx_contexts_.erase(old); else ++old;
@@ -889,10 +913,12 @@ public:
         const auto key = std::make_tuple(src_addr,dest_addr,spdcid);
         auto found = rx_contexts_.find(key);
         if (found != rx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint16_t capacity=targetCapacity();
+        if (!capacity) return UINT16_MAX;
         const uint64_t hash_key = (uint64_t{src_addr}<<32) ^ dest_addr ^ (uint64_t{spdcid}<<16);
-        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1)%MAX_PDC;
-        for (uint16_t offset=0;offset<MAX_PDC;++offset) {
-            const uint16_t id = MAX_PDC+(first+offset)%MAX_PDC;
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1)%capacity;
+        for (uint16_t offset=0;offset<capacity;++offset) {
+            const uint16_t id = MAX_PDC+(first+offset)%capacity;
             if (!pdc_list[id].is_open) {
                 for (auto old=rx_contexts_.begin();old!=rx_contexts_.end();)
                     if (old->second==id) old=rx_contexts_.erase(old); else ++old;
@@ -909,7 +935,7 @@ public:
         for (int i = 0; i < MAX_PDC; i++)
         {
 
-            if (pdc_list[i].is_open)
+            if (pdc_list[i].is_open && !IPDC_Processmanager.isConnectionClosing(i))
             {
                 if (i < MAX_PDC)
                 { // Prioritize closing IPDC?
@@ -953,12 +979,27 @@ public:
             case PDC_TYPE::IPDC:
                 LOG_INFO("pdc_close", "Closing IPDC ID: " + std::to_string(pdc_id));
                 IPDC_Processmanager.stopIPDCProcess(pdc_id);
+                if (auto deferred=deferred_close_requests_.find(pdc_id);deferred!=deferred_close_requests_.end()) {
+                    for (auto& request:deferred->second) {
+                        const auto& semantic=request.pkt.bth_header.Standard_Header;
+                        quiesced_messages_.erase({semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id});
+                        SES_tx_req_q.push(std::move(request));
+                    }
+                    deferred_close_requests_.erase(deferred);
+                }
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;
                 if (closing_cnt > 0) --closing_cnt;
                 break;
             case PDC_TYPE::TPDC:
                 LOG_INFO("pdc_close", "Closing TPDC ID: " + std::to_string(pdc_id));
+                if (runtime_) {
+                    if (const auto sequence=TPDC_Processmanager.receiveSequenceSnapshot(pdc_id)) {
+                        const auto& identity=connection_identities_[pdc_id];
+                        retired_receive_contexts_[{identity.remote_endpoint,identity.local_endpoint,identity.remote_pdc_id}]=
+                            {sequence->second,UET::Runtime::add_time(runtime_->clock.now(),runtime_->syn_retransmission_safety_time)};
+                    }
+                }
                 TPDC_Processmanager.stopTPDCProcess(pdc_id);
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;

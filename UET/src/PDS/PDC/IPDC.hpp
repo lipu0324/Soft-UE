@@ -67,7 +67,8 @@ public:
      * @param id PDC identifier
      * @return Initialization success status
      */
-    bool initPDC(uint16_t id);
+    bool initPDC(uint16_t id) override { return initPDC(id,1000); }
+    bool initPDC(uint16_t id, uint32_t initial_psn);
     
     /**
      * @brief Main event loop, handles various events by priority: control messages, close requests, packet reception, response sending, etc.

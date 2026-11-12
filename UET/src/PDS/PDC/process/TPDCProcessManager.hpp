@@ -53,6 +53,13 @@
  */
 class TPDCProcessManager {
 public:
+    std::optional<std::pair<uint32_t,uint32_t>> receiveSequenceSnapshot(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(pdcid);
+        if (found==tpdc_processes.end()) return std::nullopt;
+        return std::make_pair(found->second->tpdc_instance->start_psn,found->second->tpdc_instance->rx_cur_psn);
+    }
+
     // Process state enumeration
     enum ProcessState {
         STOPPED,    // Stopped
@@ -269,6 +276,7 @@ public:
         }
         
         process_info->state.store(STOPPED);
+        tpdc_processes.erase(it);
         LOG_DEBUG(__FUNCTION__, "Successfully stopped TPDC process, PDCID: " + std::to_string(pdcid));
         return true;
     }

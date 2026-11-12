@@ -176,14 +176,17 @@
       "status": "partial",
       "tests": [
         "pdc_lifecycle_test",
-        "pds_recovery_test"
+        "pds_recovery_test",
+        "context_reuse_test",
+        "resource_lifecycle_test",
+        "control_ack_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Normal close and lost command/ACK tested; SYN safety and complete late-packet/reuse matrix remain open."
+      "evidence_note": "Close/SYN safety, retained per-ID PSNs, late old SYN/ACK rejection, bounded resource queues and reuse tested. Full control/error/sequence-wrap matrix remains open."
     },
     {
       "id": "PDS-TRIM",
@@ -204,7 +207,8 @@
       "status": "partial",
       "tests": [
         "memory_registry_test",
-        "endpoint_test"
+        "endpoint_test",
+        "addressing_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -219,7 +223,9 @@
       "summary": "内存键、访问权限、边界与撤销",
       "status": "partial",
       "tests": [
-        "memory_registry_test"
+        "memory_registry_test",
+        "addressing_test",
+        "realtime_endpoint_processes"
       ],
       "profiles": [
         "AI_BASE",
@@ -307,14 +313,16 @@
       "id": "API-FABRIC",
       "reference": "§2.2",
       "summary": "真实 libfabric 2.0 provider",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "libfabric_provider_processes"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "libfabric 2.0.0 dependency now builds; softue provider implementation and ABI tests remain missing."
+      "evidence_note": "A dynamically loaded libfabric 2.0 provider exercises FI_MSG and WRITE/WRITE IMM, host buffers and CQ errors over the common SES/PDS kernel. Atomic/DGRAM mappings, further flags and profile acceptance remain open."
     },
     {
       "id": "CMS-NSCC",
@@ -536,10 +544,45 @@
       "id": "UEC-INTEROP",
       "reference": "M2 acceptance",
       "summary": "官方实现的进程级标准报文互通",
-      "status": "blocked",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "reference_process_interop"
+      ],
       "profiles": [],
-      "evidence_note": "Pinned official application builds; raw packet socket returns EPERM without CAP_NET_RAW. Parser comparison is not endpoint interoperability."
+      "evidence_note": "Independent processes use unchanged pinned reference SES/PDS and a test-only UDP-frame NIC adapter: WRITE/SEND and return SEND, completions and Clear retirement pass. Raw-NIC/veth tests and additional operation/encapsulation/fault combinations remain open."
+    },
+    {
+      "id": "SES-ADDRESS",
+      "reference": "§3.4.2.3.6–7; §3.4.4.2",
+      "summary": "相对/绝对 PID、独立资源索引、generation 与任意 JobID MR 授权",
+      "status": "partial",
+      "tests": [
+        "addressing_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native address selection and scope checks pass; optimized/local formats and all key classes remain open."
+    },
+    {
+      "id": "SES-RETIREMENT",
+      "reference": "§3.4.6; §3.5.8",
+      "summary": "消息完成、PSN 关联和协议驱动的消息 ID 退休",
+      "status": "partial",
+      "tests": [
+        "message_completion_test",
+        "message_retirement_test",
+        "context_reuse_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "66000 exactly-once integer operations cross the 16-bit message-ID space; EOM-scoped default responses, explicit full-length RUD completion and error-path ID leases are checked independently."
     }
   ]
 }

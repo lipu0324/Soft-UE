@@ -82,10 +82,11 @@ int main() {
             h.hd=variant==1; h.ri_generation=variant==2;
             if (variant==1) h.opcode=2; // READ remains unsupported on this native interface.
             h.msg_id=60000+variant; h.job_id=1; h.PIDonFEP=1; h.resource_index=1;
+            if (variant==0) h.PIDonFEP=99; // Absolute PID is valid only when configured.
             h.initiator=1; h.match_bits=region.key; h.request_length=1;
             request.pkt.payload={0x99};
             CHECK(a.submit(request)); loop.run_until((30+variant*5)*kMillisecond);
-            CHECK(codes.size()==variant+1); CHECK(codes.back()==(variant==2?0x02:0x06));
+            CHECK(codes.size()==variant+1); CHECK(codes.back()==(variant==2?0x02:variant==0?0x1a:0x06));
             CHECK(target.memory().read(1,1,region.key,0,16)==before);
         }
         source.close(); target.close(); a.close(); b.close();

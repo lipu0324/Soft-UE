@@ -16,7 +16,10 @@ public:
           duplicate_requests_(duplicate_requests) {}
     SendResult try_send(const Frame& frame) override {
         const auto decoded = UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
-        if (decoded.packet.PDS_type == nack_header) ++negative_ack_count;
+        if (decoded.packet.PDS_type == nack_header) {
+            ++negative_ack_count;
+            negative_ack_codes.push_back(decoded.packet.PDS_header.nack_header.nack_code);
+        }
         if (decoded.packet.PDS_type == RUOD_req_header) {
             ++request_count;
             if (decoded.packet.PDS_header.RUOD_req_header.flags.retx) ++retransmit_count;
@@ -31,12 +34,13 @@ public:
     void set_receiver(Receiver receiver) override { downstream_.set_receiver(std::move(receiver)); }
     void set_writable_handler(Writable callback) override { downstream_.set_writable_handler(std::move(callback)); }
     size_t request_count=0, retransmit_count=0, negative_ack_count=0;
+    std::vector<PDS_Nack_Codes> negative_ack_codes;
 private:
     IPacketPort& downstream_;
     bool drop_second_request_, duplicate_requests_;
 };
 
-void recover_missing_middle_packet(bool duplicate_requests, pdc_mode delivery_mode) {
+void recover_missing_middle_packet(bool duplicate_requests, pdc_mode delivery_mode,size_t payload_size=64) {
     EventLoop event_loop;
     Trace trace(event_loop);
     Fabric fabric(event_loop,trace,42);
@@ -54,7 +58,7 @@ void recover_missing_middle_packet(bool duplicate_requests, pdc_mode delivery_mo
     Operation write;
     write.type=OperationType::Write; write.peer=2; write.remote_key=destination.key;
     write.delivery_mode=delivery_mode;
-    for (uint8_t value=0;value<64;++value) write.payload.push_back(value);
+    for (size_t value=0;value<payload_size;++value) write.payload.push_back(static_cast<uint8_t>(value));
     source.submit(write);
 
     // The PDC RTO is 1 ms. Success before 0.5 ms proves the NACK reached the
@@ -64,14 +68,19 @@ void recover_missing_middle_packet(bool duplicate_requests, pdc_mode delivery_mo
     CHECK(source.poll_completion(completion));
     CHECK(completion.status==CompletionStatus::Success);
     CHECK(!source.poll_completion(completion));
-    CHECK(target.memory().read(1,1,destination.key,0,64)==write.payload);
+    CHECK(target.memory().read(1,1,destination.key,0,payload_size)==write.payload);
     if (delivery_mode==ROD) CHECK(target_faults.negative_ack_count>0);
     else {
-        CHECK(target_faults.negative_ack_count==0); // RUD accepts out-of-order packets.
+        // RUD accepts out-of-order data. An ACK Request may still elicit a
+        // PKT_NOT_RCVD NACK for the hole when the larger window fills.
+        CHECK(std::find(target_faults.negative_ack_codes.begin(),target_faults.negative_ack_codes.end(),UET_ROD_OOO)==
+            target_faults.negative_ack_codes.end());
         std::vector<uint64_t> delivered_sequences;
         for (const auto& event:trace.events())
             if (event.node==2 && event.event=="ses_request") delivered_sequences.push_back(event.value);
-        CHECK(delivered_sequences==std::vector<uint64_t>({1000,1002,1003,1001}));
+        if (payload_size==64) CHECK(delivered_sequences==std::vector<uint64_t>({1000,1002,1003,1001}));
+        else CHECK(std::find(delivered_sequences.begin(),delivered_sequences.end(),1002)<
+                   std::find(delivered_sequences.begin(),delivered_sequences.end(),1001));
     }
     CHECK(source_faults.retransmit_count>0);
     source.close(); target.close(); source_host.close(); target_host.close();
@@ -117,6 +126,8 @@ int main() {
         recover_missing_middle_packet(true,ROD);
         recover_missing_middle_packet(false,RUD);
         recover_missing_middle_packet(true,RUD);
+        recover_missing_middle_packet(false,ROD,512);
+        recover_missing_middle_packet(false,RUD,512);
         reject_wrong_connection_identity();
         std::cout << "PASS: NACK-driven go-back-N, duplicate suppression and connection identity checks\n";
         return 0;

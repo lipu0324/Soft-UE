@@ -40,10 +40,12 @@ uint8_t next_wire(PDS_next_hdr next) {
     case UET_HDR_RESPONSE: return 4;
     case UET_HDR_RESPONSE_DATA: return 5;
     case UET_HDR_RESPONSE_DATA_SMALL: return 6;
+    case UET_HDR_CP_ACK: return 9;
     default: throw std::invalid_argument("invalid next header");
     }
 }
 PDS_next_hdr next_host(uint8_t next) {
+    if (next==9) return UET_HDR_CP_ACK;
     static constexpr PDS_next_hdr names[] = {UET_HDR_NONE,UET_HDR_REQUEST_SMALL,
         UET_HDR_REQUEST_MEDIUM,UET_HDR_REQUEST_STD,UET_HDR_RESPONSE,
         UET_HDR_RESPONSE_DATA,UET_HDR_RESPONSE_DATA_SMALL};
@@ -51,6 +53,16 @@ PDS_next_hdr next_host(uint8_t next) {
     return names[next];
 }
 void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr next) {
+    if (next==UET_HDR_CP_ACK) {
+        const auto& acknowledgement=packet.control_ack;
+        if (acknowledgement.cp_ack_type!=Close_cmd || acknowledgement.cp_ack_length!=2 ||
+            acknowledgement.reserved || acknowledgement.start_psn_method>1)
+            throw std::invalid_argument("unsupported control acknowledgement");
+        put(encoded_bytes,acknowledgement.cp_ack_type,1); put(encoded_bytes,2,1);
+        put(encoded_bytes,acknowledgement.start_psn_method,1); put(encoded_bytes,0,1);
+        put(encoded_bytes,acknowledgement.expected_psn,4);
+        return;
+    }
     if (next == UET_HDR_NONE) {
         if (!packet.SESpkt.payload.empty()) throw std::invalid_argument("payload without SES header");
         return;
@@ -90,6 +102,16 @@ void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr
     encoded_bytes.insert(encoded_bytes.end(),packet.SESpkt.payload.begin(),packet.SESpkt.payload.end());
 }
 void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
+    if (next==UET_HDR_CP_ACK) {
+        auto& acknowledgement=packet.control_ack;
+        acknowledgement.cp_ack_type=reader.take(1); acknowledgement.cp_ack_length=reader.take(1);
+        acknowledgement.start_psn_method=reader.take(1); acknowledgement.reserved=reader.take(1);
+        acknowledgement.expected_psn=reader.take(4);
+        if (acknowledgement.cp_ack_type!=Close_cmd || acknowledgement.cp_ack_length!=2 ||
+            acknowledgement.reserved || acknowledgement.start_psn_method>1 || !reader.rest().empty())
+            throw std::invalid_argument("invalid control acknowledgement");
+        return;
+    }
     if (next == UET_HDR_NONE) {
         if (!reader.rest().empty()) throw std::invalid_argument("unexpected UET payload");
         return;

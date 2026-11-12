@@ -19,7 +19,7 @@ by each regression, concrete remaining placeholders and the next gated work.
   region, fragmented WRITE, WRITE with immediate completion data, single-packet
   DATAGRAM_SEND, and non-fetching 8/16/32/64-bit integer atomics.
   It uses the existing PDS/PDC implementation, not a replacement transport.
-- Registered memory is sparse, scoped by JobID and optionally PIDonFEP, and checks
+- Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
   immediate. Network atomics support signed/unsigned integer types and min, max,
   sum, difference, product, logical/bitwise operations and atomic write. Fetching,
@@ -100,17 +100,32 @@ does not prove that no remote bytes were written. Application code must not
 destroy its own endpoint or host reentrantly from a handler; it may close them
 and defer destruction to a later event.
 
-The current native endpoint uses PIDonFEP=1, Resource Index=1, standard SES
-headers and ROD/RUD (or UUD for datagrams). It does not implement complete
-relative/absolute addressing, all required memory-key formats, tagged matching or full
-Profile message-size guarantees. Sparse storage tests at the 4GiB boundary do
-not establish an end-to-end 4GiB operation guarantee. Completed incoming message
-records are bounded at 4096; protocol-driven retirement and message-ID reuse
-remain part of M2/M3 completion work.
+The default native endpoint exposes PIDonFEP=1 and Resource Index=1. Its resource
+directory also supports explicit relative-PID mappings, node-wide absolute PIDs,
+independent SEND/tagged/RMA index spaces, generation and disabled-resource checks.
+Absolute PID selection still uses checked zero-based buffer offsets; it does not
+turn a received number into a host pointer. MRs can authorize one JobID or any
+valid JobID, and can bind a specific resource index (including index zero).
+All required memory-key classes, tagged operations and full Profile message-size
+guarantees remain open. Sparse storage tests at the 4GiB boundary do not establish
+an end-to-end 4GiB operation guarantee.
+
+PDS publishes local events for transmit PSNs, peer CACKs, receive Clear and
+connection termination. SES uses these to retire completed receive records and
+lease message IDs until all fragments through EOM are cleared. A 66,000-operation
+regression crosses the full 16-bit message-ID space. An intermediate packet's
+DEFAULT_RESPONSE cannot complete a message; successful completion requires EOM transmission and either an explicit full-length
+response or the default response associated with the EOM PSN. In RUD the explicit
+full-length response may accompany a later gap-filling packet. Early error completion retains the ID while fragments remain.
 
 Simulation addresses are generated deterministically from numeric host IDs.
-`RealtimeRuntime` supplies explicit monotonic progress, but a complete real
-network port and real libfabric provider remain unimplemented. The `SUP1/SUE1`
+`RealtimeRuntime` and `UdpFramePort` provide explicit monotonic and nonblocking
+socket progress. The outer UDP tunnel carries unchanged Ethernet/UE frames and
+adds no reliability. Two independent processes exercise IPv4/native and IPv6/UDP,
+registered host buffers, packet/response loss and error completion. Synchronize
+real time before submitting operations after application setup or an input wait.
+The optional experimental libfabric provider uses this same path; see
+[its API and transport limits](PROVIDER.md). The `SUP1/SUE1`
 transport is retained only through explicitly selected legacy APIs; it is not
 silently detected or accepted by the standard-wire path.
 
@@ -126,16 +141,18 @@ results are simulation parameters, not calibrated hardware performance.
 |---|---|
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
-| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Full connection reuse/SYN safety, all control/error paths, CC ACK variants and official endpoint process interoperability remain open. |
-| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Complete addressing, all applicable AMO types/controls, long-running message retirement and real libfabric provider remain open. |
+| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. The full control/error/wrap matrix and CC ACK variants remain open. |
+| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute resource selection and protocol-driven message retirement are covered. A real experimental FI_MSG/WRITE provider runs; remaining AMO types/controls, API mappings and acceptance remain open. |
 | M4 | Basic packet-fabric substrate; congestion feedback and NSCC are not implemented. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 
 Network access was restored on 2026-11-12. CMake/CTest, libfabric 2.0.0 and the
 pinned reference's `libuet_fabric.so`/`uet` application now build successfully.
-The actual `softue` libfabric provider is still unimplemented. The current cloud
-executor has no CAP_NET_RAW, so the reference application's raw-socket endpoint
-interoperability is not counted as passed. Parser comparison is separate evidence.
+The optional `softue` libfabric provider now loads and runs public fi_* calls.
+The current executor has no CAP_NET_RAW. An independent process test therefore
+links unchanged reference SES/PDS code with a test-only NIC override that carries
+frames over unprivileged sockets. It verifies WRITE/SEND, a return SEND and Clear
+retirement. Raw-socket/veth interoperability remains separate and unverified.
 
 The optional independent comparison builds a small C harness against the reference
 library, without linking the Soft-UE codec into that harness:
@@ -145,13 +162,13 @@ cmake -S . -B build/reference \
   -DSOFTUE_REFERENCE_ROOT=/path/to/uet-ref-prov \
   -DSOFTUE_LIBFABRIC_ROOT=/path/to/libfabric-2.0.0
 cmake --build build/reference -j2
-ctest --test-dir build/reference -R reference_wire_comparison --output-on-failure
+ctest --test-dir build/reference -R "reference_wire_comparison|reference_process_interop" --output-on-failure
 ```
 
 It checks 24 native/UDP and IPv4/IPv6 fixtures across RUD, ROD, UUD, ACK, NACK
 and CP, including signed CLEAR/ACK offsets and CRC network byte order. It also
 rejects a corrupted payload. The pinned reference remains an external dependency;
-its private headers are used only by this optional test target.
+its private headers are used only by the optional reference test targets. The process test changes only the NIC boundary, not reference SES/PDS code. The pinned reference uses an older close-ACK format and is not an oracle for the UE 1.1 CP_ACK payload.
 
 ## Traceability and normative review
 

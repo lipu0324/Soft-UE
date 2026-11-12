@@ -1,0 +1,611 @@
+// Manual-progress libfabric 2.0 adapter. Application operations enter the same
+// SES/PDS kernel as virtual-time experiments; the outer UDP frame tunnel is
+// deliberately an unprivileged laboratory transport, not a raw NIC provider.
+#include "../SES/Endpoint.hpp"
+#include "../Runtime/UdpFramePort.hpp"
+#include <rdma/providers/fi_prov.h>
+#include <rdma/fi_cm.h>
+#include <rdma/fi_domain.h>
+#include <rdma/fi_endpoint.h>
+#include <rdma/fi_eq.h>
+#include <rdma/fi_rma.h>
+#include <cstdlib>
+#include <cstring>
+#include <optional>
+#include <type_traits>
+
+namespace {
+using namespace UET;
+constexpr uint64_t supported_caps=FI_MSG|FI_SEND|FI_RECV|FI_RMA|FI_WRITE|FI_REMOTE_WRITE;
+constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_TRANSMIT_COMPLETE;
+
+template<class Signature> struct Unsupported;
+template<class Result,class... Arguments> struct Unsupported<Result(*)(Arguments...)> {
+    static Result call(Arguments...) { return static_cast<Result>(-FI_ENOSYS); }
+};
+#define UNSUPPORTED(table,member) table.member=&Unsupported<decltype(table.member)>::call
+
+// No C ABI callback may propagate a C++ exception into libfabric or an app.
+template<class Callback> auto guarded(Callback callback) noexcept -> decltype(callback()) {
+    using Result=decltype(callback());
+    try { return callback(); }
+    catch (const std::bad_alloc&) { return static_cast<Result>(-FI_ENOMEM); }
+    catch (const SES::MemoryAccessError&) { return static_cast<Result>(-FI_EACCES); }
+    catch (const std::invalid_argument&) { return static_cast<Result>(-FI_EINVAL); }
+    catch (...) { return static_cast<Result>(-FI_EOTHER); }
+}
+
+struct ProviderFabric;
+struct ProviderDomain;
+struct ProviderEndpoint;
+struct ProviderAddressVector;
+struct ProviderCompletionQueue;
+struct ProviderRegion;
+
+struct ProviderFabric { fid_fabric handle{}; size_t domains=0; };
+struct ProviderDomain {
+    fid_domain handle{};
+    ProviderFabric* fabric=nullptr;
+    size_t children=0;
+    SES::MemoryRegistry memory;
+    ProviderEndpoint* endpoint=nullptr;
+};
+struct ProviderAddressVector {
+    fid_av handle{};
+    ProviderDomain* domain=nullptr;
+    size_t bindings=0;
+    std::vector<std::optional<sockaddr_in>> addresses;
+};
+struct ProviderCompletionQueue {
+    fid_cq handle{};
+    ProviderDomain* domain=nullptr;
+    size_t bindings=0;
+    fi_cq_format format=FI_CQ_FORMAT_DATA;
+    std::deque<fi_cq_data_entry> completions;
+    std::deque<fi_cq_err_entry> errors;
+};
+struct ProviderRegion {
+    fid_mr handle{};
+    ProviderDomain* domain=nullptr;
+    SES::Region region;
+};
+struct ApplicationOperation {
+    void* context;
+    uint64_t flags;
+    void* buffer;
+    uint64_t temporary_key=0;
+};
+struct ProviderEndpoint {
+    fid_ep handle{};
+    ProviderDomain* domain=nullptr;
+    ProviderAddressVector* addresses=nullptr;
+    ProviderCompletionQueue *send_cq=nullptr,*receive_cq=nullptr;
+    sockaddr_in local_address{};
+    bool enabled=false;
+    uint64_t next_receive_token=0;
+    Runtime::RealtimeRuntime runtime;
+    Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
+    std::unique_ptr<Runtime::UdpFramePort> port;
+    std::unique_ptr<Runtime::PdsHost> host;
+    std::unique_ptr<SES::Endpoint> semantic;
+    std::map<uint64_t,ApplicationOperation> transmits,receives;
+};
+
+// fid is the first field in these Linux provider objects. These conversions
+// are exclusively local handle lookups; network fields never enter this path.
+template<class Owner,class Handle> Owner& owner(Handle* handle) { return *reinterpret_cast<Owner*>(handle); }
+
+fi_ops object_ops{};
+fi_ops_fabric fabric_ops{};
+fi_ops_domain domain_ops{};
+fi_ops_mr memory_ops{};
+fi_ops_av address_ops{};
+fi_ops_cq completion_ops{};
+fi_ops endpoint_object_ops{};
+fi_ops_ep endpoint_ops{};
+fi_ops_cm connection_ops{};
+fi_ops_msg message_ops{};
+fi_ops_rma rma_ops{};
+
+void initialize_fid(fid& handle,size_t kind,void* context,fi_ops* operations=&object_ops) {
+    handle.fclass=kind; handle.context=context; handle.ops=operations;
+}
+
+int completion_error(const SES::Completion& completion) {
+    switch (completion.status) {
+    case SES::CompletionStatus::Timeout: return FI_ETIMEDOUT;
+    case SES::CompletionStatus::Cancelled: return FI_ECANCELED;
+    case SES::CompletionStatus::ResourceExhausted: return FI_ENOSPC;
+    case SES::CompletionStatus::Unsupported: return FI_EOPNOTSUPP;
+    case SES::CompletionStatus::RemoteError:
+        return completion.remote_code==0x1c || completion.remote_code==0x17 || completion.remote_code==0x18?
+            FI_EACCES:FI_EIO;
+    default: return FI_EIO;
+    }
+}
+
+void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation& application,
+                      const SES::Completion& completion) {
+    if (completion.status==SES::CompletionStatus::Success || completion.status==SES::CompletionStatus::LocalSuccess) {
+        fi_cq_data_entry entry{};
+        entry.op_context=application.context; entry.flags=application.flags;
+        entry.len=completion.length; entry.buf=application.buffer;
+        if (completion.immediate_data) { entry.flags|=FI_REMOTE_CQ_DATA; entry.data=*completion.immediate_data; }
+        queue.completions.push_back(entry);
+    } else {
+        fi_cq_err_entry error{};
+        error.op_context=application.context; error.flags=application.flags; error.buf=application.buffer;
+        error.len=completion.length; error.err=completion_error(completion); error.prov_errno=completion.remote_code;
+        queue.errors.push_back(error);
+    }
+}
+
+void progress(ProviderDomain& domain) {
+    auto* endpoint=domain.endpoint;
+    if (!endpoint || !endpoint->enabled) return;
+    endpoint->port->progress();
+    endpoint->runtime.progress();
+    SES::Completion completion{};
+    while (endpoint->semantic->poll_completion(completion)) {
+        if (completion.receive && completion.immediate_data) {
+            if (endpoint->receive_cq)
+                queue_completion(*endpoint->receive_cq,{nullptr,FI_RMA|FI_REMOTE_WRITE,nullptr},completion);
+        } else {
+            auto& pending=completion.receive?endpoint->receives:endpoint->transmits;
+            const auto found=pending.find(completion.receive?completion.context:completion.operation);
+            if (found==pending.end()) continue;
+            auto* queue=completion.receive?endpoint->receive_cq:endpoint->send_cq;
+            if (queue) queue_completion(*queue,found->second,completion);
+            if (found->second.temporary_key) domain.memory.deregister(found->second.temporary_key);
+            pending.erase(found);
+        }
+    }
+}
+
+void configure_peer(ProviderEndpoint& endpoint,const sockaddr_in& peer) {
+    char ip[INET_ADDRSTRLEN];
+    if (!::inet_ntop(AF_INET,&peer.sin_addr,ip,sizeof(ip))) throw std::invalid_argument("invalid peer address");
+    const auto node=ntohs(peer.sin_port);
+    if (node!=endpoint.port->node()) endpoint.port->add_peer(node,ip,node);
+}
+
+int close_object(fid* handle) {
+    return guarded([&]() -> int {
+        switch (handle->fclass) {
+        case FI_CLASS_FABRIC: {
+            auto& fabric=owner<ProviderFabric>(handle);
+            if (fabric.domains) return -FI_EBUSY;
+            delete &fabric; return 0;
+        }
+        case FI_CLASS_DOMAIN: {
+            auto& domain=owner<ProviderDomain>(handle);
+            if (domain.children) return -FI_EBUSY;
+            --domain.fabric->domains; delete &domain; return 0;
+        }
+        case FI_CLASS_AV: {
+            auto& addresses=owner<ProviderAddressVector>(handle);
+            if (addresses.bindings) return -FI_EBUSY;
+            --addresses.domain->children; delete &addresses; return 0;
+        }
+        case FI_CLASS_CQ: {
+            auto& queue=owner<ProviderCompletionQueue>(handle);
+            if (queue.bindings) return -FI_EBUSY;
+            --queue.domain->children; delete &queue; return 0;
+        }
+        case FI_CLASS_MR: {
+            auto& region=owner<ProviderRegion>(handle);
+            region.domain->memory.deregister(region.region.key);
+            --region.domain->children; delete &region; return 0;
+        }
+        case FI_CLASS_EP: {
+            auto& endpoint=owner<ProviderEndpoint>(handle);
+            if (!endpoint.transmits.empty()) return -FI_EBUSY;
+            endpoint.semantic->close(); endpoint.host->close(); endpoint.port->close();
+            for (const auto& receive:endpoint.receives)
+                if (receive.second.temporary_key) endpoint.domain->memory.deregister(receive.second.temporary_key);
+            if (endpoint.addresses) --endpoint.addresses->bindings;
+            if (endpoint.send_cq) --endpoint.send_cq->bindings;
+            if (endpoint.receive_cq) --endpoint.receive_cq->bindings;
+            endpoint.domain->endpoint=nullptr; --endpoint.domain->children;
+            delete &endpoint; return 0;
+        }
+        default: return -FI_EINVAL;
+        }
+    });
+}
+
+int open_domain(fid_fabric* fabric,fi_info*,fid_domain** result,void* context) {
+    return guarded([&]() -> int {
+        if (!result) return -FI_EINVAL;
+        auto domain=std::make_unique<ProviderDomain>(); domain->fabric=&owner<ProviderFabric>(fabric);
+        domain->memory.add_job(1);
+        initialize_fid(domain->handle.fid,FI_CLASS_DOMAIN,context);
+        domain->handle.ops=&domain_ops; domain->handle.mr=&memory_ops;
+        ++domain->fabric->domains; *result=&domain.release()->handle; return 0;
+    });
+}
+int open_fabric(fi_fabric_attr*,fid_fabric** result,void* context) {
+    return guarded([&]() -> int {
+        if (!result) return -FI_EINVAL;
+        auto fabric=std::make_unique<ProviderFabric>(); initialize_fid(fabric->handle.fid,FI_CLASS_FABRIC,context);
+        fabric->handle.ops=&fabric_ops; fabric->handle.api_version=FI_VERSION(2,0);
+        *result=&fabric.release()->handle; return 0;
+    });
+}
+int open_addresses(fid_domain* domain,fi_av_attr* attributes,fid_av** result,void* context) {
+    return guarded([&]() -> int {
+        if (!result || !attributes || attributes->flags || attributes->rx_ctx_bits ||
+            (attributes->type!=FI_AV_UNSPEC && attributes->type!=FI_AV_TABLE)) return -FI_EINVAL;
+        auto addresses=std::make_unique<ProviderAddressVector>(); addresses->domain=&owner<ProviderDomain>(domain);
+        initialize_fid(addresses->handle.fid,FI_CLASS_AV,context); addresses->handle.ops=&address_ops;
+        ++addresses->domain->children; *result=&addresses.release()->handle; return 0;
+    });
+}
+int insert_addresses(fid_av* handle,const void* buffer,size_t count,fi_addr_t* results,uint64_t flags,void*) {
+    return guarded([&]() -> int {
+        if (flags || (count && !buffer) || count>INT32_MAX) return -FI_EINVAL;
+        auto& addresses=owner<ProviderAddressVector>(handle);
+        const auto* input=static_cast<const sockaddr_in*>(buffer);
+        for (size_t index=0;index<count;++index)
+            if (input[index].sin_family!=AF_INET || !input[index].sin_port) return -FI_EADDRNOTAVAIL;
+        for (size_t index=0;index<count;++index) {
+            if (auto* endpoint=addresses.domain->endpoint;endpoint && endpoint->addresses==&addresses)
+                configure_peer(*endpoint,input[index]);
+            if (results) results[index]=addresses.addresses.size();
+            addresses.addresses.push_back(input[index]);
+        }
+        return static_cast<int>(count);
+    });
+}
+int lookup_address(fid_av* handle,fi_addr_t address,void* result,size_t* length) {
+    if (!length) return -FI_EINVAL;
+    auto& addresses=owner<ProviderAddressVector>(handle);
+    if (address>=addresses.addresses.size() || !addresses.addresses[address]) return -FI_EADDRNOTAVAIL;
+    const auto capacity=*length; *length=sizeof(sockaddr_in);
+    if (!result || capacity<sizeof(sockaddr_in)) return -FI_ETOOSMALL;
+    std::memcpy(result,&*addresses.addresses[address],sizeof(sockaddr_in)); return 0;
+}
+int remove_addresses(fid_av* handle,fi_addr_t* indices,size_t count,uint64_t flags) {
+    if (flags || (count && !indices)) return -FI_EINVAL;
+    auto& addresses=owner<ProviderAddressVector>(handle);
+    if (addresses.bindings) return -FI_EBUSY;
+    for (size_t index=0;index<count;++index) {
+        if (indices[index]>=addresses.addresses.size()) return -FI_EADDRNOTAVAIL;
+        addresses.addresses[indices[index]].reset();
+    }
+    return 0;
+}
+
+int open_completion_queue(fid_domain* domain,fi_cq_attr* attributes,fid_cq** result,void* context) {
+    return guarded([&]() -> int {
+        if (!attributes || !result || attributes->flags ||
+            (attributes->wait_obj!=FI_WAIT_UNSPEC && attributes->wait_obj!=FI_WAIT_NONE)) return -FI_EINVAL;
+        const auto format=attributes->format==FI_CQ_FORMAT_UNSPEC?FI_CQ_FORMAT_DATA:attributes->format;
+        if (format!=FI_CQ_FORMAT_CONTEXT && format!=FI_CQ_FORMAT_MSG && format!=FI_CQ_FORMAT_DATA) return -FI_EINVAL;
+        auto queue=std::make_unique<ProviderCompletionQueue>(); queue->domain=&owner<ProviderDomain>(domain); queue->format=format;
+        initialize_fid(queue->handle.fid,FI_CLASS_CQ,context); queue->handle.ops=&completion_ops;
+        ++queue->domain->children; *result=&queue.release()->handle; return 0;
+    });
+}
+ssize_t read_completions(fid_cq* handle,void* result,size_t count) {
+    return guarded([&]() -> ssize_t {
+        if (count && !result) return -FI_EINVAL;
+        auto& queue=owner<ProviderCompletionQueue>(handle); progress(*queue.domain);
+        if (!count) return 0;
+        if (queue.completions.empty()) return queue.errors.empty()?-FI_EAGAIN:-FI_EAVAIL;
+        const auto available=std::min(count,queue.completions.size());
+        for (size_t index=0;index<available;++index) {
+            const auto& entry=queue.completions.front();
+            if (queue.format==FI_CQ_FORMAT_DATA) static_cast<fi_cq_data_entry*>(result)[index]=entry;
+            else if (queue.format==FI_CQ_FORMAT_MSG)
+                static_cast<fi_cq_msg_entry*>(result)[index]={entry.op_context,entry.flags,entry.len};
+            else static_cast<fi_cq_entry*>(result)[index]={entry.op_context};
+            queue.completions.pop_front();
+        }
+        return static_cast<ssize_t>(available);
+    });
+}
+ssize_t read_errors(fid_cq* handle,fi_cq_err_entry* result,uint64_t flags) {
+    return guarded([&]() -> ssize_t {
+        if (!result || flags) return -FI_EINVAL;
+        auto& queue=owner<ProviderCompletionQueue>(handle); progress(*queue.domain);
+        if (queue.errors.empty()) return -FI_EAGAIN;
+        *result=queue.errors.front(); queue.errors.pop_front(); return 1;
+    });
+}
+const char* error_string(fid_cq*,int,const void*,char* result,size_t length) {
+    constexpr const char* description="Soft-UE remote semantic error (prov_errno is the UE return code)";
+    if (result && length) { std::snprintf(result,length,"%s",description); return result; }
+    return description;
+}
+
+int register_memory(fid* domain_handle,const void* buffer,size_t length,uint64_t access,uint64_t offset,
+                    uint64_t,uint64_t flags,fid_mr** result,void* context) {
+    return guarded([&]() -> int {
+        if (!result || offset || flags || (length && !buffer)) return -FI_EINVAL;
+        auto& domain=owner<ProviderDomain>(domain_handle);
+        uint8_t permissions=0;
+        if (access&FI_REMOTE_READ) permissions|=static_cast<uint8_t>(SES::Access::Read);
+        if (access&FI_REMOTE_WRITE) permissions|=static_cast<uint8_t>(SES::Access::Write);
+        auto region=std::make_unique<ProviderRegion>(); region->domain=&domain;
+        region->region=domain.memory.register_buffer(1,0,static_cast<uint8_t*>(const_cast<void*>(buffer)),length,permissions);
+        initialize_fid(region->handle.fid,FI_CLASS_MR,context);
+        region->handle.key=region->region.key; region->handle.mem_desc=region.get();
+        ++domain.children; *result=&region.release()->handle; return 0;
+    });
+}
+
+int endpoint_name(fid* handle,void* result,size_t* length) {
+    if (!length) return -FI_EINVAL;
+    const auto capacity=*length; *length=sizeof(sockaddr_in);
+    if (!result || capacity<sizeof(sockaddr_in)) return -FI_ETOOSMALL;
+    std::memcpy(result,&owner<ProviderEndpoint>(handle).local_address,sizeof(sockaddr_in)); return 0;
+}
+int bind_endpoint(fid* handle,fid* resource,uint64_t flags) {
+    if (!resource) return -FI_EINVAL;
+    auto& endpoint=owner<ProviderEndpoint>(handle);
+    if (endpoint.enabled) return -FI_EOPBADSTATE;
+    if (resource->fclass==FI_CLASS_AV) {
+        auto& addresses=owner<ProviderAddressVector>(resource);
+        if (flags || endpoint.addresses || addresses.domain!=endpoint.domain) return -FI_EINVAL;
+        endpoint.addresses=&addresses; ++addresses.bindings; return 0;
+    }
+    if (resource->fclass==FI_CLASS_CQ) {
+        auto& queue=owner<ProviderCompletionQueue>(resource);
+        if (queue.domain!=endpoint.domain || !(flags&(FI_TRANSMIT|FI_RECV)) || (flags&~(FI_TRANSMIT|FI_RECV))) return -FI_EINVAL;
+        if (((flags&FI_TRANSMIT) && endpoint.send_cq) || ((flags&FI_RECV) && endpoint.receive_cq)) return -FI_EINVAL;
+        if (flags&FI_TRANSMIT) { endpoint.send_cq=&queue; ++queue.bindings; }
+        if (flags&FI_RECV) { endpoint.receive_cq=&queue; ++queue.bindings; }
+        return 0;
+    }
+    return -FI_ENOSYS;
+}
+int control_endpoint(fid* handle,int command,void*) {
+    return guarded([&]() -> int {
+    if (command!=FI_ENABLE) return -FI_ENOSYS;
+    auto& endpoint=owner<ProviderEndpoint>(handle);
+    if (endpoint.enabled) return -FI_EOPBADSTATE;
+    if (!endpoint.addresses || !endpoint.send_cq || !endpoint.receive_cq) return -FI_ENOCQ;
+    for (const auto& peer:endpoint.addresses->addresses) if (peer) configure_peer(endpoint,*peer);
+    endpoint.enabled=true; return 0;
+    });
+}
+
+int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context) {
+    return guarded([&]() -> int {
+        auto& domain=owner<ProviderDomain>(handle);
+        if (!info || !result || info->ep_attr->type!=FI_EP_RDM || (info->caps&~supported_caps)) return -FI_EINVAL;
+        if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
+        auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
+        endpoint->local_address.sin_family=AF_INET;
+        endpoint->local_address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        if (info->src_addr) {
+            if (info->src_addrlen!=sizeof(sockaddr_in)) return -FI_EINVAL;
+            std::memcpy(&endpoint->local_address,info->src_addr,sizeof(sockaddr_in));
+            if (endpoint->local_address.sin_family!=AF_INET) return -FI_EINVAL;
+        }
+        char ip[INET_ADDRSTRLEN];
+        if (!::inet_ntop(AF_INET,&endpoint->local_address.sin_addr,ip,sizeof(ip))) return -FI_EINVAL;
+        endpoint->port=std::make_unique<Runtime::UdpFramePort>(0,ntohs(endpoint->local_address.sin_port),ip);
+        endpoint->local_address.sin_port=htons(endpoint->port->local_port());
+        endpoint->host=std::make_unique<Runtime::PdsHost>(endpoint->port->node(),endpoint->runtime.events(),endpoint->trace,*endpoint->port);
+        endpoint->host->services().rto_ms=20;
+        endpoint->semantic=std::make_unique<SES::Endpoint>(endpoint->port->node(),*endpoint->host,endpoint->runtime.events(),
+            endpoint->trace,1024,5*1000*Runtime::kMillisecond,&domain.memory);
+        initialize_fid(endpoint->handle.fid,FI_CLASS_EP,context,&endpoint_object_ops);
+        endpoint->handle.ops=&endpoint_ops; endpoint->handle.cm=&connection_ops;
+        endpoint->handle.msg=&message_ops; endpoint->handle.rma=&rma_ops;
+        domain.endpoint=endpoint.get(); ++domain.children;
+        *result=&endpoint.release()->handle; return 0;
+    });
+}
+
+std::optional<uint32_t> resolve_peer(ProviderEndpoint& endpoint,fi_addr_t address) {
+    if (!endpoint.addresses || address>=endpoint.addresses->addresses.size()) return {};
+    const auto& peer=endpoint.addresses->addresses[address];
+    if (!peer) return {};
+    const auto node=ntohs(peer->sin_port);
+    configure_peer(endpoint,*peer);
+    return node;
+}
+
+ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr_t destination,
+                          uint64_t offset,uint64_t key,void* context,bool write,std::optional<uint64_t> immediate={}) {
+    return guarded([&]() -> ssize_t {
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (!endpoint.enabled) return -FI_EOPBADSTATE;
+        if ((length && !buffer) || length>16*1024*1024) return -FI_EMSGSIZE;
+        if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
+        progress(*endpoint.domain);
+        const auto peer=resolve_peer(endpoint,destination);
+        if (!peer) return -FI_EADDRNOTAVAIL;
+        SES::Operation operation; operation.type=write?SES::OperationType::Write:SES::OperationType::Send;
+        operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
+        if (length) operation.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+length);
+        const auto identifier=endpoint.semantic->submit(std::move(operation));
+        endpoint.transmits.emplace(identifier,ApplicationOperation{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
+        return 0;
+    });
+}
+ssize_t send_message(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,context,false);
+}
+ssize_t send_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,void* context) {
+    if (count!=1 || !buffers) return -FI_EINVAL;
+    return send_message(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,context);
+}
+ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
+    if (!message || (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
+    return send_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
+}
+ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
+    return guarded([&]() -> ssize_t {
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (!endpoint.enabled) return -FI_EOPBADSTATE;
+        if (source!=FI_ADDR_UNSPEC) return -FI_EOPNOTSUPP;
+        if ((length && !buffer) || length>UINT32_MAX) return -FI_EINVAL;
+        if (endpoint.receives.size()>=4096) return -FI_EAGAIN;
+        progress(*endpoint.domain);
+        const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
+            static_cast<uint8_t>(SES::Access::Write));
+        const auto token=++endpoint.next_receive_token;
+        try {
+            endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token);
+            endpoint.receives.emplace(token,ApplicationOperation{context,FI_MSG|FI_RECV,buffer,region.key});
+        } catch (...) { endpoint.domain->memory.deregister(region.key); throw; }
+        return 0;
+    });
+}
+ssize_t receive_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t source,void* context) {
+    if (count!=1 || !buffers) return -FI_EINVAL;
+    return receive_message(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,source,context);
+}
+ssize_t receive_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
+    if (!message || (flags&~FI_COMPLETION)) return -FI_EOPNOTSUPP;
+    return receive_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
+}
+ssize_t write_memory(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,
+                      uint64_t offset,uint64_t key,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,offset,key,context,true);
+}
+ssize_t write_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,
+                      uint64_t offset,uint64_t key,void* context) {
+    if (count!=1 || !buffers) return -FI_EINVAL;
+    return write_memory(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,offset,key,context);
+}
+ssize_t write_data(fid_ep* endpoint,const void* buffer,size_t length,void*,uint64_t immediate,
+                    fi_addr_t destination,uint64_t offset,uint64_t key,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,offset,key,context,true,immediate);
+}
+ssize_t write_message_flags(fid_ep* endpoint,const fi_msg_rma* message,uint64_t flags) {
+    if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1 ||
+        (flags&~(supported_operation_flags|FI_REMOTE_CQ_DATA))) return -FI_EOPNOTSUPP;
+    const auto& local=message->msg_iov[0]; const auto& remote=message->rma_iov[0];
+    if (local.iov_len!=remote.len) return -FI_EINVAL;
+    return submit_operation(endpoint,local.iov_base,local.iov_len,message->addr,remote.addr,remote.key,message->context,true,
+        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt);
+}
+
+int register_memory_vector(fid* handle,const iovec* buffers,size_t count,uint64_t access,uint64_t offset,
+                             uint64_t key,uint64_t flags,fid_mr** result,void* context) {
+    if (!buffers || count!=1) return -FI_EINVAL;
+    return register_memory(handle,buffers[0].iov_base,buffers[0].iov_len,access,offset,key,flags,result,context);
+}
+int register_memory_attributes(fid* handle,const fi_mr_attr* attributes,uint64_t flags,fid_mr** result) {
+    if (!attributes || attributes->iface!=FI_HMEM_SYSTEM || attributes->auth_key_size) return -FI_EOPNOTSUPP;
+    return register_memory_vector(handle,attributes->mr_iov,attributes->iov_count,attributes->access,
+        attributes->offset,attributes->requested_key,flags,result,attributes->context);
+}
+
+int get_information(uint32_t version,const char* node,const char* service,uint64_t flags,const fi_info* hints,fi_info** result) {
+    return guarded([&]() -> int {
+        if (!result) return -FI_EINVAL;
+        *result=nullptr;
+        if (version>FI_VERSION(2,0) || (flags&~(FI_SOURCE|FI_NUMERICHOST))) return -FI_ENODATA;
+        if (hints) {
+            // hints.mode lists modes the application can accommodate. This
+            // provider requires none, so any application mode mask is usable.
+            if ((hints->caps&~supported_caps) ||
+                (hints->addr_format!=FI_FORMAT_UNSPEC && hints->addr_format!=FI_SOCKADDR_IN)) return -FI_ENODATA;
+            if (hints->ep_attr && hints->ep_attr->type!=FI_EP_UNSPEC && hints->ep_attr->type!=FI_EP_RDM) return -FI_ENODATA;
+            if (hints->domain_attr && ((hints->domain_attr->threading!=FI_THREAD_UNSPEC && hints->domain_attr->threading!=FI_THREAD_DOMAIN) ||
+                hints->domain_attr->data_progress==FI_PROGRESS_AUTO || hints->domain_attr->auth_key_size ||
+                (hints->domain_attr->mr_mode&~FI_MR_PROV_KEY))) return -FI_ENODATA;
+            if (hints->tx_attr && (hints->tx_attr->op_flags&~supported_operation_flags)) return -FI_ENODATA;
+        }
+        std::unique_ptr<fi_info,decltype(&fi_freeinfo)> information(fi_allocinfo(),fi_freeinfo);
+        if (!information) return -FI_ENOMEM;
+        auto& info=*information;
+        info.caps=supported_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
+        info.ep_attr->type=FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
+        info.ep_attr->max_msg_size=16*1024*1024; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
+        info.tx_attr->caps=FI_MSG|FI_SEND|FI_RMA|FI_WRITE; info.tx_attr->size=4096;
+        info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1; info.tx_attr->op_flags=FI_DELIVERY_COMPLETE;
+        info.tx_attr->msg_order=FI_ORDER_SAS; info.tx_attr->comp_order=FI_ORDER_NONE;
+        info.rx_attr->caps=FI_MSG|FI_RECV|FI_RMA|FI_REMOTE_WRITE; info.rx_attr->size=4096;
+        info.rx_attr->iov_limit=1; info.rx_attr->msg_order=FI_ORDER_SAS; info.rx_attr->comp_order=FI_ORDER_NONE;
+        auto& attributes=*info.domain_attr;
+        attributes.name=::strdup("softue"); attributes.threading=FI_THREAD_DOMAIN;
+        attributes.control_progress=FI_PROGRESS_MANUAL; attributes.data_progress=FI_PROGRESS_MANUAL;
+        attributes.resource_mgmt=FI_RM_ENABLED; attributes.av_type=FI_AV_TABLE;
+        attributes.mr_mode=FI_MR_PROV_KEY; attributes.mr_key_size=8; attributes.cq_data_size=8;
+        attributes.ep_cnt=1; attributes.cq_cnt=64; attributes.tx_ctx_cnt=1; attributes.rx_ctx_cnt=1;
+        attributes.max_ep_tx_ctx=1; attributes.max_ep_rx_ctx=1; attributes.mr_iov_limit=1;
+        info.fabric_attr->name=::strdup("softue-tunnel");
+        // A core provider leaves prov_name empty; libfabric fills it in after
+        // getinfo. Pre-filling it would look like a layered provider chain.
+        info.fabric_attr->prov_version=FI_VERSION(0,2); info.fabric_attr->api_version=version;
+        if (!attributes.name || !info.fabric_attr->name) return -FI_ENOMEM;
+        sockaddr_in address{}; address.sin_family=AF_INET; address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        if (node && ::inet_pton(AF_INET,node,&address.sin_addr)!=1) return -FI_ENODATA;
+        if (service) {
+            char* end=nullptr; const auto port=std::strtoul(service,&end,10);
+            if (!*service || *end || port>65535) return -FI_ENODATA;
+            address.sin_port=htons(static_cast<uint16_t>(port));
+        }
+        void** destination=(flags&FI_SOURCE)?&info.src_addr:&info.dest_addr;
+        size_t* destination_size=(flags&FI_SOURCE)?&info.src_addrlen:&info.dest_addrlen;
+        if (node || service || (flags&FI_SOURCE)) {
+            *destination=std::malloc(sizeof(address)); if (!*destination) return -FI_ENOMEM;
+            std::memcpy(*destination,&address,sizeof(address)); *destination_size=sizeof(address);
+        }
+        if (hints && hints->src_addr) {
+            if (hints->src_addrlen!=sizeof(address)) return -FI_ENODATA;
+            std::free(info.src_addr); info.src_addr=std::malloc(sizeof(address));
+            if (!info.src_addr) return -FI_ENOMEM;
+            std::memcpy(info.src_addr,hints->src_addr,sizeof(address)); info.src_addrlen=sizeof(address);
+        }
+        *result=information.release(); return 0;
+    });
+}
+
+void initialize_operations() {
+    object_ops.size=sizeof(object_ops); object_ops.close=close_object;
+    UNSUPPORTED(object_ops,bind); UNSUPPORTED(object_ops,control); UNSUPPORTED(object_ops,ops_open);
+    UNSUPPORTED(object_ops,tostr); UNSUPPORTED(object_ops,ops_set);
+    endpoint_object_ops=object_ops; endpoint_object_ops.bind=bind_endpoint; endpoint_object_ops.control=control_endpoint;
+    fabric_ops.size=sizeof(fabric_ops); fabric_ops.domain=open_domain;
+    UNSUPPORTED(fabric_ops,passive_ep); UNSUPPORTED(fabric_ops,eq_open); UNSUPPORTED(fabric_ops,wait_open);
+    UNSUPPORTED(fabric_ops,trywait); UNSUPPORTED(fabric_ops,domain2);
+    domain_ops.size=sizeof(domain_ops); domain_ops.av_open=open_addresses;
+    domain_ops.cq_open=open_completion_queue; domain_ops.endpoint=open_endpoint;
+    UNSUPPORTED(domain_ops,scalable_ep); UNSUPPORTED(domain_ops,cntr_open); UNSUPPORTED(domain_ops,poll_open);
+    UNSUPPORTED(domain_ops,stx_ctx); UNSUPPORTED(domain_ops,srx_ctx); UNSUPPORTED(domain_ops,query_atomic);
+    UNSUPPORTED(domain_ops,query_collective); UNSUPPORTED(domain_ops,endpoint2);
+    memory_ops.size=sizeof(memory_ops); memory_ops.reg=register_memory;
+    memory_ops.regv=register_memory_vector; memory_ops.regattr=register_memory_attributes;
+    address_ops.size=sizeof(address_ops); address_ops.insert=insert_addresses; address_ops.lookup=lookup_address;
+    address_ops.remove=remove_addresses;
+    UNSUPPORTED(address_ops,insertsvc); UNSUPPORTED(address_ops,insertsym); UNSUPPORTED(address_ops,av_set);
+    UNSUPPORTED(address_ops,insert_auth_key); UNSUPPORTED(address_ops,lookup_auth_key); UNSUPPORTED(address_ops,set_user_id);
+    address_ops.straddr=[](fid_av*,const void*,char*,size_t*) -> const char* { return nullptr; };
+    completion_ops.size=sizeof(completion_ops); completion_ops.read=read_completions;
+    completion_ops.readerr=read_errors; completion_ops.strerror=error_string;
+    UNSUPPORTED(completion_ops,readfrom); UNSUPPORTED(completion_ops,sread); UNSUPPORTED(completion_ops,sreadfrom); UNSUPPORTED(completion_ops,signal);
+    endpoint_ops.size=sizeof(endpoint_ops);
+    UNSUPPORTED(endpoint_ops,cancel); UNSUPPORTED(endpoint_ops,getopt); UNSUPPORTED(endpoint_ops,setopt);
+    UNSUPPORTED(endpoint_ops,tx_ctx); UNSUPPORTED(endpoint_ops,rx_ctx); UNSUPPORTED(endpoint_ops,rx_size_left); UNSUPPORTED(endpoint_ops,tx_size_left);
+    connection_ops.size=sizeof(connection_ops); connection_ops.getname=endpoint_name;
+    UNSUPPORTED(connection_ops,setname); UNSUPPORTED(connection_ops,getpeer); UNSUPPORTED(connection_ops,connect);
+    UNSUPPORTED(connection_ops,listen); UNSUPPORTED(connection_ops,accept); UNSUPPORTED(connection_ops,reject);
+    UNSUPPORTED(connection_ops,shutdown); UNSUPPORTED(connection_ops,join);
+    message_ops.size=sizeof(message_ops); message_ops.send=send_message; message_ops.sendv=send_vector;
+    message_ops.sendmsg=send_message_flags; message_ops.recv=receive_message; message_ops.recvv=receive_vector;
+    message_ops.recvmsg=receive_message_flags;
+    UNSUPPORTED(message_ops,inject); UNSUPPORTED(message_ops,senddata); UNSUPPORTED(message_ops,injectdata);
+    rma_ops.size=sizeof(rma_ops); rma_ops.write=write_memory; rma_ops.writev=write_vector;
+    rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
+    UNSUPPORTED(rma_ops,read); UNSUPPORTED(rma_ops,readv); UNSUPPORTED(rma_ops,readmsg);
+    UNSUPPORTED(rma_ops,inject); UNSUPPORTED(rma_ops,injectdata);
+}
+
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) fi_provider* fi_prov_ini() {
+    static const bool initialized=[] { initialize_operations(); return true; }();
+    (void)initialized;
+    static fi_provider provider{};
+    provider.version=FI_VERSION(0,2); provider.fi_version=FI_VERSION(2,0);
+    provider.name="softue"; provider.getinfo=get_information; provider.fabric=open_fabric;
+    return &provider;
+}
