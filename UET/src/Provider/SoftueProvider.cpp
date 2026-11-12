@@ -315,7 +315,7 @@ int close_object(fid* handle) {
         }
         case FI_CLASS_MR: {
             auto& region=owner<ProviderRegion>(handle);
-            region.domain->memory.deregister(region.region.key);
+            region.domain->memory.deregister(region.region);
             --region.domain->children; delete &region; return 0;
         }
         case FI_CLASS_EP: {
@@ -442,7 +442,7 @@ const char* error_string(fid_cq*,int,const void*,char* result,size_t length) {
 }
 
 int register_memory(fid* domain_handle,const void* buffer,size_t length,uint64_t access,uint64_t offset,
-                    uint64_t,uint64_t flags,fid_mr** result,void* context) {
+                    uint64_t requested_key,uint64_t flags,fid_mr** result,void* context) {
     return guarded([&]() -> int {
         if (!result || offset || flags || (length && !buffer)) return -FI_EINVAL;
         auto& domain=owner<ProviderDomain>(domain_handle);
@@ -451,7 +451,11 @@ int register_memory(fid* domain_handle,const void* buffer,size_t length,uint64_t
         if (access&FI_REMOTE_WRITE) permissions|=static_cast<uint8_t>(SES::Access::Write);
         if (access&FI_ATOMIC) permissions|=static_cast<uint8_t>(SES::Access::Atomic);
         auto region=std::make_unique<ProviderRegion>(); region->domain=&domain;
-        region->region=domain.memory.register_buffer(1,0,static_cast<uint8_t*>(const_cast<void*>(buffer)),length,permissions);
+        SES::RegionOptions options;
+        // §2.2.5.3.4.1: keep requested metadata even with FI_MR_PROV_KEY.
+        // Optimized headers are unavailable, so OPTIMIZED falls back to zero.
+        options.idempotent_safe=(requested_key&SES::MemoryKeyFormat::IdempotentSafe)!=0;
+        region->region=domain.memory.register_buffer(1,0,static_cast<uint8_t*>(const_cast<void*>(buffer)),length,permissions,options);
         initialize_fid(region->handle.fid,FI_CLASS_MR,context);
         region->handle.key=region->region.key; region->handle.mem_desc=region.get();
         ++domain.children; *result=&region.release()->handle; return 0;
@@ -726,7 +730,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         attributes.name=::strdup("softue"); attributes.threading=FI_THREAD_DOMAIN;
         attributes.control_progress=FI_PROGRESS_MANUAL; attributes.data_progress=FI_PROGRESS_MANUAL;
         attributes.resource_mgmt=FI_RM_ENABLED; attributes.av_type=FI_AV_TABLE;
-        attributes.mr_mode=FI_MR_PROV_KEY; attributes.mr_key_size=8; attributes.cq_data_size=8;
+        attributes.mr_mode=FI_MR_PROV_KEY; attributes.mr_key_size=6; attributes.cq_data_size=8;
         attributes.ep_cnt=1; attributes.cq_cnt=64; attributes.tx_ctx_cnt=1; attributes.rx_ctx_cnt=1;
         attributes.max_ep_tx_ctx=1; attributes.max_ep_rx_ctx=1; attributes.mr_iov_limit=1;
         info.fabric_attr->name=::strdup("softue-tunnel");

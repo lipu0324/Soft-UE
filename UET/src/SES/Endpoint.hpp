@@ -157,9 +157,9 @@ public:
     void post_receive(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
                        uint32_t capacity, uint64_t context=0,uint16_t resource_index=1) {
         if (closed_) throw std::logic_error("endpoint closed");
-        memory_.authorize(job,pid,key,offset,capacity,Access::Write,resource_index);
+        const auto registration=memory_.authorize(job,pid,key,offset,capacity,Access::Write,resource_index);
         if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
-        posted_.push_back({job,pid,key,offset,capacity,context,resource_index});
+        posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration});
         match_unexpected();
         if (const auto disabled=disabled_generations_.find({pid,resource_index});disabled!=disabled_generations_.end()) {
             resources_.recover_after_exhaustion(pid,resource_index,ResourceSpace::Send,disabled->second);
@@ -215,7 +215,7 @@ private:
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
     struct MessageLease { ConnectionKey connection; uint32_t last_psn; bool end_of_message_transmitted; uint64_t operation; };
-    struct Posted { uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity; uint64_t context; uint16_t resource_index; };
+    struct Posted { uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity; uint64_t context; uint16_t resource_index; Region registration; };
     struct Incoming {
         uint8_t opcode;
         uint32_t total;
@@ -238,6 +238,7 @@ private:
         std::shared_ptr<SparseMemory> unexpected;
         uint64_t receive_order=0;
         std::optional<PDC_SES_req> deferred_response;
+        std::optional<Region> receive_registration;
     };
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
     uint32_t node_;
@@ -524,6 +525,7 @@ private:
             if (posted==posted_.end()) { ++order; continue; }
             const auto receive=*posted; posted_.erase(posted);
             message.key=receive.key; message.base=receive.offset; message.context=receive.context;
+            message.receive_registration=receive.registration;
             message.matched_receive=true;
             auto buffered=message.unexpected;
             ++order; release_unexpected(message); // Erases the old order entry, not the next iterator.
@@ -538,12 +540,12 @@ private:
             };
             if (receive.capacity<message.total) { fail(SemanticReturnCode::UnsupportedSize,CompletionStatus::Truncated); continue; }
             try {
-                memory_.authorize(std::get<2>(key),message.pid,message.key,message.base,message.total,
+                memory_.authorize_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base,message.total,
                     Access::Write,message.resource_index);
                 for (const auto& interval:message.segments) {
                     std::vector<uint8_t> bytes(interval.second);
                     buffered->read(interval.first,bytes.data(),bytes.size());
-                    memory_.write(std::get<2>(key),message.pid,message.key,message.base+interval.first,bytes,message.resource_index);
+                    memory_.write_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base+interval.first,bytes,message.resource_index);
                 }
                 if (message.received==message.total) {
                     message.completed=true; message.completion_reported=true;
@@ -665,10 +667,10 @@ private:
                 message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
                 if (header.opcode==1 && !poisoned)
                     memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
-                        header.buffer_offset,header.request_length,Access::Write,selected.resource_index);
+                        header.buffer_offset,header.request_length,Access::Write,selected.resource_index,header.rel);
                 else if (header.opcode==3 && !poisoned) {
                     const auto& region=memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
-                        header.buffer_offset,header.request_length,Access::Atomic,selected.resource_index);
+                        header.buffer_offset,header.request_length,Access::Atomic,selected.resource_index,header.rel);
                     if ((region.permissions&3u)!=3u) { reject(SemanticReturnCode::OperationViolation); return; }
                     message.atomic_operation=atomic_extension.atomic_opcode;
                     message.atomic_datatype=atomic_extension.atomic_datatype;
@@ -695,12 +697,13 @@ private:
                     // failure, so the target gets one error completion too.
                     const auto receive=*posted; posted_.erase(posted);
                     message.key=receive.key; message.base=receive.offset; message.context=receive.context;
+                    message.receive_registration=receive.registration;
                     message.matched_receive=true;
                     if (!poisoned && receive.capacity<header.request_length) {
                         message.target_error=CompletionStatus::Truncated;
                         reject(SemanticReturnCode::UnsupportedSize); return;
                     }
-                    if (!poisoned) memory_.authorize(header.job_id,receive.pid,receive.key,receive.offset,
+                    if (!poisoned) memory_.authorize_registration(receive.registration,header.job_id,receive.pid,receive.offset,
                         header.request_length,Access::Write,selected.resource_index);
                     }
                 }
@@ -732,9 +735,11 @@ private:
                 convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
                 memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
                     static_cast<IntegerAtomicOperation>(message.atomic_operation),
-                    static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index);
-            } else if (header.opcode!=0) memory_.write(header.job_id,message.pid,message.key,
-                Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
+                    static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index,message.relative_addressing);
+            } else if (message.receive_registration) memory_.write_registration(*message.receive_registration,
+                header.job_id,message.pid,Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
+            else if (header.opcode!=0) memory_.write(header.job_id,message.pid,message.key,
+                Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index,message.relative_addressing);
             // Coalesce adjacent intervals: ordered large messages retain one
             // record; RUD retains only holes allowed by the PDS receive window.
             uint32_t merged_offset=offset,merged_length=static_cast<uint32_t>(count);
@@ -784,7 +789,7 @@ private:
         });
         if (posted==posted_.end() || posted->capacity<request.pkt.payload.size()) return;
         try {
-            memory_.write(header.job_id,posted->pid,posted->key,posted->offset,request.pkt.payload,selected.resource_index);
+            memory_.write_registration(posted->registration,header.job_id,posted->pid,posted->offset,request.pkt.payload,selected.resource_index);
             completions_.push_back({0,posted->context,CompletionStatus::Success,
                 static_cast<uint32_t>(request.pkt.payload.size()),0,true});
             posted_.erase(posted);

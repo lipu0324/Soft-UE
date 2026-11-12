@@ -1,10 +1,12 @@
 #pragma once
 #include "IntegerAtomics.hpp"
+#include "MemoryKey.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <list>
 #include <memory>
 #include <set>
 #include <optional>
@@ -113,36 +115,47 @@ private:
 struct Region {
     uint64_t key;
     uint32_t job;
-    uint16_t pid; // 0 means domain scope, otherwise PIDonFEP scope.
+    uint16_t pid; // Local requested PID; pid_scope distinguishes real PID zero from domain scope.
     uint8_t permissions;
     bool idempotent_safe;
     std::shared_ptr<MemoryStorage> storage;
     bool allow_any_job=false;
     std::optional<uint16_t> resource_index; // No index means domain scope.
+    uint64_t registration_id=0; // Local revocation identity, never a wire field.
+    std::weak_ptr<const int> registry_authority;
+    std::optional<uint16_t> pid_scope;
 };
 
 struct RegionOptions {
     bool idempotent_safe=false;
     bool allow_any_job=false; // §3.4.4.2: authorize any valid wire JobID.
     std::optional<uint16_t> resource_index;
+    std::optional<uint64_t> requested_key; // Native application-assigned, non-optimized key.
+    bool bind_zero_pid=false; // Auto keys preserve the legacy domain-scope default for pid=0.
 };
 
 enum class Atomic64 { Add, Swap, CompareSwap, And, Or, Xor, Min, Max };
 
 class MemoryRegistry {
 public:
-    static constexpr uint64_t kIdempotentSafe = 1ULL << 63;
+    MemoryRegistry()=default;
+    MemoryRegistry(const MemoryRegistry&)=delete;
+    MemoryRegistry& operator=(const MemoryRegistry&)=delete;
+    static constexpr uint64_t kIdempotentSafe = MemoryKeyFormat::IdempotentSafe;
     static constexpr uint64_t kProviderSpace = 1ULL << 48;
-    static constexpr uint64_t kRkeyMask = (1ULL << 48) - 1;
+    static constexpr uint64_t kRkeyMask = MemoryKeyFormat::Rkey;
 
     void add_job(uint32_t job) {
-        if (!job || job > 0xffffff) throw std::invalid_argument("invalid JobID");
+        if (job > 0xffffff) throw std::invalid_argument("invalid JobID");
         jobs_.insert(job);
     }
     void remove_job(uint32_t job) {
         jobs_.erase(job);
-        for (auto it=regions_.begin(); it!=regions_.end(); )
-            if (it->second.job == job) it = regions_.erase(it); else ++it;
+        for (auto bucket=regions_.begin();bucket!=regions_.end();) {
+            auto& entries=bucket->second;
+            entries.remove_if([job](const Region& region) { return region.job==job; });
+            if (entries.empty()) bucket=regions_.erase(bucket); else ++bucket;
+        }
     }
     bool has_job(uint32_t job) const { return jobs_.count(job) != 0; }
     Region register_region(uint32_t job, uint16_t pid, uint64_t length,
@@ -163,37 +176,115 @@ public:
         if (!has_job(job)) throw MemoryAccessError(MemoryError::WrongJob);
         if (!storage || pid > 0xfff || (options.resource_index && *options.resource_index>0xfff) || (permissions & ~uint8_t{7}))
             throw std::invalid_argument("invalid region attributes");
-        if (next_key_ > kRkeyMask) throw std::overflow_error("memory keys exhausted");
-        const auto key = kProviderSpace | next_key_++ | (options.idempotent_safe ? kIdempotentSafe : 0);
-        Region region{key,job,pid,permissions,options.idempotent_safe,std::move(storage)};
-        region.allow_any_job=options.allow_any_job; region.resource_index=options.resource_index;
-        regions_.emplace(key,region);
+        if (next_registration_==UINT64_MAX) throw std::overflow_error("registration identities exhausted");
+        uint64_t key;
+        auto resource_index=options.resource_index;
+        if (options.requested_key) {
+            key=*options.requested_key | (options.idempotent_safe?kIdempotentSafe:0);
+            MemoryKeyFormat::validate(key,KeyAssignment::Application);
+            if (key&MemoryKeyFormat::Optimized) throw std::invalid_argument("optimized-key headers are not implemented");
+            if (!resource_index) resource_index=1; // Default native RMA resource, not a wildcard.
+        } else {
+            if (next_key_>kRkeyMask) throw std::overflow_error("memory keys exhausted");
+            key=kProviderSpace | next_key_++ | (options.idempotent_safe?kIdempotentSafe:0);
+        }
+        Region region{key,job,pid,permissions,bool(key&kIdempotentSafe),std::move(storage)};
+        region.allow_any_job=options.allow_any_job; region.resource_index=resource_index;
+        region.registration_id=++next_registration_;
+        region.registry_authority=authority_;
+        if (pid || options.bind_zero_pid || options.requested_key) region.pid_scope=pid;
+        // §2.2.5.3.4.1: non-optimized key namespaces include Job/PID/RI.
+        // Equal numeric application keys may identify independent regions in
+        // different namespaces. IDEMPOTENT_SAFE describes the region; it does
+        // not enlarge the 48-bit application RKEY namespace.
+        const auto duplicate_scope=[&](uint64_t candidate_key) {
+            const auto bucket=regions_.find(candidate_key);
+            if (bucket==regions_.end()) return false;
+            return std::any_of(bucket->second.begin(),bucket->second.end(),[&](const Region& existing) {
+                return existing.pid_scope==region.pid_scope && existing.resource_index==resource_index &&
+                    existing.allow_any_job==options.allow_any_job && (existing.allow_any_job || existing.job==job);
+            });
+        };
+        if (duplicate_scope(key) || (options.requested_key && duplicate_scope(key^kIdempotentSafe)))
+            throw std::invalid_argument("memory key already registered in this scope");
+        auto& entries=regions_[key];
+        try { entries.push_back(region); }
+        catch (...) { if (entries.empty()) regions_.erase(key); throw; }
         return region;
     }
-    bool deregister(uint64_t key) { return regions_.erase(key) != 0; }
-    const Region& authorize(uint32_t job, uint16_t pid, uint64_t key,
-                            uint64_t offset, uint64_t length, Access access,std::optional<uint16_t> resource_index={}) const {
-        const auto found = regions_.find(key);
-        if (found == regions_.end()) throw MemoryAccessError(MemoryError::InvalidKey);
-        const auto& region = found->second;
-        if (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job != job)))
-            throw MemoryAccessError(MemoryError::WrongJob);
-        if (region.pid && region.pid != pid) throw MemoryAccessError(MemoryError::WrongEndpoint);
-        if (resource_index && region.resource_index && region.resource_index!=resource_index)
+    bool deregister(uint64_t key) {
+        const auto found=regions_.find(key);
+        if (found==regions_.end()) return false;
+        if (found->second.size()!=1) throw std::invalid_argument("ambiguous memory key; revoke its registration handle");
+        regions_.erase(found); return true;
+    }
+    bool deregister(const Region& registration) {
+        if (registration.registry_authority.lock()!=authority_) return false;
+        const auto found=regions_.find(registration.key);
+        if (found==regions_.end()) return false;
+        auto& entries=found->second;
+        const auto entry=std::find_if(entries.begin(),entries.end(),[&](const Region& region) {
+            return region.registration_id==registration.registration_id;
+        });
+        if (entry==entries.end()) return false;
+        entries.erase(entry); if (entries.empty()) regions_.erase(found); return true;
+    }
+    const Region& authorize(uint32_t job,uint16_t pid,uint64_t key,
+                            uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},
+                            bool relative_addressing=true) const {
+        if (!regions_.count(key) && (relative_addressing || !regions_.count(key^kIdempotentSafe)))
             throw MemoryAccessError(MemoryError::InvalidKey);
-        if (!(region.permissions & static_cast<uint8_t>(access))) throw MemoryAccessError(MemoryError::Permission);
-        if (offset > region.storage->size() || length > region.storage->size() - offset)
-            throw MemoryAccessError(MemoryError::Bounds);
-        return region;
+        const Region* selected=nullptr;
+        bool job_found=false,pid_found=false,ambiguous=false;
+        unsigned specificity=0;
+        const size_t metadata_variants=relative_addressing?1:2;
+        for (size_t variant=0;variant<metadata_variants;++variant) {
+            const auto bucket=regions_.find(key^(variant?kIdempotentSafe:0));
+            if (bucket==regions_.end()) continue;
+            for (const auto& region:bucket->second) {
+                if (relative_addressing && (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))) continue;
+                job_found=true;
+                if (region.pid_scope && *region.pid_scope!=pid) continue;
+                pid_found=true;
+                if (resource_index && region.resource_index && resource_index!=region.resource_index) continue;
+                const unsigned score=(relative_addressing && !region.allow_any_job?4u:0u)+(region.pid_scope?2u:0u)+(resource_index && region.resource_index?1u:0u);
+                if (!selected || score>specificity) { selected=&region; specificity=score; ambiguous=false; }
+                else if (score==specificity) ambiguous=true;
+            }
+        }
+        if (!job_found) throw MemoryAccessError(MemoryError::WrongJob);
+        if (!pid_found) throw MemoryAccessError(MemoryError::WrongEndpoint);
+        if (!selected || ambiguous || selected->key!=key) throw MemoryAccessError(MemoryError::InvalidKey);
+        // Table 2-17: absolute addressing does not use JobID to select a
+        // buffer. Ambiguous equal keys are rejected before Job authorization.
+        return check_access(*selected,job,pid,offset,length,access,resource_index);
     }
-    void write(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
-               const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={}) {
-        const auto& region = authorize(job,pid,key,offset,bytes.size(),Access::Write,resource_index);
+    const Region& authorize_registration(const Region& registration,uint32_t job,uint16_t pid,
+                            uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={}) const {
+        if (registration.registry_authority.lock()!=authority_) throw MemoryAccessError(MemoryError::InvalidKey);
+        const auto bucket=regions_.find(registration.key);
+        if (bucket==regions_.end()) throw MemoryAccessError(MemoryError::InvalidKey);
+        const auto found=std::find_if(bucket->second.begin(),bucket->second.end(),[&](const Region& region) {
+            return region.registration_id==registration.registration_id;
+        });
+        if (found==bucket->second.end()) throw MemoryAccessError(MemoryError::InvalidKey);
+        // A receive posting already selected a buffer. Authenticate that exact
+        // live registration; never reselect by a peer's JobID or a reused key.
+        return check_access(*found,job,pid,offset,length,access,resource_index);
+    }
+    void write(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
+               const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
+        const auto& region=authorize(job,pid,key,offset,bytes.size(),Access::Write,resource_index,relative_addressing);
         region.storage->write(offset,bytes.data(),bytes.size());
     }
-    std::vector<uint8_t> read(uint32_t job, uint16_t pid, uint64_t key,
-                             uint64_t offset, size_t length) const {
-        const auto& region = authorize(job,pid,key,offset,length,Access::Read);
+    void write_registration(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
+               const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={}) {
+        const auto& region=authorize_registration(registration,job,pid,offset,bytes.size(),Access::Write,resource_index);
+        region.storage->write(offset,bytes.data(),bytes.size());
+    }
+    std::vector<uint8_t> read(uint32_t job,uint16_t pid,uint64_t key,
+                             uint64_t offset,size_t length,std::optional<uint16_t> resource_index={},bool relative_addressing=true) const {
+        const auto& region=authorize(job,pid,key,offset,length,Access::Read,resource_index,relative_addressing);
         std::vector<uint8_t> bytes(length);
         region.storage->read(offset,bytes.data(),length);
         return bytes;
@@ -201,8 +292,8 @@ public:
     // An atomic event is indivisible in the single-threaded protocol runtime.
     // The initial primitive is unsigned 64-bit, explicitly little endian.
     uint64_t atomic(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
-                    Atomic64 operation, uint64_t operand, uint64_t compare = 0) {
-        const auto& region = authorize(job,pid,key,offset,8,Access::Atomic);
+                    Atomic64 operation,uint64_t operand,uint64_t compare=0,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
+        const auto& region = authorize(job,pid,key,offset,8,Access::Atomic,resource_index,relative_addressing);
         if (offset % 8) throw MemoryAccessError(MemoryError::Alignment);
         std::array<uint8_t,8> bytes{};
         region.storage->read(offset,bytes.data(),bytes.size());
@@ -226,11 +317,11 @@ public:
     }
     void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                          IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
-                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={}) {
+                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
         const auto element_width=integer_atomic_width(datatype);
         if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
         if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
-        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index);
+        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index,relative_addressing);
         // §3.4.7.3: atomics need both read and write permission in addition
         // to the explicit atomic capability of this simulator's MR model.
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
@@ -248,8 +339,21 @@ public:
         }
     }
 private:
-    uint64_t next_key_ = 1;
+    const Region& check_access(const Region& region,uint32_t job,uint16_t pid,uint64_t offset,uint64_t length,
+                               Access access,std::optional<uint16_t> resource_index) const {
+        if (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))
+            throw MemoryAccessError(MemoryError::WrongJob);
+        if (region.pid_scope && *region.pid_scope!=pid) throw MemoryAccessError(MemoryError::WrongEndpoint);
+        if (resource_index && region.resource_index && resource_index!=region.resource_index)
+            throw MemoryAccessError(MemoryError::InvalidKey);
+        if (!(region.permissions&static_cast<uint8_t>(access))) throw MemoryAccessError(MemoryError::Permission);
+        if (offset>region.storage->size() || length>region.storage->size()-offset)
+            throw MemoryAccessError(MemoryError::Bounds);
+        return region;
+    }
+    uint64_t next_key_ = 1,next_registration_=0;
     std::set<uint32_t> jobs_;
-    std::map<uint64_t,Region> regions_;
+    std::shared_ptr<const int> authority_=std::make_shared<const int>(0);
+    std::map<uint64_t,std::list<Region>> regions_; // Appending a scope preserves other region references.
 };
 } // namespace UET::SES

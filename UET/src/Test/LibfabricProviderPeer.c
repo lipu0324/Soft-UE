@@ -31,6 +31,7 @@ int main(int argc,char** argv) {
     CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_TAGGED)) && (info->caps&FI_ATOMIC));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
+    CHECK(info->domain_attr->mr_key_size==6); // RKEY bytes; fi_mr_key still returns all 64 metadata/key bits.
     struct fi_info *unsupported_completion=NULL;
     hints->tx_attr->op_flags=FI_TRANSMIT_COMPLETE;
     CHECK(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&unsupported_completion)==-FI_ENODATA);
@@ -50,7 +51,8 @@ int main(int argc,char** argv) {
     SUCCESS(fi_mr_reg(domain,buffer,sizeof(buffer),FI_SEND|FI_RECV|FI_READ|FI_WRITE|FI_REMOTE_WRITE,0,0,0,&region,NULL));
     SUCCESS(fi_mr_reg(domain,protected_buffer,sizeof(protected_buffer),FI_WRITE,0,0,0,&local_only,NULL));
     SUCCESS(fi_mr_reg(domain,counters,sizeof(counters),FI_ATOMIC|FI_REMOTE_READ|FI_REMOTE_WRITE,
-        0,0,0,&atomic_region,NULL));
+        0,(1ULL<<63)|(1ULL<<62),0,&atomic_region,NULL));
+    CHECK((fi_mr_key(atomic_region)&(1ULL<<63)) && !(fi_mr_key(atomic_region)&(1ULL<<62)));
     struct fi_atomic_attr atomic_limits;
     SUCCESS(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,0));
     CHECK(atomic_limits.size==8 && atomic_limits.count>=512);

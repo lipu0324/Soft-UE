@@ -112,6 +112,15 @@ All required memory-key classes, tagged operations and full Profile acceptance
 remain open. A streamed native WRITE of 4 GiB−1 has been transmitted and checked
 end to end; this does not establish all large-message operations or Profile conformance.
 
+The native registry also accepts application-assigned, non-optimized keys across
+the full 48-bit RKEY range, including zero. Equal numeric keys can bind distinct
+Job/PID/resource-index namespaces. Local registration identities and registry
+authority keep stale or foreign handles from revoking a replacement region;
+these identities never cross the wire. See [the key-format walkthrough](MEMORY-KEYS.md).
+The experimental provider continues to require provider-assigned keys. Its
+advertised six RKEY bytes do not truncate the full 64-bit API/wire value;
+IDEMPOTENT_SAFE is preserved and OPTIMIZED requests fall back to zero.
+
 `Operation::payload_source` accepts a local, shared `PayloadSource` instead of an
 eager vector. The endpoint reads at most its configurable producer window (eight
 fragments by default) ahead of PDS transmission. PDS retains its own outstanding
@@ -265,6 +274,13 @@ It checks 24 native/UDP and IPv4/IPv6 fixtures across RUD, ROD, UUD, ACK, NACK
 and CP, including signed CLEAR/ACK offsets and CRC network byte order. It also
 rejects a corrupted payload. The pinned reference remains an external dependency;
 its private headers are used only by the optional reference test targets. The process test changes only the NIC boundary, not reference SES/PDS code. The pinned reference uses an older close-ACK format and is not an oracle for the UE 1.1 CP_ACK payload.
+
+The real-process fixture configures the reference's public
+`UET_PDS_TX_TIMEOUT=100` ms option. Its 5 ms default can exhaust retries while
+an ASan peer is descheduled by concurrent CPU-heavy tests; this was observed
+in one full-suite run. This allowance is confined to wall-clock interoperability
+testing and does not change the injected simulation timers or the reference
+protocol implementation. Failed runs remain part of the validation record.
 
 ## Traceability and normative review
 

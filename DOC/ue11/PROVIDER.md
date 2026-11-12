@@ -40,6 +40,11 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 地址和 key | `FI_AV_TABLE`、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
 
+`mr_key_size=6` 表示标准 RKEY 的 48 位范围；`fi_mr_key()` 仍返回完整 64 位 key。
+`FI_MR_PROV_KEY` 模式下会保留请求的 IDEMPOTENT_SAFE 标志，OPTIMIZED 回退为零。
+原生应用 key 的作用域和本地撤销身份见 [MR key 说明](MEMORY-KEYS.md)；provider 的
+应用分配 key 模式仍未公布。
+
 外层 socket 的端口号在本适配器内用作该端口存活期间的 FEP 数字 ID，内层地址由
 `PdsHost` 生成。这是明确的实验地址映射，不是 UE 地址发现协议。同一实验中的对端
 端口号必须唯一；相同 ID 映射到不同 socket 地址会被拒绝。通过 `fi_getname` 获取

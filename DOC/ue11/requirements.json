@@ -635,6 +635,24 @@
         "HPC"
       ],
       "evidence_note": "Late/partial receive posting, ordered placement, zero-placement truncation, disabled-generation responses and re-enable, stale generation, SEND/RMA isolation, RUD no-match/manual retry, transport-retirement query and partial receive error on PDC failure are checked. Public API processes cover delayed receive, hidden intermediate errors, bounded retry failure and subsequent RMA. Full MR key classes, ordered/API acceptance and cross-peer recovery matrices remain open."
+    },
+    {
+      "id": "SES-MEMORY-KEY-FORMAT",
+      "reference": "§2.2.5.3.4.1; Table 2-13; Table 2-17",
+      "summary": "完整 48 位 RKEY、64 位元数据、含零值的命名空间与独立撤销身份",
+      "status": "partial",
+      "tests": [
+        "memory_key_test",
+        "memory_registry_test",
+        "addressing_test",
+        "libfabric_provider_processes"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Native non-optimized application keys cover full 48-bit range, zero Job/PID/key/index and distinct relative Job/PID/index scopes. Absolute selection ignores Job for lookup and rejects ambiguous equal RKEYs, including differing idempotent metadata. SEND/UUD postings pin live registration identity, preventing cross-Job reselection and stale-key rebinding. Duplicate binding, permission fallback and stale/foreign revocation are rejected. Provider declares six RKEY bytes and preserves 64-bit idempotent metadata with optimized fallback. Optimized headers and provider application-assigned key mode remain open."
     }
   ]
 }

@@ -96,6 +96,12 @@ int main(void) {
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
     uint8_t memory[4096]={0},receive_buffer[32]={0};
     setenv("UET_PDS","pds",1); setenv("UET_PDS_ACK_TYPE","ack",1);
+    /* The pinned reference defaults to a 5 ms wall-clock timeout. An ASan
+     * process sharing a CPU with stress tests can be descheduled longer than
+     * that without any packet loss. Use its public configuration interface,
+     * as the reference's impairment tests do, to allow userspace scheduling.
+     * The SES/PDS implementation and all transmitted frames remain unchanged. */
+    setenv("UET_PDS_TX_TIMEOUT","100",1);
     REQUIRE_SUCCESS(uet_initialize(&instance));
     hints->caps=FI_MSG|FI_RMA|FI_ATOMIC;
     REQUIRE_SUCCESS(uet_getinfo(instance,NULL,hints,&info));

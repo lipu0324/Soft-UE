@@ -124,7 +124,7 @@ SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
   $(CORE)/Network_Layer/PdsPacketCodec.cpp \
   $(CORE)/Network_Layer/UetWireCodec.cpp
 SIM_OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(SIM_SOURCES))
-SIM_TESTS := runtime_test memory_registry_test fabric_test uet_wire_test \
+SIM_TESTS := runtime_test memory_registry_test memory_key_test fabric_test uet_wire_test \
   pdc_ack_test pds_fault_test pds_recovery_test uud_delivery_test rud_window_test \
   pdc_lifecycle_test native_atomic_test context_reuse_test message_retirement_test addressing_test resource_lifecycle_test control_ack_test control_establishment_test target_close_test message_completion_test streaming_payload_test semantic_error_test unexpected_message_test \
   pds_allocation_test pds_simulation_test endpoint_test
@@ -138,6 +138,7 @@ $(BUILD)/$(1): $(CORE)/Test/$(2) $(CORE_HEADERS) $(BUILD)/libsoftue_protocol.a
 endef
 $(eval $(call SIM_TEST_RULE,runtime_test,RuntimeTest.cpp))
 $(eval $(call SIM_TEST_RULE,memory_registry_test,MemoryRegistryTest.cpp))
+$(eval $(call SIM_TEST_RULE,memory_key_test,MemoryKeyTest.cpp))
 $(eval $(call SIM_TEST_RULE,fabric_test,FabricTest.cpp))
 $(eval $(call SIM_TEST_RULE,uet_wire_test,UetWireCodecTest.cpp))
 $(eval $(call SIM_TEST_RULE,pdc_ack_test,PdcAckTest.cpp))
