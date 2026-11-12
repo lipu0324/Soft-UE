@@ -175,6 +175,35 @@ MIN/MAX/SUM/LOR/LAND/BOR/BAND/LXOR/BXOR，不能把其他 vendor 支持的操作
 | UE11-p0176-001 | §2.4.17.3，管理状态转换 | 所有数据结构初始化后才能将 admin-status 置 UP。 | INC 管理模型未实现；配置事务失败不得留下可发送的半初始化 communicator。 |
 | UE11-p0176-002 | §2.4.17.3，运行失败状态 | admin UP 后，无法/拒绝遵循初始化状态的 switch 把 oper-status 置 FAILED。 | 未实现；admin 与 oper 是独立状态，不得只用一个布尔开关替代。 |
 
-复核进度为上述 120 个候选的分类与义务拆分；其余 609 个候选、表格/算法的额外
+## 第 121～140 个候选
+
+本批对照 PDF 第 188～191 页原始表格图像复核列归属，防止纯文本跨列。表 3-1
+AI Base 的 READ 操作格为空但 READ 大小行有值，不能由大小行反推 READ 成为其必选操作。
+Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属于已选择的 roadmap 范围。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0187-001 | §3.3，Profile 表解释规则 | MUST 格为必选，空格允许增强功能；启用增强时跟踪全部依赖，功能可运行时关闭。 | capability 与 Profile 声明已分开，四种 Profile 仍为 false；完整依赖图和运行时协商未完成。 |
+| UE11-p0188-001 | §3.3.1，部署 MTU | 多包 WRITE/READ/SEND 使用一致 Payload MTU，通信 FEP 共同配置一致。 | 场景运行器使用共同 payload 配置；native 独立端点的部署一致性/管理校验仍需补全，不能只检查链路 MTU。 |
+| UE11-p0188-002 | 表 3-1，多操作/大小矩阵 | NO_OP/WRITE/非取回原子四种均必选；前三种 Profile 还需 SEND/DATAGRAM/WRITE IMM；Full/HPC 需 exact tag/READ/fetch+CAS；HPC 另需 wildcard/tagged atomic/rendezvous；Full 需 DS/DTSEND。 | AI Base native 基础操作有回归，WRITE 已验证 4GiB−1；Full/HPC SEND 上限、M5 扩展及 Unified Local 16383 字节 READ/WRITE 仍缺失。表内每个操作与大小应独立建项，不能算一次测试通过整表。 |
+| UE11-p0189-001 | §3.3.2，基础寻址与 key | 遵守基础寻址；WRITE 使用 memory key；支持 RMA READ 时，READ/ATOMIC 也支持 memory key；匹配按 Profile 表。 | native 相对/绝对、key 与权限有回归；Unified Local direct memory 与本段全 Profile key 用语的关系需结合 §3.4 正式格式处理，不能给无 key 的本地头杜撰字段。 |
+| UE11-p0189-002 | 表 3-2，相对/绝对与 exact | AI Base/Full/HPC 均需相对和绝对；Full/HPC 需 exact tag。 | native 寻址部分覆盖，provider 标准 UET 地址/授权和 tag 缺失。 |
+| UE11-p0189-003 | 表 3-2，wildcard | HPC 需 wildcard tag。 | M5 缺失；不是 AI Base/Full 的通用必选项。 |
+| UE11-p0189-004 | 表 3-2，本地直接寻址 | Unified Local 通过 FA/JobID 选择目标内存。 | M8 缺失；禁止把收到的地址直接转换为执行器指针。 |
+| UE11-p0189-005 | §3.3.3，四个授权义务 | 所有 Profile 实现 SES 授权、插入 JobID、访问前检查 JobID，每 FEP 至少一个 JobID。 | native Job0/多 Job/exact/any MR 已有测试；特权管理到公开 provider 的链条与 Unified Local 未实现。 |
+| UE11-p0189-006 | §3.3.4，表格总要求 | 按表 3-3 各 Profile 支持相应 buffer 行为。 | 这是后续行的总则，不额外记为一个已通过功能。 |
+| UE11-p0189-007 | 表 3-3，use-once RMA | HPC 支持 RMA use-once。 | M5 缺失；当前重复消除不是 use-once buffer 生命周期的替代。 |
+| UE11-p0189-008 | 表 3-3，full-range key | AI Base/Full/HPC 支持标准头全范围 memory key。 | native 64 位 API/48 位线 RKEY 已有边界回归；provider 用户 key 与完整授权矩阵仍不全。 |
+| UE11-p0189-009 | 表 3-3，limited-range key | HPC 支持 optimized 头有限范围 key。 | M5 optimized 编解码/索引授权缺失。 |
+| UE11-p0190-001 | 表 3-3 续，本地与 tag | Unified Local 支持本地头直接内存；Full/HPC exact tag，HPC wildcard。 | M5/M8 缺失；MULTI_RECV/Sync Group 行为空，不把本表当作其所有 Profile 强制依据。 |
+| UE11-p0190-002 | §3.3.5，字段总要求 | 必选头的所有字段/flags 都要支持，除非表中明确例外。 | 标准头通过单一字段子集不等于整头通过；当前保留 partial，逐 flag/组合仍需补验收。 |
+| UE11-p0190-003 | 表 3-4，标准头 | AI Base/Full/HPC 均需 44 字节标准请求头。 | codec 黄金样例/native/参考互通部分覆盖；尚非全部字段组合通过。 |
+| UE11-p0190-004 | 表 3-4，多格式矩阵 | Full 需 DS/RTR；前三 Profile 需 DS-as-SEND；HPC 需 optimized non-matching/small 和 rendezvous；Unified Local 需 local 格式；原子扩展四种必选；CAS 扩展 Full/HPC/Local 必选。 | DS-as-SEND、标准原子扩展已有子集测试，其余 M5/M8 缺失；不能把未选择的 DS/RTR 当作 AI Base 源端必选。 |
+| UE11-p0191-001 | 表 3-4，标准响应 | AI Base/Full/HPC 支持标准 response。 | 当前 codec 和 SES 响应有回归；表中 16B 与正式 §3.4.3.7 的长度差异已在 BASELINE-AUDIT 记录，按正式字段布局编码。 |
+| UE11-p0191-002 | 表 3-4 续，响应/packing/GO | Full/HPC 支持带数据响应；HPC optimized response；Local compact response 和每包最多 16 消息的接收处理；四种均支持 GO delivery complete。 | 带数据/optimized/local/packing 缺失；native 成功在受检目标内存写入后报告，完整 GO、完成等级及本地路径联合证明未完成。 |
+| UE11-p0191-003 | §3.3.6，模式总要求 | 各 Profile 支持表 3-5 列出的模式及对应网络行为。 | 不能用一种通用可靠网络后端覆盖所有模式；当前仍由原 PDC 实现 RUD/ROD/UUD。 |
+| UE11-p0191-004 | 表 3-5，模式矩阵跨页截断 | AI Base/Full/HPC 都需 RUD/ROD/UUD；HPC 需 RUDI；Unified Local 需 RODL。 | 原图确认本候选文本遗漏表后两行。前两种可靠模式与 UUD 有回归；RUDI/RODL 缺失，独立能力保持 false。 |
+
+复核进度为上述 140 个候选的分类与义务拆分；其余 589 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
