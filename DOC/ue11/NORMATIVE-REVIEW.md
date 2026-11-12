@@ -260,6 +260,34 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0223-001 | §3.4.3.1，重启字段保持 | 每次 DS 重启保留原请求地址和 header data；request_length 使用 RTR 指定值。 | M5 缺失；重启新 message offset 与目标保留的原始偏移必须分开跟踪。 |
 | UE11-p0226-001 | §3.4.3.3，本地 packing 首消息 | 首个 optimized local 头 ac=0；单消息时 ac=0 且 mm=0。 | M8 未实现；不能把多个标准头直接拼接成 local packing。 |
 
-复核进度为上述 180 个候选的分类与义务拆分；其余 549 个候选、表格/算法的额外
+## 第 181～200 个候选
+
+本批检查 packed local、原子、Sync Group 和目标 buffer 选择；Sync Group 的
+非 completing/ completing 两种 count 编码按表 3-15 的跨页续文区分。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0228-001 | §3.4.3.3，local packing 链 | 除最后一条外 mm=1，最后一条 mm=0。 | M8 缺失；需要 1/16 条消息及提前/缺失终止标志的负向用例。 |
+| UE11-p0229-001 | §3.4.3.3，三种 packing 容量 | 请求 payload 总量、READ/fetch 响应 payload 总量均不超过 Payload MTU；带全部头的包不超过网络 MTU。 | M8 缺失；只检查请求长度不足以保证响应容量和实际网络包大小。 |
+| UE11-p0229-002 | §3.4.3.3，packed 响应 | 响应顺序对应请求；响应 payload 超限时返回单条 UNSUPPORTED_SIZE，使整组失败。 | M8 缺失；禁止按异步完成顺序重新排列或把部分条目误报成功。 |
+| UE11-p0229-003 | §3.4.3.3，压缩地址依赖 | 首头 ac=0；后续 ac=1 时，地址相对紧邻前一条，扩展大小继承前一个 ac=0 的消息。 | M8 缺失；地址基准与扩展格式基准是两个不同的状态。 |
+| UE11-p0232-001 | §3.4.3.5，原子扩展/错误长度 | 每包带原子扩展，不与 rendezvous 扩展组合；元素数按长度/类型宽度；不整倍数长度执行零字节。 | native 对 request_length/packet count/offset 的整倍数检查在原子访问前执行；完整实际线端 malformed-message 与多包错误联合验收仍需补全。 |
+| UE11-p0232-002 | §3.4.3.5，fetch 单单位 | fetching 不操作多于一个所选类型元素，并保留旧值用于响应。 | fetching 未实现；非取回 bulk 不受此单单位限制。 |
+| UE11-p0233-001 | §3.4.3.6，同步完成类型 | completing SYNC_WRITE 设置 hd；SYNC_ATOMIC 长度至多8、hd=0，只用允许的非取回操作/至多8字节类型，排除 READ/MSWAP/CSWAP。 | M5 缺失；按 opcode、datatype、长度、hd 分别验证，不能直接复用任意普通原子组合。 |
+| UE11-p0233-002 | §3.4.3.6，同步 scope/count | 目标按源 IP+sync_group 查状态；完成操作携包括自身的总消息数，非完成 write 为0。 | M5 缺失；正文“所有 sync write 为0”的宽泛用语需与表 3-15 completing 分支一起解释，不能让 completing write 丢失计数。 |
+| UE11-p0233-003 | 表 3-15，字段编码续文 | group/count 各16位；非 completing count=0，completing count=整组消息数。 | 已阅读下一页续表；M5 缺失，还需零/最大计数与重复完成消息回归。 |
+| UE11-p0235-001 | §3.4.3.7，带数据响应选择 | 请求长度大于 Payload MTU 时使用完整带数据响应；optimized request 不用此完整格式。 | codec 能解析/编码部分格式，但 READ 源/目标和响应关联未实现，不能以 codec round-trip 证明语义功能。 |
+| UE11-p0237-001 | §3.4.3.8，packed 非 DEFAULT | 一组请求中任意响应不是 DEFAULT 时，PDS ACK 中每个请求都有对应响应。 | M8 缺失；需整组默认/混合错误/含数据响应的组合测试。 |
+| UE11-p0238-001 | 表 3-19，local response | reserved 发送0；mm/opcode/version/code/ehl/payload_length 按本地格式解释。 | M8 缺失；不能由标准 SES reserved 接收测试推广到本地头。 |
+| UE11-p0239-001 | 表 3-21，small 合法集跨页 | optimized non-matching 单包，NO_OP payload0，其他允许请求不超过一 Payload MTU。 | M5 格式未实现；需结合下一页完整 opcode 列表与响应头要求。 |
+| UE11-p0240-001 | 表 3-21 续，格式/opcode 限制 | 分别校验 small/medium/std/local 的合法 opcode、NO_OP0、单包、offset 和长度约束；local ac0 至多16383、ac1 至多4095且仍受 MTU约束；响应格式与请求匹配。 | 标准头与零长 NO_OP 子集有测试，其余紧凑/packed 与完整响应关联缺失；本候选含多组独立义务，不能整体通过。 |
+| UE11-p0241-001 | §3.4.4.1，buffer 集/行为 | relative tuple 和 absolute pair 唯一选择 buffer 集；每个 buffer 可配置 use-once/persistent；direct 按 Job。 | native posted receive 与 persistent MR 部分覆盖；RMA use-once、tagged 与直接本地地址缺失。 |
+| UE11-p0241-002 | §3.4.4.1.1，untagged 消耗 | ROD 消耗队首，同消息所有包命中同一 buffer；RUD 可按到达次序；无 buffer 时采用规范 unexpected 流程。 | native posting/pinned registration、分片/FIFO、late receive 与 RUD/ROD provider 恢复已有回归；全部 unexpected 扩展行为仍待 M5。 |
+| UE11-p0241-003 | §3.4.4.1.2，optimized RMA 唯一性 | small RMA 的 Job/PID/index 精确映射一个 buffer，provider 按规定选择。 | M5 缺失；普通 key MR 表不能代替 index-only 资源绑定。 |
+| UE11-p0241-004 | §3.4.4.1.2，标准 RMA 唯一性 | 标准头 RMA 的 Job/PID/index/key 唯一映射一个 buffer。 | native 注册/授权和公开 provider MR 基础测试有覆盖；完整标准地址/授权配置仍未完成。 |
+| UE11-p0242-001 | §3.4.4.1.3，exact matching | exact-only 实现可任意次序尝试，但有匹配 buffer 时必须选择；多个匹配时允许任选，否则 unexpected。 | tagged 未实现；不能把 wildcard 的强制 FIFO 规则误套成 exact-only 所有实现的 MUST。 |
+| UE11-p0242-002 | §3.4.4.1.3，ROD wildcard 顺序 | 按 posted buffer 次序尝试；同 Job/initiator 在目标 tuple 上按源发送顺序处理头。 | M5 缺失；允许保持可观察顺序的内部优化，不强制某一种容器/搜索算法。 |
+
+复核进度为上述 200 个候选的分类与义务拆分；其余 529 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
