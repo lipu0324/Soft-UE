@@ -39,5 +39,5 @@ Probe 的独立计时同样使用纳秒；未变化窗口的再次查询至少�
 上限及 Probe 的 128 ns 重试。场景测试在无路由恢复中使用 50 μs RTO，要求在
 100 μs 内完成，防止配置被悄悄量化成 1 ms。
 
-本增量没有完成整张 NACK 行为表。按代码配置 NACK 延迟、完整重试上限配置、
-无限重试、所有 NACK 分类/ROD GoBackN 组合及新 Start_PSN 恢复仍待后续验收。
+按代码分组的 NACK 延迟、ACK 取消与 RUD/ROD 恢复见 [NACK 恢复](NACK-RECOVERY.md)。
+完整重试上限配置、无限重试、所有 NACK/READ/TSS 组合及新 Start_PSN 恢复仍待验收。

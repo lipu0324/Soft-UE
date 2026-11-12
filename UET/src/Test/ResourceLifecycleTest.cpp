@@ -93,7 +93,7 @@ void resource_nack_pause_and_recovery() {
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     ResourceNackProbe probe(forward,loop);
     PdsHost source_host(1,loop,trace,probe),target_host(2,loop,trace,reverse);
-    source_host.services().resource_nack_retry_delay=4*kMillisecond;
+    source_host.services().nack_retransmission_delays_ns[1]=4*kMillisecond;
     target_host.services().target_context_limit=0;
     Endpoint source(1,source_host,loop,trace),target(2,target_host,loop,trace);
     source.memory().add_job(1); target.memory().add_job(1);

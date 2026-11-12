@@ -23,6 +23,7 @@ add_library(softue_protocol STATIC
   ${CORE}/PDS/PDC/PDC.cpp
   ${CORE}/PDS/PDC/Probe.cpp
   ${CORE}/PDS/PDC/TransmitTiming.cpp
+  ${CORE}/PDS/PDC/NegativeAcknowledgment.cpp
   ${CORE}/PDS/PDC/IPDC.cpp
   ${CORE}/PDS/PDC/TPDC.cpp
   ${CORE}/PDS/PDC/RTOTimer/RTOTimer.cpp
@@ -77,6 +78,7 @@ if(BUILD_TESTING)
   endfunction()
   softue_test(runtime_test RuntimeTest.cpp)
   softue_test(retry_timing_test RetryTimingTest.cpp)
+  softue_test(negative_acknowledgment_test NegativeAcknowledgmentTest.cpp)
   softue_test(memory_registry_test MemoryRegistryTest.cpp)
   softue_test(memory_key_test MemoryKeyTest.cpp)
   softue_test(nscc_test NsccTest.cpp)

@@ -121,7 +121,8 @@
         "pds_fault_test",
         "pdc_lifecycle_test",
         "pds_feedback_test",
-        "pds_probe_test"
+        "pds_probe_test",
+        "negative_acknowledgment_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -140,14 +141,15 @@
         "selective_acknowledgment_test",
         "retry_timing_test",
         "mac_timing_test",
-        "pds_probe_test"
+        "pds_probe_test",
+        "negative_acknowledgment_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Nanosecond initial RTO (0..8 s), exact exponential timeout backoff, independent total/NACK versus timeout retry counts, deferred retry causes and MAC-started timers tested. Configurable retry limits/infinite mode, per-code NACK delays and the complete NACK/recovery matrix remain open; see RETRY-TIMING.md."
+      "evidence_note": "Nanosecond RTO, separate NACK/timeout backoff, delayed retry deduplication/cancellation, reserved-code filtering, CMS event/accounting separation and MAC timers tested. Retry-limit configuration/infinite mode, New_Start_PSN and full READ/TSS/control matrices remain open; see RETRY-TIMING.md and NACK-RECOVERY.md."
     },
     {
       "id": "PDS-RUD",

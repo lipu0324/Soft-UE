@@ -43,7 +43,7 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     acknowledged_tx_.clear();
     semantic_completed_tx_.clear();
     peer_clear_requests_.clear();
-    fast_retransmit_psn_.reset();
+    ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
     //FUNCTION_LOG_ENTRY();
@@ -198,7 +198,8 @@ void I_PDC::openChk(){
         }
         else if(p.PDS_type == nack_header) {
         LOG_DEBUG(__FUNCTION__, "Process negative acknowledgment packet");
-        if (SYN && p.PDS_header.nack_header.spdcid &&
+        if (UET::PDS::negative_acknowledgment_policy(p.PDS_header.nack_header.nack_code) &&
+            SYN && p.PDS_header.nack_header.spdcid &&
             tx_pkt_buffer.count(p.PDS_header.nack_header.nack_psn)) {
             DPDCID=p.PDS_header.nack_header.spdcid;
             SYN=false; state=ESTABLISHED;
@@ -224,7 +225,7 @@ void I_PDC::openChk(){
         sesTxRsp(&tx_rsp_q.front());
         tx_rsp_q.pop();
     }
-    else if(!tx_req_q.empty() && !pause_pdc && peerWindowAllows(tx_cur_psn) && congestionReady()){
+    else if(!tx_req_q.empty() && !pause_pdc && newDataAllowed() && peerWindowAllows(tx_cur_psn) && congestionReady()){
         diagnostics() << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer request transmission");
         sesTxReq(&tx_req_q.front());

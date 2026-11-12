@@ -48,6 +48,8 @@ def main():
                dict(base, nscc={"enabled": 1}), dict(base, nscc={"enabled": True, "nominal_mtu": 100}),
                dict(base, trimming="true"), dict(base, payload_mtu=0),
                dict(base, rto_ns=True), dict(base, rto_ns=8_000_000_001),
+               dict(base, nack_delays_ns=[0, 1]), dict(base, nack_delays_ns=[0, 0, 0, True]),
+               dict(base, nack_delays_ns=[0, 0, 0, 8_000_000_001]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 3, "up": False}]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 2, "up": "false"}])]
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
@@ -134,6 +136,7 @@ def main():
 
         trimmed = copy.deepcopy(incast)
         trimmed["trimming"] = True
+        trimmed["nack_delays_ns"] = [10000, 2000000, 1000000, 0]
         trimmed["links"][-1].update(mtu=1500, buffer_bytes=1500)
         trim_output, trim_result = run(trimmed, "nscc-trim-incast")
         check(sum(link["trimmed"] for link in trim_result["links"]) > 0, "configured congestion never trimmed")

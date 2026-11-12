@@ -3,6 +3,7 @@
 #include "RetryTiming.hpp"
 
 #include <chrono>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -58,7 +59,9 @@ struct Services {
     uint16_t target_context_limit = 512;
     size_t pending_request_limit = 16384;
     Time pending_request_timeout = 100*kMillisecond;
-    Time resource_nack_retry_delay = 2*kMillisecond;
+    // §3.5.12.7 permits one to four NACK delays, selected by code. Groups
+    // are normal recovery, resource pressure, SES processing, and spare.
+    std::array<Time,4> nack_retransmission_delays_ns{{0,2*kMillisecond,kMillisecond,0}};
     bool standard_wire=true;
     uint16_t default_wire_entropy=0; // Fixed path when CMS is disabled.
     std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.

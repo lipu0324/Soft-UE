@@ -37,6 +37,8 @@
 #include "RTOTimer/RTOTimer.hpp"
 #include "../../CMS/CongestionControl.hpp"
 #include "../PeerSequenceWindow.hpp"
+#include "../NegativeAcknowledgment.hpp"
+#include "../OrderedRecovery.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
@@ -280,6 +282,7 @@ inline std::string nackCodeToString(PDS_Nack_Codes code) {
         case UET_RCVD_SES_PROCG:    return "UET_RCVD_SES_PROCG";
         case UET_UNEXP_EVENT:       return "UET_UNEXP_EVENT";
         case UET_RCVR_INFER_LOSS:   return "UET_RCVR_INFER_LOSS";
+        case UET_NO_SES_SYNC_AVAIL: return "UET_NO_SES_SYNC_AVAIL";
         default:                    return "UNKNOWN_NACK_CODE(0x" + 
                                            std::to_string(static_cast<int>(code)) + ")";
     }
@@ -319,6 +322,7 @@ struct TX_pkt_meta
     bool transmit_time_valid=false,awaiting_transmission=false;
     uint32_t congestion_nominal_bytes=0;
     bool congestion_inflight=false; // One debit per attempt, released by ACK counter/NACK/loss.
+    bool congestion_debit_waiting_for_retry=false; // Restore if delivery wins before the replacement is sent.
     // PDS delivery knowledge is independent of whether CMS is enabled. SACK
     // confirms receipt, but cannot prove DEFAULT_RESPONSE (§3.5.12.4/3.5.13).
     bool delivery_confirmed=false;
@@ -378,7 +382,7 @@ public:
     bool allACK;           /**< Full acknowledgment flag / Full acknowledgment flag */
     int open_msg;          /**< Open message count / Open message count */
     bool SYN;              /**< Synchronization flag / Synchronization flag */
-    int MPR;               /**< Maximum Packet Rate / Maximum packet rate */
+    int MPR;               /**< Local outstanding-packet capacity, distinct from the encoded peer MP_RANGE. */
     int ACK_GEN_COUNT;     /**< ACK generation counter (determines when to send ACK) / Used for cumulative ACK to determine if ACK packet needs to be sent */
 
     uint32_t start_psn;     /**< Initial packet sequence number / Initial packet sequence number */
@@ -400,8 +404,8 @@ public:
     bool closing;          /**< Closing in progress flag / Closing in progress flag */
     int pdc_close_timer;    /**< PDC close timer / PDC close timer */
 
-    uint32_t dst_fep;       /**< Destination IP address / Destination IP address */
-    uint32_t src_fep;       /**< Source IP address / Source IP address */
+    uint32_t dst_fep;       /**< Destination fabric endpoint identity; the network adapter resolves its wire address. */
+    uint32_t src_fep;       /**< Source fabric endpoint identity, scoped to the owning host. */
 
     std::atomic<pdc_state> state; /**< Current PDC state, published atomically */
     std::queue<PDStoNET_pkt> tx_pkt_q;        /**< Transmission packet queue / Transmission packet queue */
@@ -455,7 +459,7 @@ public:
 
     bool hasPendingWork() const {
         const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
-                            (!tx_req_q.empty() && !pause_pdc && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
+                            (!tx_req_q.empty() && !pause_pdc && newDataAllowed() && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
                             !tx_rsp_q.empty() || admissionRetryReady() || probe_due_ || needsWindowProbe();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
@@ -542,9 +546,20 @@ protected:
             const bool data=packet->second.PDS_type==RUOD_req_header;
             if (data && nack_traffic_paused_) continue;
             const bool query=data && runtime_ && runtime_->standard_wire && metadata->second.delivery_confirmed;
-            if (!data || query || (peerWindowAllows(sequence) && congestionReady())) {
+            // GoBackN also invalidates later attempts that were not named in
+            // the NACK. Their old inflight charge must be removed once before
+            // testing CMS admission, or dropped packets can deadlock a full
+            // window with every RTO already suspended (§3.6.13.5).
+            const bool needs_loss_accounting=data && !query && runtime_ && runtime_->congestion_control && metadata->second.congestion_inflight;
+            if (!data || query || needs_loss_accounting || (peerWindowAllows(sequence) && congestionReady())) {
                 if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
             }
+        }
+        if (selected && mode==ROD) {
+            // A higher PSN whose shorter NACK delay has elapsed must not
+            // overtake an earlier member of the same ordered recovery.
+            for (const auto& pending:negative_acknowledgment_timers_)
+                if (pending.first-(clear_psn+1)<*selected-(clear_psn+1)) return std::nullopt;
         }
         return selected;
     }
@@ -597,6 +612,9 @@ protected:
     bool nack_traffic_paused_=false;
     UET::Runtime::TimerId nack_retry_wake_=0;
     std::map<uint32_t,RetryCause> deferred_nack_retransmits_;
+    std::map<uint32_t,UET::Runtime::TimerId> negative_acknowledgment_timers_;
+    void scheduleNegativeAcknowledgmentRetry(uint32_t sequence,UET::Runtime::Time delay_ns);
+    bool cancelNegativeAcknowledgmentRetry(uint32_t sequence);
     void pauseForResourceNack(uint32_t sequence);
     void resumeNackTraffic();
     void resetNackPause();
@@ -608,7 +626,10 @@ protected:
     std::set<uint32_t> peer_clear_requests_;
     // Suppress repeated go-back-N requests for the same missing PSN until it
     // is acknowledged. RTO remains armed if that recovery burst is also lost.
-    std::optional<uint32_t> fast_retransmit_psn_;
+    UET::PDS::OrderedRecovery ordered_recovery_;
+    bool newDataAllowed() const {
+        return mode!=ROD || (!ordered_recovery_.active() && negative_acknowledgment_timers_.empty() && admission_deferred_retries_.empty());
+    }
     // RUD's receive bitmap is represented by a bounded set in the behavioral
     // model. Packet receipt and semantic completion are separate facts: a
     // guaranteed response blocks CACK until the peer explicitly clears it.

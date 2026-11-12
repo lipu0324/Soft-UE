@@ -66,8 +66,10 @@ public:
             code==UET_TRIMMED_LASTHOP?NsccNackReason::TrimmedLastHop:NsccNackReason::Other;
         state.inflight_contribution-=size;
         state.controller->on_nack(size,sample,packet.PDS_header.nack_header.flags.retx,reason,false,clock_.now());
-        record("nscc_nack",code);
         if (wake_) wake_();
+    }
+    void negative_acknowledgment_event(const Connection&,const PDStoNET_pkt& packet) override {
+        record("nscc_nack",packet.PDS_header.nack_header.nack_code);
     }
     void inferred_loss(const Connection& connection,uint32_t size) override {
         auto& state=source(connection);
@@ -75,6 +77,12 @@ public:
         state.controller->on_inferred_loss(size,clock_.now());
         record("nscc_inferred_loss",size);
         if (wake_) wake_();
+    }
+    void canceled_unsent_retry(const Connection& connection,uint32_t size) override {
+        auto& state=source(connection);
+        state.inflight_contribution+=size;
+        state.controller->on_send(size,clock_.now()); // Restore bytes only; no transmission or window increase.
+        record("nscc_canceled_loss",size);
     }
     void received(const Connection& connection,const PDStoNET_pkt& packet,bool duplicate=false) override {
         // Called only after PDS's window/order/duplicate validation succeeds.

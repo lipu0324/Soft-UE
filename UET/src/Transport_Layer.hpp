@@ -187,7 +187,7 @@ enum PDS_ctl_type{
 enum PDS_Nack_Codes{
     UET_TRIMMED =           0x01,   // NORMAL    - RETX - Packet was trimmed
     UET_TRIMMED_LASTHOP =   0x02,   // NORMAL    - RETX - Packet was trimmed at last hop switch
-    UET_TRIMMED_ACK =       0x03,   // NORMAL    - RETX original read request - ACK carrying read response data was trimmed
+    UET_TRIMMED_ACK =       0x03,   // Legacy name only; reserved in UE 1.1 Table 3-68, never actionable there.
     UET_NO_PDC_AVAIL=       0x04,   // NORMAL    - Retry (PDC not created) - No available PDC resources, set pds.spdcid=0
     UET_NO_CCC_AVAIL=       0x05,   // NORMAL    - Retry (PDC not created) - No available CCC resources, set pds.spdcid=0
     UET_NO_BITMAP   =       0x06,   // NORMAL    - Retry (PDC not created) - No bitmap or PSN tracking resources, set pds.spdcid=0
@@ -210,7 +210,8 @@ enum PDS_Nack_Codes{
     UET_NEW_START_PSN=      0x17,   // NORMAL    - RETX - Retransmit all packets using new Start_PSN
     UET_RCVD_SES_PROCG=     0x18,   // NORMAL    - RETX (ACK may arrive before RETX) - May occur when delayed packet and retransmitted packet arrive at target around same time
     UET_UNEXP_EVENT=        0x19,   // PDC_FATAL - Close PDC (retry) - Unexpected event, processing requires unsupported functionality, PDC cannot recover
-    UET_RCVR_INFER_LOSS=    0x1A    // NORMAL    - RETX - Receiver infers PSN loss and requests retransmission, application specific
+    UET_RCVR_INFER_LOSS=    0x1A,   // NORMAL    - RETX - Receiver infers PSN loss and requests retransmission, application specific
+    UET_NO_SES_SYNC_AVAIL=  0x1B    // NORMAL    - RETX - No SES synchronization tracking state available.
 };
 
 //=============================================================================

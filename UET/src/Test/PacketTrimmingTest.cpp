@@ -196,13 +196,13 @@ void congested_switch_recovery(bool ordered,bool udp,bool last_hop,bool trim_fir
     write.peer=2; write.remote_key=region.key; write.payload.resize(4096);
     for (size_t byte=0;byte<write.payload.size();++byte) write.payload[byte]=static_cast<uint8_t>(byte*11);
     source.submit(write); loop.run_until(50*kMillisecond);
-    Completion completion{}; CHECK(source.poll_completion(completion));
-    if (completion.status!=CompletionStatus::Success) {
+    Completion completion{}; const bool completed=source.poll_completion(completion);
+    if (!completed || completion.status!=CompletionStatus::Success) {
         std::cerr<<"Trim recovery ordered="<<ordered<<" udp="<<udp<<" ipv6="<<ipv6<<" last_hop="<<last_hop
-            <<" status="<<static_cast<int>(completion.status)<<" code="<<unsigned(completion.remote_code)<<'\n';
+            <<" completed="<<completed<<" status="<<static_cast<int>(completion.status)<<" code="<<unsigned(completion.remote_code)<<'\n';
         for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.node<<' '<<event.event<<' '<<event.value<<'\n';
     }
-    CHECK(completion.status==CompletionStatus::Success && !source.poll_completion(completion));
+    CHECK(completed && completion.status==CompletionStatus::Success && !source.poll_completion(completion));
     CHECK(target.memory().read(1,1,region.key,0,4096)==write.payload);
     CHECK(source_adapter.trimmed==(trim_first_syn?1u:0u));
     CHECK(fabric.stats(10,2).trimmed>0 && fabric.stats(10,2).trimmed_bytes>0);

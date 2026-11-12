@@ -442,7 +442,8 @@ public:
             packet->PDS_header.RUOD_ack_header.type == ACK_CC;
         case nack_header:
             return packet->PDS_header.nack_header.type == NACK &&
-                   !packet->PDS_header.nack_header.flags.nt;
+                   !packet->PDS_header.nack_header.flags.nt &&
+                   UET::PDS::negative_acknowledgment_policy(packet->PDS_header.nack_header.nack_code).has_value();
         default: return false;
         }
     }

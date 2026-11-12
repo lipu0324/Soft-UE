@@ -18,6 +18,7 @@ python3 scripts/run_simulation.py examples/simulation/nscc-incast-trim.yaml \
 |---|---|
 | `payload_mtu` | SES 单包 payload 上限，默认 1024 字节，范围 1～8192；不等于完整链路帧 MTU。 |
 | `rto_ns` | 初始重传超时，0～8000000000 ns，默认 1000000；零值表示立即到期。NACK 与 RTO 的退避区别见 [重试计时](RETRY-TIMING.md)。 |
+| `nack_delays_ns` | 四个 0～8000000000 ns 延迟槽，按正常恢复、资源、SES 处理和预留分组选择；默认 `[0, 2000000, 1000000, 0]`，详见 [NACK 恢复](NACK-RECOVERY.md)。 |
 | `nscc.enabled` | 显式开启所有主机的 NSCC；默认 false。 |
 | `nscc.base_rtt_ns` | 配置的空载路径 RTT，默认 12000 ns；不是实验测得的平均流延迟。 |
 | `nscc.sender_bytes_per_second`、`receiver_bytes_per_second` | 算法初始化使用的速率，单位 byte/s，默认均为 12500000000。链路 `rate_bps` 另用 bit/s。 |

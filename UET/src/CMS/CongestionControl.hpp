@@ -29,7 +29,14 @@ public:
                                std::optional<NsccTransmitSample> sample)=0;
     virtual void negative_acknowledged(const Connection& connection,uint32_t nominal_size,
                                const PDStoNET_pkt& packet,std::optional<NsccTransmitSample> sample)=0;
+    // Every valid NACK is observable, even if an earlier NACK already removed
+    // that attempt's inflight contribution or the packet was a control.
+    virtual void negative_acknowledgment_event(const Connection&,const PDStoNET_pkt&) {}
     virtual void inferred_loss(const Connection& connection,uint32_t nominal_size)=0;
+    // A delivery ACK can beat a loss-marked retry waiting for admission. Undo
+    // that provisional byte debit before retiring the request; no new packet
+    // was sent, so this is accounting, not a congestion/window response.
+    virtual void canceled_unsent_retry(const Connection& connection,uint32_t nominal_size)=0;
     virtual void received(const Connection& connection,const PDStoNET_pkt& packet,bool duplicate=false)=0;
     virtual void decorate_ack(const Connection& connection,uint32_t acknowledged_psn,PDStoNET_pkt& packet)=0;
     virtual void receive_cleared(const Connection& connection,uint32_t clear_through)=0;

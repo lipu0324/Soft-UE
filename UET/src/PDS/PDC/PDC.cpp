@@ -72,6 +72,8 @@ PDC::PDC(UET::Runtime::Services* services)
       close_error(false),           
       closing(false),               
       pdc_close_timer(0),           
+      dst_fep(0),
+      src_fep(0),
       state(CLOSED),                
       public_net_queue(nullptr),    
       public_ses_req_queue(nullptr),
@@ -204,8 +206,27 @@ void PDC::processDeliveryAcknowledgment(const PDStoNET_pkt& packet) {
         if (distance && distance<outstanding_span &&
             ((!acknowledgment.flags.p && cached.first==trigger_sequence) || cumulative || selective)) {
             auto& metadata=tx_pkt_map.at(cached.first);
+            const bool first_receipt=!metadata.delivery_confirmed;
+            if (first_receipt && metadata.congestion_debit_waiting_for_retry && runtime_ && runtime_->congestion_control) {
+                // §3.6.10.3 / §3.6.13.5: the cumulative received-byte counter
+                // releases this original packet. A replacement never sent
+                // cannot also retain its provisional loss debit.
+                runtime_->congestion_control->canceled_unsent_retry(congestionConnection(),metadata.congestion_nominal_bytes);
+                metadata.congestion_debit_waiting_for_retry=false;
+            }
             metadata.delivery_confirmed=true;
             metadata.congestion_inflight=false;
+            if (first_receipt) {
+                const bool delayed=cancelNegativeAcknowledgmentRetry(cached.first);
+                const bool admission_wait=admission_deferred_retries_.erase(cached.first)!=0;
+                const bool resource_wait=deferred_nack_retransmits_.erase(cached.first)!=0;
+                // An ACK that beats a delayed retry cancels DATA retransmission.
+                // Keep an RTO for missing SES semantics; it will send an ACK
+                // Request rather than charging/re-sending confirmed data.
+                if ((delayed || admission_wait || resource_wait) && !metadata.awaiting_transmission &&
+                    !rto_timer_.isTimerActive(cached.first) && rtoEnabled())
+                    startPacketTimer(cached.first,metadata.timeout_retry_count);
+            }
         }
     }
 }
@@ -314,6 +335,7 @@ void PDC::decorateControl(PDStoNET_pkt& packet) {
 void PDC::processPeerAcknowledgment(const PDStoNET_pkt& packet) {
     const auto& ack=packet.PDS_header.RUOD_ack_header;
     if ((tx_cur_psn-1)-ack.cack_psn>=0x80000000u) return; // Never anchor a peer window on unsent future PSNs.
+    if (!ack.flags.p) ordered_recovery_.acknowledged();
     if (!peer_sequence_window_) {
         if (ack.cack_psn-(start_psn-1)>tx_cur_psn-start_psn) return;
         peer_sequence_window_.emplace(start_psn,runtime_?runtime_->mpr_zero_override:0);
@@ -400,6 +422,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
                 ++it; continue;
             }
             semantic_completed_tx_.erase(sequence);
+            cancelNegativeAcknowledgmentRetry(sequence);
             stopPacketTimer(sequence);
             admission_deferred_retries_.erase(sequence);
             tx_pkt_map.erase(sequence);
@@ -408,8 +431,6 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
             if (unack_cnt > 0) --unack_cnt;
         } else ++it;
     }
-    if (fast_retransmit_psn_ && !tx_pkt_buffer.count(*fast_retransmit_psn_))
-        fast_retransmit_psn_.reset();
     const uint32_t previous_clear=clear_psn;
     while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
     if (clear_psn!=previous_clear) emitPdcEvent(UET::Runtime::PdcEventKind::TransmitCleared,clear_psn);
@@ -524,6 +545,7 @@ void PDC::reTx(uint32_t psn){
         auto& metadata=tx_pkt_map.at(psn);
         metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
         metadata.congestion_inflight=true;
+        metadata.congestion_debit_waiting_for_retry=false;
     }
     found->second=p;
     tagTransmission(p,psn,p.PDS_type==RUOD_cp_header?UET::Runtime::TransmitKind::NumberedControl:
@@ -553,10 +575,23 @@ void PDC::retryPacket(uint32_t psn,RetryCause cause){
     }
     if (runtime_ && runtime_->congestion_control && tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header &&
         !tx_pkt_map.at(psn).delivery_confirmed) {
-        auto& metadata=tx_pkt_map.at(psn);
-        if (metadata.congestion_inflight) {
+        const auto account_loss=[this](uint32_t sequence) {
+            const auto packet=tx_pkt_buffer.find(sequence);
+            const auto found=tx_pkt_map.find(sequence);
+            if (packet==tx_pkt_buffer.end() || found==tx_pkt_map.end() || packet->second.PDS_type!=RUOD_req_header) return;
+            auto& metadata=found->second;
+            if (metadata.delivery_confirmed || !metadata.congestion_inflight || metadata.awaiting_transmission) return;
             runtime_->congestion_control->inferred_loss(congestionConnection(),metadata.congestion_nominal_bytes);
             metadata.congestion_inflight=false;
+            metadata.congestion_debit_waiting_for_retry=true;
+        };
+        account_loss(psn);
+        if (mode==ROD) {
+            // Account the ready GoBackN range before selecting its first
+            // replacement. Otherwise a later packet's debit can admit that
+            // later packet while the Expected_PSN is still blocked by CMS,
+            // violating the ordered recovery of §3.5.21.1.
+            for (const auto& deferred:admission_deferred_retries_) account_loss(deferred.first);
         }
         // Infer loss once, but do not consume a retry or arm a new RTO until
         // CMS admits the actual retransmission (§3.6.8 / §3.6.13.5).
@@ -639,6 +674,9 @@ void PDC::resetNackPause() {
     nack_retry_wake_=0;
     nack_traffic_paused_=false;
     deferred_nack_retransmits_.clear();
+    if (runtime_)
+        for (const auto& pending:negative_acknowledgment_timers_) runtime_->timers.cancel(pending.second);
+    negative_acknowledgment_timers_.clear();
 }
 
 void PDC::resumeNackTraffic() {
@@ -659,7 +697,7 @@ void PDC::pauseForResourceNack(uint32_t sequence) {
     if (nack_traffic_paused_) return; // A burst of NACKs must not restart the delay.
     nack_traffic_paused_=true;
     pause_pdc=true;
-    const auto delay=std::max<UET::Runtime::Time>(1,runtime_->resource_nack_retry_delay);
+    const auto delay=runtime_->nack_retransmission_delays_ns[1];
     const std::weak_ptr<int> lifetime=lifetime_guard_;
     nack_retry_wake_=runtime_->timers.at(UET::Runtime::add_time(runtime_->clock.now(),delay),[this,lifetime] {
         if (lifetime.expired()) return;
@@ -693,7 +731,7 @@ void PDC::freePDC()
     acknowledged_tx_.clear();
     semantic_completed_tx_.clear();
     peer_clear_requests_.clear();
-    fast_retransmit_psn_.reset();
+    ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
     closing = false;
@@ -1244,63 +1282,85 @@ void PDC::getCloseStatus(int& unack_cnt_out, bool& allACK_out, int& open_msg_out
  */
 void PDC::rxNack(PDStoNET_pkt* packet)
 {
-    if (!packet) return;
-    const auto& negative_ack = packet->PDS_header.nack_header;
-    // A late reply from an earlier incarnation of this local PDCID cannot
-    // affect the current context, even when its peer tuple is otherwise equal.
-    if (!tx_pkt_buffer.count(negative_ack.nack_psn)) return;
+    if (!packet || packet->PDS_type!=nack_header) return;
+    const auto& negative_ack=packet->PDS_header.nack_header;
+    const auto policy=UET::PDS::negative_acknowledgment_policy(negative_ack.nack_code);
+    if (!policy || !tx_pkt_buffer.count(negative_ack.nack_psn) || !tx_pkt_map.count(negative_ack.nack_psn)) return;
+    if (peer_sequence_window_ && negative_ack.nack_psn-peer_sequence_window_->cumulative_ack()>=0x80000000u) return;
+    const bool ordered=mode==ROD;
+    auto& named_metadata=tx_pkt_map.at(negative_ack.nack_psn);
+    const bool semantic_query=named_metadata.delivery_confirmed && negative_ack.nack_code==UET_RCVD_SES_PROCG;
+    if (named_metadata.delivery_confirmed && policy->action==UET::PDS::NegativeAcknowledgmentAction::Retransmit &&
+        !semantic_query && negative_ack.nack_code!=UET_PKT_NOT_RCVD && negative_ack.nack_code!=UET_ACK_WITH_DATA)
+        return; // §3.6.10.5: an already delivered attempt is not a fresh loss.
+    uint32_t first_sequence=negative_ack.nack_psn;
+    if (negative_ack.nack_code==UET_PSN_OOR_WINDOW && peer_sequence_window_ &&
+        negative_ack.nack_psn==peer_sequence_window_->cumulative_ack()) return;
+    bool new_loss=true;
+    if (ordered && negative_ack.spdcid && !semantic_query &&
+        policy->action==UET::PDS::NegativeAcknowledgmentAction::Retransmit) {
+        // All ROD RETX codes carry Expected_PSN, not just ROD_OOO.
+        first_sequence=negative_ack.payload;
+        if ((tx_cur_psn-1)-first_sequence>=0x80000000u) return;
+        // An intervening ACK may already have retired the beginning of this
+        // recovery range. Never retransmit those acknowledged packets.
+        if (first_sequence-(clear_psn+1)>=0x80000000u) first_sequence=clear_psn+1;
+        if (!tx_pkt_buffer.count(first_sequence)) return;
+        new_loss=ordered_recovery_.observe(first_sequence,negative_ack.flags.retx);
+    }
     if (runtime_ && runtime_->congestion_control) {
+        runtime_->congestion_control->negative_acknowledgment_event(congestionConnection(),*packet);
         auto& metadata=tx_pkt_map.at(negative_ack.nack_psn);
-        if (metadata.congestion_inflight && !metadata.awaiting_transmission) {
+        if (new_loss && metadata.congestion_inflight && !metadata.awaiting_transmission) {
             runtime_->congestion_control->negative_acknowledged(congestionConnection(),metadata.congestion_nominal_bytes,
                 *packet,metadata.transmit_time_valid?std::optional<UET::CMS::NsccTransmitSample>{{metadata.last_transmit_time,metadata.retry_cnt}}:std::nullopt);
             metadata.congestion_inflight=false;
+            metadata.congestion_debit_waiting_for_retry=true;
         }
     }
-    if (isClose(negative_ack.nack_code)) {
-        close_error = true;
+    if (!new_loss) return; // The NACK event is observable, but this episode was already accounted.
+    if (semantic_query) {
+        scheduleNegativeAcknowledgmentRetry(negative_ack.nack_psn,runtime_?runtime_->nack_retransmission_delays_ns[2]:0);
+        return;
+    }
+    if (policy->action!=UET::PDS::NegativeAcknowledgmentAction::Retransmit) {
+        // New_Start_PSN recovery belongs to the authenticated start-method
+        // negotiation. That path is not enabled yet; fail explicitly instead
+        // of applying an unauthenticated epoch change to live operations.
+        close_error=true;
         failure_reason_=UET::Runtime::PdcFailureReason::FatalNegativeAcknowledgement;
         return;
     }
     if (!negative_ack.spdcid && runtime_) {
+        // §3.5.8.2: absence of a peer PDC pauses all data. Its recovery uses
+        // the resource-delay group even when the original SYN was trimmed.
         pauseForResourceNack(negative_ack.nack_psn);
         return;
     }
     if (negative_ack.spdcid) resumeNackTraffic();
+    if (negative_ack.nack_code==UET_PKT_NOT_RCVD || negative_ack.nack_code==UET_ACK_WITH_DATA)
+        tx_pkt_map.at(negative_ack.nack_psn).delivery_confirmed=false; // Replay the cached original, not another ACK Request.
 
-    if (negative_ack.nack_code == UET_ROD_OOO) {
-        // §3.5.12.7: the payload is the receiver's next expected PSN.
-        // Retransmitting only nack_psn would repeatedly send the packet that
-        // arrived too early, leaving the actual gap to wait for its RTO.
-        const uint32_t expected_psn = negative_ack.payload;
-        const uint32_t outstanding_span = tx_cur_psn - clear_psn;
-        const uint32_t expected_distance = expected_psn - clear_psn;
-        if (!expected_distance || expected_distance >= outstanding_span ||
-            !tx_pkt_buffer.count(expected_psn) || fast_retransmit_psn_ == expected_psn) return;
-        fast_retransmit_psn_ = expected_psn;
-        std::vector<uint32_t> recovery_sequences;
-        for (const auto& outstanding : tx_pkt_buffer)
-            if (outstanding.first - expected_psn < tx_cur_psn - expected_psn)
+    const uint32_t distance=first_sequence-clear_psn;
+    if (!distance || distance>=tx_cur_psn-clear_psn || !tx_pkt_buffer.count(first_sequence)) return;
+    std::vector<uint32_t> recovery_sequences;
+    if (!ordered) recovery_sequences.push_back(first_sequence);
+    else {
+        // §3.5.12.7 / §3.5.21.1: all ROD RETX codes use GoBackN.
+        // Every ROD NACK payload supplies Expected_PSN. Sorting by unsigned
+        // distance preserves order at wrap.
+        for (const auto& outstanding:tx_pkt_buffer)
+            if (outstanding.first-first_sequence<tx_cur_psn-first_sequence)
                 recovery_sequences.push_back(outstanding.first);
-        // Unsigned distance preserves transmit order across the 32-bit wrap.
-        std::sort(recovery_sequences.begin(),recovery_sequences.end(),[expected_psn](uint32_t left,uint32_t right) {
-            return left - expected_psn < right - expected_psn;
+        std::sort(recovery_sequences.begin(),recovery_sequences.end(),[first_sequence](uint32_t left,uint32_t right) {
+            return left-first_sequence<right-first_sequence;
         });
-        for (const auto sequence : recovery_sequences) retryPacket(sequence,RetryCause::NegativeAcknowledgment);
-        return;
     }
-
-    switch (negative_ack.nack_code) {
-    case UET_TRIMMED: case UET_TRIMMED_LASTHOP: case UET_TRIMMED_ACK:
-    case UET_NO_PKT_BUFFER: case UET_NO_GTD_DEL_AVAIL: case UET_NO_SES_MSG_AVAIL:
-    case UET_PSN_OOR_WINDOW: case UET_PKT_NOT_RCVD: case UET_ACK_WITH_DATA:
-    case UET_RCVR_INFER_LOSS:
-        retryPacket(negative_ack.nack_psn,RetryCause::NegativeAcknowledgment);
-        break;
-    default:
-        // Resource/SES-processing notifications retain the existing RTO.
-        // Immediate resend here can make two zero-time endpoints livelock.
-        break;
+    const auto delay=runtime_?runtime_->nack_retransmission_delays_ns[policy->delay_group]:0;
+    for (const auto sequence:recovery_sequences) {
+        const auto& metadata=tx_pkt_map.at(sequence);
+        if (metadata.delivery_confirmed && tx_pkt_buffer.at(sequence).PDS_type==RUOD_req_header) continue;
+        scheduleNegativeAcknowledgmentRetry(sequence,delay);
     }
 }
 
@@ -1488,7 +1548,9 @@ void PDC::sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, ui
         p.PDS_header.nack_header.spdcid = SPDCID;
     }
     p.PDS_header.nack_header.dpdcid = DPDCID;
-    p.PDS_header.nack_header.payload = payload;
+    // §3.5.21.1 item 5: every ROD NACK carries Expected_PSN, except
+    // New_Start_PSN whose payload has its own negotiated meaning.
+    p.PDS_header.nack_header.payload = mode==ROD && nack_code!=UET_NEW_START_PSN?rx_cur_psn+1:payload;
 
     if(pkt) {
         p.SESpkt = *pkt;

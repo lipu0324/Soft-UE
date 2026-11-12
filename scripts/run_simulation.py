@@ -55,7 +55,7 @@ def identifiers(value, name, maximum, minimum=1):
 
 def validate(config):
     mapping(config, {"version", "profile", "seed", "duration_ns", "event_budget", "memory_bytes", "wire",
-                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events", "rto_ns"}, "scenario")
+                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events", "rto_ns", "nack_delays_ns"}, "scenario")
     if config.get("version") != 1 or type(config.get("version")) is not int:
         raise ValueError("scenario version must be 1")
     if config.get("profile", "experimental") != "experimental":
@@ -85,6 +85,12 @@ def validate(config):
     records = ["softue-scenario-v2", f"seed {seed}", f"duration {duration}", f"budget {budget}",
                f"memory {memory}", f"payload_mtu {payload_mtu}", f"rto {rto_ns}", f"trimming {int(trimming)}",
                "wire " + " ".join(str(int(x)) for x in flags)]
+    if "nack_delays_ns" in config:
+        delays = config["nack_delays_ns"]
+        if not isinstance(delays, list) or len(delays) != 4:
+            raise ValueError("nack_delays_ns requires four integer nanosecond slots")
+        delays = [integer(value, 0, 8_000_000_000, "NACK delay") for value in delays]
+        records.append("nack_delays " + " ".join(map(str, delays)))
     nscc = mapping(config.get("nscc", {}), {"enabled", "base_rtt_ns", "sender_bytes_per_second",
                    "receiver_bytes_per_second", "nominal_mtu", "initial_window_bytes"}, "nscc")
     nscc_enabled = nscc.get("enabled", False)

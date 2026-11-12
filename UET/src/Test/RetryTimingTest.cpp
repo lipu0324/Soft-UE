@@ -47,11 +47,13 @@ void nack_keeps_the_last_timeout(bool actual_mac) {
     I_PDC sender(&services); CHECK(sender.initPDC(1)); sender.state=ESTABLISHED; sender.DPDCID=MAX_PDC;
     auto request=noop_request(); sender.sesTxReq(&request);
     const auto start_current_attempt=[&] {
-        if (actual_mac) CHECK(sender.notifyTransmit({*sender.tx_pkt_q.back().transmit_identity,loop.now(),TransmitOutcome::Started}));
+        if (actual_mac && sender.tx_pkt_map.at(1000).awaiting_transmission)
+            CHECK(sender.notifyTransmit({*sender.tx_pkt_q.back().transmit_identity,loop.now(),TransmitOutcome::Started}));
     };
+    const auto process_nack=[&](PDStoNET_pkt& packet) { sender.rxNack(&packet); loop.run_until(loop.now()); sender.openChk(); };
     start_current_attempt();
     loop.run_until(32);
-    auto nack=negative_acknowledgment(UET_TRIMMED); sender.rxNack(&nack);
+    auto nack=negative_acknowledgment(UET_TRIMMED); process_nack(nack);
     if (actual_mac) CHECK(sender.rto_timer_.getActiveTimerCount()==0);
     start_current_attempt();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==1 && sender.tx_pkt_map.at(1000).timeout_retry_count==0);
@@ -61,7 +63,7 @@ void nack_keeps_the_last_timeout(bool actual_mac) {
     start_current_attempt();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==2 && sender.tx_pkt_map.at(1000).timeout_retry_count==1);
     CHECK(sender.rto_timer_.getTimerInfo(1000).duration_ns==256);
-    loop.run_until(200); sender.rxNack(&nack); start_current_attempt();
+    loop.run_until(200); process_nack(nack); start_current_attempt();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==3 && sender.tx_pkt_map.at(1000).timeout_retry_count==1);
     CHECK(sender.rto_timer_.getTimerInfo(1000).duration_ns==256);
     loop.run_until(455); CHECK(sender.rto_pkt_q.empty());
@@ -69,15 +71,15 @@ void nack_keeps_the_last_timeout(bool actual_mac) {
     start_current_attempt();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==4 && sender.tx_pkt_map.at(1000).timeout_retry_count==2);
     CHECK(sender.rto_timer_.getTimerInfo(1000).duration_ns==512);
-    sender.rxNack(&nack); start_current_attempt();
+    process_nack(nack); start_current_attempt();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==5 && sender.tx_pkt_map.at(1000).timeout_retry_count==2);
-    sender.rxNack(&nack); CHECK(sender.close_error); // Common limit still counts NACKs, §3.5.12.7.
+    process_nack(nack); CHECK(sender.close_error); // Common limit still counts NACKs, §3.5.12.7.
     sender.freePDC(); CHECK(loop.pending()==0);
 }
 
 void deferred_nack_retains_its_cause() {
     EventLoop loop; Services services{loop,loop,[]{}}; services.rto_ns=128;
-    services.resource_nack_retry_delay=64;
+    services.nack_retransmission_delays_ns[1]=64;
     I_PDC sender(&services); CHECK(sender.initPDC(1)); sender.state=ESTABLISHED; sender.DPDCID=MAX_PDC;
     auto request=noop_request(); sender.sesTxReq(&request);
     auto nack=negative_acknowledgment(UET_NO_PDC_AVAIL,0); sender.rxNack(&nack);
@@ -98,6 +100,7 @@ void deferred_nack_retains_its_cause() {
     const UET::CMS::Connection competing{0,8,2000,false};
     auto competing_packet=sender.tx_pkt_buffer.at(1000); congestion.transmitted(competing,competing_packet);
     nack=negative_acknowledgment(UET_TRIMMED); sender.rxNack(&nack);
+    loop.run_until(loop.now()); sender.openChk();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==0 && sender.rto_timer_.getActiveTimerCount()==0);
     congestion.closed(competing); sender.openChk();
     CHECK(sender.tx_pkt_map.at(1000).retry_cnt==1 && sender.tx_pkt_map.at(1000).timeout_retry_count==0);

@@ -39,7 +39,7 @@ bool T_PDC::initPDC(uint16_t id)
     acknowledged_tx_.clear();
     semantic_completed_tx_.clear();
     peer_clear_requests_.clear();
-    fast_retransmit_psn_.reset();
+    ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
     // FUNCTION_LOG_ENTRY();
@@ -292,7 +292,7 @@ void T_PDC::openChk()
             sesTxRsp(&tx_rsp_q.front());
             tx_rsp_q.pop();
         }
-        else if (state == ESTABLISHED && pause_pdc == false && !tx_req_q.empty() && peerWindowAllows(tx_cur_psn) && congestionReady())
+        else if (state == ESTABLISHED && pause_pdc == false && newDataAllowed() && !tx_req_q.empty() && peerWindowAllows(tx_cur_psn) && congestionReady())
         { // Packet transmission can only be done in established state
             //diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] state == ESTABLISHED && pause_pdc == false" << std::endl;
             if (!tx_req_q.empty())

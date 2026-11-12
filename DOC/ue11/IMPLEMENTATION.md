@@ -307,6 +307,9 @@ ACK service time and source RTT samples, including local rejection and stale
 transmit notifications after PDC reuse.
 [Retry timing](RETRY-TIMING.md) uses nanosecond RTO values, distinguishes NACK
 retries from timeout backoff and preserves their causes while admission is blocked.
+[NACK recovery](NACK-RECOVERY.md) classifies reserved codes before peer binding,
+separates CMS event reporting from byte accounting, and describes cancellable
+per-PSN delays and delivery-mode-specific recovery.
 
 The [trimming path](TRIMMING.md) documents switch admission, restricted parsing
 of unauthenticated truncated headers, and NACK recovery without PDC allocation.

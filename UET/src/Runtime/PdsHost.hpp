@@ -70,6 +70,12 @@ public:
         if (timeout_ns>kMaximumInitialRtoNs) throw std::invalid_argument("initial RTO exceeds UE 1.1 eight-second range");
         services_.rto_ns=timeout_ns;
     }
+    void configure_negative_acknowledgment_delays(const std::array<Time,4>& delays_ns) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure NACK delays before opening connections");
+        if (std::any_of(delays_ns.begin(),delays_ns.end(),[](Time delay) { return delay>kMaximumInitialRtoNs; }))
+            throw std::invalid_argument("NACK delay exceeds the eight-second configuration range");
+        services_.nack_retransmission_delays_ns=delays_ns;
+    }
     void enable_nscc(const CMS::NsccConfig& config) {
         if (stopped_ || format_!=WireFormat::Uet11 || services_.congestion_control || manager_.getPDSStatus().open_cnt)
             throw std::logic_error("configure NSCC once before opening connections");
