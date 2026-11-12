@@ -29,6 +29,7 @@
 
 #include "PDC.hpp"
 #include "../TrimmedPacket.hpp"
+#include "../DefaultSemanticResponse.hpp"
 #include <algorithm>
 #include <functional>
 
@@ -177,23 +178,93 @@ void PDC::processCongestionAck(const PDStoNET_pkt& packet) {
     const uint32_t sequence=ack.cack_psn+ack.ack_psn_off;
     std::optional<UET::CMS::NsccTransmitSample> sample;
     const auto found=tx_pkt_map.find(sequence);
-    if (found!=tx_pkt_map.end() && found->second.congestion_nominal_bytes && !found->second.congestion_data_received)
+    if (found!=tx_pkt_map.end() && found->second.congestion_nominal_bytes && !found->second.delivery_confirmed)
         sample=UET::CMS::NsccTransmitSample{found->second.last_transmit_time,found->second.retry_cnt};
     runtime_->congestion_control->acknowledged(congestionConnection(),packet,sample);
-    if (ack.type==ACK_CC) {
-        const auto span=tx_cur_psn-clear_psn;
-        for (auto& item:tx_pkt_map) {
-            const uint32_t distance=item.first-clear_psn;
-            const uint32_t sack_base=ack.cack_psn+packet.congestion_ack.sack_psn_offset;
-            const uint32_t sack_bit=item.first-sack_base;
-            if (distance && distance<span && (item.first==sequence ||
-                (ack.cack_psn-clear_psn<span && distance<=ack.cack_psn-clear_psn) ||
-                (sack_bit<64 && (packet.congestion_ack.sack_bitmap&(uint64_t{1}<<sack_bit))))) {
-                item.second.congestion_data_received=true;
-                item.second.congestion_inflight=false;
-            }
+}
+
+void PDC::processDeliveryAcknowledgment(const PDStoNET_pkt& packet) {
+    const auto& acknowledgment=packet.PDS_header.RUOD_ack_header;
+    const uint32_t trigger_sequence=acknowledgment.cack_psn+acknowledgment.ack_psn_off;
+    const uint32_t selective_base=acknowledgment.cack_psn+packet.congestion_ack.sack_psn_offset;
+    const uint32_t outstanding_span=tx_cur_psn-clear_psn;
+    for (const auto& cached:tx_pkt_buffer) {
+        if (cached.second.PDS_type!=RUOD_req_header) continue;
+        const uint32_t distance=cached.first-clear_psn;
+        const uint32_t selective_bit=cached.first-selective_base;
+        const bool cumulative=acknowledgment.cack_psn-clear_psn<outstanding_span &&
+            distance<=acknowledgment.cack_psn-clear_psn;
+        const bool selective=acknowledgment.type==ACK_CC && selective_bit<64 &&
+            (packet.congestion_ack.sack_bitmap&(uint64_t{1}<<selective_bit));
+        if (distance && distance<outstanding_span &&
+            (cached.first==trigger_sequence || cumulative || selective)) {
+            auto& metadata=tx_pkt_map.at(cached.first);
+            metadata.delivery_confirmed=true;
+            metadata.congestion_inflight=false;
         }
     }
+}
+
+void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
+    if (!runtime_ || !runtime_->standard_wire) return;
+    const auto& acknowledgment=packet.PDS_header.RUOD_ack_header;
+    const uint32_t explicit_sequence=acknowledgment.cack_psn+acknowledgment.ack_psn_off;
+    // §3.5.12.5: deliver the explicit semantic result before inferring defaults.
+    // This preserves a guaranteed error when the same ACK advances CACK.
+    const auto explicit_request=tx_pkt_buffer.find(explicit_sequence);
+    if (explicit_request!=tx_pkt_buffer.end() && explicit_request->second.PDS_type==RUOD_req_header &&
+        acknowledgment.next_hdr==UET_HDR_RESPONSE && packet.SESpkt.bth_type==Semantic_Response_Header) {
+        const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
+        auto response=packet.SESpkt;
+        auto& semantic=response.bth_header.Semantic_Response_Header;
+        const bool query_default=semantic.opcode==0 && semantic.job_id==0 && !semantic.modified_length;
+        if (semantic.version==0 && semantic.opcode<=1 && semantic.message_id==request.msg_id &&
+            (semantic.job_id==request.job_id || query_default)) {
+            // Table 3-69 deliberately omits JobID/generation from an ACK
+            // Request's DEFAULT. Recover them from this exact PDC/PSN, never
+            // by looking up an arbitrary application message ID.
+            if (query_default) {
+                semantic.job_id=request.job_id; semantic.ri_generation=request.ri_generation;
+            }
+            if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);
+            semantic_completed_tx_.insert(explicit_sequence);
+        }
+    }
+    for (const auto& cached:tx_pkt_buffer) {
+        if (cached.second.PDS_type!=RUOD_req_header || cached.second.SESpkt.bth_type!=Standard_Header ||
+            semantic_completed_tx_.count(cached.first)) continue;
+        const uint32_t advance=acknowledgment.cack_psn-cached.first;
+        // §3.5.13: equality is insufficient. SACK bits never enter this test.
+        if (!advance || advance>=0x80000000u) continue;
+        auto response=UET::PDS::default_semantic_response(cached.second.SESpkt);
+        fwdRsp2SES(&response,cached.first);
+        semantic_completed_tx_.insert(cached.first);
+    }
+}
+
+void PDC::decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt& packet) const {
+    if (!runtime_ || !runtime_->standard_wire) return;
+    auto& acknowledgment=packet.PDS_header.RUOD_ack_header;
+    if (mode==RUD) acknowledgment.type=ACK_CC;
+    if (acknowledgment.type!=ACK_CC) return;
+    // A per-packet SACK is anchored on the triggering packet (§3.5.12.4.3).
+    // §3.5.12 requires eight-PSN alignment; bit zero is the least significant
+    // bit. The inconsistent, unaligned example in Figure 3-81 is documented.
+    const uint32_t selective_base=trigger_sequence&~uint32_t{7};
+    packet.congestion_ack.sack_psn_offset=static_cast<int16_t>(selective_base-acknowledgment.cack_psn);
+    packet.congestion_ack.sack_bitmap=0;
+    if (mode!=RUD) return; // ROD may use an empty bitmap; Probe is handled separately.
+    const auto include=[&](uint32_t sequence) {
+        const uint32_t bit=sequence-selective_base;
+        if (bit<64) packet.congestion_ack.sack_bitmap|=uint64_t{1}<<bit;
+    };
+    for (const auto sequence:completed_rx_psns_) include(sequence);
+    for (const auto& response:tx_ack_buffer) include(response.first);
+    // sendAck precedes insertion of a newly generated guaranteed response.
+    // A bare ACK may instead be a control/Clear update; never advertise an
+    // in-progress SES request merely because it is in the receipt bitmap.
+    if (acknowledgment.next_hdr==UET_HDR_RESPONSE || acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA)
+        include(trigger_sequence);
 }
 
 void PDC::processPeerAcknowledgment(const PDStoNET_pkt& packet) {
@@ -272,6 +343,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
     const uint32_t cumulative_distance = cumulative - clear_psn;
     const bool valid_explicit = explicit_distance && explicit_distance < outstanding_span;
     const bool valid_cumulative = cumulative_distance < outstanding_span;
+    if ((ack_req_flag & 1u) && valid_explicit) peer_clear_requests_.insert(psn);
     if (valid_explicit || valid_cumulative) resumeNackTraffic();
     if (valid_cumulative) emitPdcEvent(UET::Runtime::PdcEventKind::PeerCumulativeAcknowledged,cumulative);
     for (auto it = tx_pkt_buffer.begin(); it != tx_pkt_buffer.end();) {
@@ -280,6 +352,11 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
             ((valid_explicit && it->first == psn) ||
              (valid_cumulative && distance <= cumulative_distance))) {
             const auto sequence = it->first;
+            if (runtime_ && runtime_->standard_wire && it->second.PDS_type==RUOD_req_header &&
+                it->second.SESpkt.bth_type==Standard_Header && !semantic_completed_tx_.count(sequence)) {
+                ++it; continue;
+            }
+            semantic_completed_tx_.erase(sequence);
             stopPacketTimer(sequence);
             admission_deferred_retries_.erase(sequence);
             tx_pkt_map.erase(sequence);
@@ -290,7 +367,17 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
     }
     if (fast_retransmit_psn_ && !tx_pkt_buffer.count(*fast_retransmit_psn_))
         fast_retransmit_psn_.reset();
+    const uint32_t previous_clear=clear_psn;
     while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
+    if (clear_psn!=previous_clear) emitPdcEvent(UET::Runtime::PdcEventKind::TransmitCleared,clear_psn);
+    // A guaranteed response may arrive ahead of a hole. Remember its request
+    // until Clear can actually cover it; an earlier Clear command with the
+    // old frontier does not release that response (§3.5.11/3.5.12.5).
+    for (auto requested=peer_clear_requests_.begin();requested!=peer_clear_requests_.end();) {
+        if (clear_psn-*requested<0x80000000u) {
+            gen_cm=CLR_CMD; requested=peer_clear_requests_.erase(requested);
+        } else ++requested;
+    }
     pause_pdc = nack_traffic_paused_ || unack_cnt >= MPR || tx_cur_psn-clear_psn > MPR;
     if ((ack_req_flag & 1u) && (valid_explicit || valid_cumulative)) gen_cm = CLR_CMD;
     // Selective ACKs are remembered, so a repeated ACK cannot decrement the
@@ -356,8 +443,8 @@ void PDC::reTx(uint32_t psn){
     const auto found = tx_pkt_buffer.find(psn);
     if (found == tx_pkt_buffer.end()) return;
     PDStoNET_pkt p = found->second;
-    if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header &&
-        tx_pkt_map.at(psn).congestion_data_received) {
+    if (runtime_ && runtime_->standard_wire && p.PDS_type==RUOD_req_header &&
+        tx_pkt_map.at(psn).delivery_confirmed) {
         // Data receipt has already clocked NSCC. Re-sending that data would
         // charge another attempt that duplicate suppression can never count
         // as new bytes. Ask for the retained SES response (§3.5.16.2).
@@ -412,7 +499,7 @@ void PDC::txRto(uint32_t psn){
         return;
     }
     if (runtime_ && runtime_->congestion_control && tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header &&
-        !tx_pkt_map.at(psn).congestion_data_received) {
+        !tx_pkt_map.at(psn).delivery_confirmed) {
         auto& metadata=tx_pkt_map.at(psn);
         if (metadata.congestion_inflight) {
             runtime_->congestion_control->inferred_loss(congestionConnection(),metadata.congestion_nominal_bytes);
@@ -423,7 +510,7 @@ void PDC::txRto(uint32_t psn){
         stopPacketTimer(psn);
     }
     const bool data=tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header;
-    const bool semantic_query=data && runtime_ && runtime_->congestion_control && tx_pkt_map.at(psn).congestion_data_received;
+    const bool semantic_query=data && runtime_ && runtime_->standard_wire && tx_pkt_map.at(psn).delivery_confirmed;
     if (data && !semantic_query && (!peerWindowAllows(psn) || !congestionReady())) {
         stopPacketTimer(psn); admission_deferred_retries_.insert(psn); return;
     }
@@ -532,6 +619,8 @@ void PDC::freePDC()
     resetNackPause();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    semantic_completed_tx_.clear();
+    peer_clear_requests_.clear();
     fast_retransmit_psn_.reset();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
@@ -817,7 +906,13 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
     }
     const auto since_cumulative=requested_sequence-cack_psn;
     if (received_rx_psns_.count(requested_sequence) || !since_cumulative || since_cumulative>=0x80000000u) {
-        sendAck(UET_HDR_NONE,0,0,requested_sequence,nullptr,false); return;
+        SEStoPDS_pkt response{}; response.bth_type=Semantic_Response_Header;
+        auto& semantic=response.bth_header.Semantic_Response_Header;
+        semantic.opcode=0; semantic.return_code=1;
+        semantic.message_id=packet->PDS_header.RUOD_cp_header.payload>>16;
+        // Table 3-69: ACK Request DEFAULT uses JobID=0, generation=0,
+        // modified_length=0. The source recovers scope from its cached PSN.
+        sendAck(UET_HDR_RESPONSE,0,0,requested_sequence,&response,false); return;
     }
     sendNack(0,requested_sequence,UET_PKT_NOT_RCVD,rx_cur_psn+1,nullptr);
 }
@@ -828,105 +923,24 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
 void PDC::rxCtrlClearCmd(PDStoNET_pkt* packet)
 {
     if (!packet) return;
-    const auto previous_cumulative_ack=cack_psn;
     clearReceivedPacketsThrough(packet->PDS_header.RUOD_cp_header.payload);
-    // §3.5.11.4: publish a newly advanced CACK even when no SES traffic is
-    // pending. In RUD, clearing one response can release later packets that
-    // were processed out of order, including the end-of-message packet.
-    if (cack_psn!=previous_cumulative_ack)
-        sendAck(UET_HDR_NONE,0,0,cack_psn,nullptr,false);
+    // §3.5.16.3: Clear Command has AR=0 and does not generate a PDS ACK.
 }
 
 /**
  * @brief Process Clear_req control message 
  * @param p Data packet to process // 需要处理的数据包
  */
-void PDC::rxCtrlClearReq(PDStoNET_pkt *p)
+void PDC::rxCtrlClearReq(PDStoNET_pkt* packet)
 {
-    if (!p) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("输入数据包指针为空"));
-        return;
-    }
-
-    uint32_t req_clear_psn = p->PDS_header.RUOD_cp_header.payload;
-
-    std::stringstream req_info;
-    req_info << "Receive Clear Request - Request clear PSN: " << req_clear_psn
-                << ", SPDCID: " << p->PDS_header.RUOD_cp_header.spdcid
-                << ", DPDCID: " << p->PDS_header.RUOD_cp_header.dpdcid;
-    LOG_INFO(__FUNCTION__, formatLogMessage(req_info.str()));
-
-    diagnostics() << getCurrentTimestamp() << formatLogMessage("rx_ctrl_clear_req - Request clear PSN: ") << req_clear_psn << std::endl;
-
-    if (req_clear_psn > clear_psn) {
-        LOG_WARN(__FUNCTION__, formatLogMessage("Requested clear PSN exceeds current clear_psn range"));
-        diagnostics() << getCurrentTimestamp() << formatLogMessage("Request clear PSN ") << req_clear_psn
-                    << " exceeds current clear_psn " << clear_psn << std::endl;
-    }
-
-    bool has_resources_to_clear = false;
-
-    for (auto it = tx_pkt_buffer.begin(); it != tx_pkt_buffer.end(); ++it) {
-        if (it->first <= req_clear_psn) {
-            has_resources_to_clear = true;
-            break;
-        }
-    }
-
-    if (!has_resources_to_clear) {
-        for (auto it = tx_pkt_map.begin(); it != tx_pkt_map.end(); ++it) {
-            if (it->first <= req_clear_psn) {
-                has_resources_to_clear = true;
-                break;
-            }
-        }
-    }
-
-    if (has_resources_to_clear) {
-        diagnostics() << getCurrentTimestamp() << formatLogMessage("Clear send buffer, range: 0 到 ") << req_clear_psn << std::endl;
-        LOG_INFO(__FUNCTION__, formatLogMessage("清除发送缓冲区中的过期包"));
-
-        auto buf_it = tx_pkt_buffer.begin();
-        while (buf_it != tx_pkt_buffer.end()) {
-            if (buf_it->first <= req_clear_psn) {
-                diagnostics() << getCurrentTimestamp() << formatLogMessage("清除发送包PSN: ") << buf_it->first << std::endl;
-                if(rtoEnabled()) stopPacketTimer(buf_it->first);  // 停止计时器
-                buf_it = tx_pkt_buffer.erase(buf_it);
-            } else {
-                ++buf_it;
-            }
-        }
-
-        auto meta_it = tx_pkt_map.begin();
-        while (meta_it != tx_pkt_map.end()) {
-            if (meta_it->first <= req_clear_psn) {
-                meta_it = tx_pkt_map.erase(meta_it);
-            } else {
-                ++meta_it;
-            }
-        }
-
-        if (req_clear_psn > clear_psn) {
-            clear_psn = req_clear_psn;
-            diagnostics() << getCurrentTimestamp() << formatLogMessage("Update clear_psn to: ") << clear_psn << std::endl;
-            LOG_INFO(__FUNCTION__, formatLogMessage("Update clear_psn to: " + std::to_string(clear_psn)));
-        }
-    }
-
-    diagnostics() << getCurrentTimestamp() << formatLogMessage("Generate Clear Command response") << std::endl;
-    LOG_INFO(__FUNCTION__, formatLogMessage("生成Clear Command作为清除请求的响应"));
-
-    gen_cm = CLR_CMD;
-
-    std::stringstream completion_info;
-    completion_info << "Clear Request processing complete - Clear PSN: " << req_clear_psn
-                    << ", Current clear_psn: " << clear_psn
-                    << ", Remaining send buffer size: " << tx_pkt_buffer.size()
-                    << ", Remaining metadata size: " << tx_pkt_map.size();
-    LOG_INFO(__FUNCTION__, formatLogMessage(completion_info.str()));
-
-    diagnostics() << getCurrentTimestamp() << formatLogMessage("Clear Request processing complete, remaining send buffer: ")
-                << tx_pkt_buffer.size() << ", 元数据: " << tx_pkt_map.size() << std::endl;
+    if (!packet) return;
+    const uint32_t requested_sequence=packet->PDS_header.RUOD_cp_header.payload;
+    // §3.5.16.3.2: this is a request to *report* our Clear frontier, not an
+    // acknowledgment of data or SES. Never discard TX state or advance Clear
+    // just because the destination needs its response-cache space back.
+    const uint32_t distance=requested_sequence-clear_psn;
+    if (distance && distance<tx_cur_psn-clear_psn) peer_clear_requests_.insert(requested_sequence);
+    gen_cm=CLR_CMD;
 }
 /**
  * @brief Send close request packet // Send close request包
@@ -1323,6 +1337,7 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
     }
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->decorate_ack(congestionConnection(),psn,p);
+    decorateSelectiveAcknowledgment(psn,p);
 
     
     std::stringstream ack_info;
@@ -1341,11 +1356,8 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
     if (gtd_del)
     { 
         LOG_INFO(__FUNCTION__, formatLogMessage("保证交付模式,保存到ACK缓冲区"));
-        TX_pkt_meta meta;
-        meta.tx_pkt_handle = 0;
-        meta.retry_cnt = 0;
-        meta.rto = Base_RTO;
-        tx_pkt_map.insert(std::make_pair(psn, meta));
+        // Receive-side guaranteed responses have their own cache. Mixing
+        // their PSNs into TX metadata aliases the two directional windows.
         tx_ack_buffer.insert(std::make_pair(psn, p)); 
     }
 

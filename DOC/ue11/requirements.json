@@ -134,7 +134,8 @@
       "summary": "数据/ACK 丢失恢复与有限重试",
       "status": "partial",
       "tests": [
-        "pds_fault_test"
+        "pds_fault_test",
+        "selective_acknowledgment_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -149,14 +150,15 @@
       "status": "partial",
       "tests": [
         "pds_recovery_test",
-        "rud_window_test"
+        "rud_window_test",
+        "selective_acknowledgment_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Out-of-order exactly-once delivery, holes, clear and wrap tested; SACK/ACK_CC variants remain open."
+      "evidence_note": "Per-packet SACK generation/receipt, strict CACK default inference, response queries, guaranteed-error recovery and 32-bit wrap tested; optional coalescing and Probe remain open."
     },
     {
       "id": "PDS-UUD",

@@ -4,7 +4,7 @@
 namespace UET::Runtime {
 enum class PdcEventKind {
     RequestTransmitted, PeerCumulativeAcknowledged, ReceiveCleared, ConnectionClosed,
-    RequestRejected
+    RequestRejected, TransmitCleared
 };
 enum class PdcFailureReason { None, RetryExhausted, FatalNegativeAcknowledgement, ResourcesUnavailable };
 

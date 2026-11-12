@@ -5,9 +5,12 @@
 PDStoNET_pkt acknowledgment(uint32_t explicit_psn,uint32_t cumulative,uint8_t mpr) {
     PDStoNET_pkt packet{}; packet.PDS_type=RUOD_ack_header;
     auto& ack=packet.PDS_header.RUOD_ack_header;
-    ack.type=ACK_CC; ack.next_hdr=UET_HDR_NONE;
+    ack.type=ACK_CC; ack.next_hdr=UET_HDR_RESPONSE;
     ack.ack_psn_off=static_cast<int16_t>(explicit_psn-cumulative); ack.cack_psn=cumulative;
     ack.spdcid=512; ack.dpdcid=1; packet.congestion_ack.mpr=mpr;
+    packet.SESpkt.bth_type=Semantic_Response_Header;
+    auto& response=packet.SESpkt.bth_header.Semantic_Response_Header;
+    response.opcode=0; response.return_code=1; response.message_id=static_cast<uint16_t>(explicit_psn-999);
     return packet;
 }
 

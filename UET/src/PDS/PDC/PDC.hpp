@@ -317,7 +317,9 @@ struct TX_pkt_meta
     UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
     uint32_t congestion_nominal_bytes=0;
     bool congestion_inflight=false; // One debit per attempt, released by ACK counter/NACK/loss.
-    bool congestion_data_received=false; // Recover a missing semantic response with ACK Request, not data.
+    // PDS delivery knowledge is independent of whether CMS is enabled. SACK
+    // confirms receipt, but cannot prove DEFAULT_RESPONSE (§3.5.12.4/3.5.13).
+    bool delivery_confirmed=false;
     // Add any other metadata you need to store here 
 };
 
@@ -473,6 +475,7 @@ public:
         ack.PDS_header.RUOD_ack_header.flags.retx = 1;
         if (runtime_ && runtime_->congestion_control)
             runtime_->congestion_control->decorate_ack(congestionConnection(),psn,ack);
+        decorateSelectiveAcknowledgment(psn,ack);
         if (public_net_queue) return public_net_queue->push(ack);
         tx_pkt_q.push(std::move(ack));
         return true;
@@ -507,7 +510,7 @@ protected:
             const auto metadata=tx_pkt_map.find(sequence);
             if (packet==tx_pkt_buffer.end() || metadata==tx_pkt_map.end()) return sequence; // Discard a stale queued retry.
             const bool data=packet->second.PDS_type==RUOD_req_header;
-            const bool query=data && runtime_ && runtime_->congestion_control && metadata->second.congestion_data_received;
+            const bool query=data && runtime_ && runtime_->standard_wire && metadata->second.delivery_confirmed;
             if (!data || query || (peerWindowAllows(sequence) && congestionReady())) {
                 if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
             }
@@ -522,6 +525,9 @@ protected:
     }
     void processPeerAcknowledgment(const PDStoNET_pkt& packet);
     void processCongestionAck(const PDStoNET_pkt& packet);
+    void processDeliveryAcknowledgment(const PDStoNET_pkt& packet);
+    void processSemanticAcknowledgment(const PDStoNET_pkt& packet);
+    void decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt& packet) const;
     void releaseCongestionState();
     void rejectTrimmed(const PDStoNET_pkt& packet);
     void observeCongestionDuplicate(const PDStoNET_pkt& packet) {
@@ -560,6 +566,11 @@ protected:
     void resumeNackTraffic();
     void resetNackPause();
     std::set<uint32_t> acknowledged_tx_;
+    // Bounded by the existing local transmit window. A packet is retained
+    // until SES has a positive response, including a strictly-higher CACK's
+    // inferred DEFAULT. Keeping the cached payload is a simulator policy.
+    std::set<uint32_t> semantic_completed_tx_;
+    std::set<uint32_t> peer_clear_requests_;
     // Suppress repeated go-back-N requests for the same missing PSN until it
     // is acknowledged. RTO remains armed if that recovery burst is also lost.
     std::optional<uint32_t> fast_retransmit_psn_;

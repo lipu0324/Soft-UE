@@ -6,6 +6,9 @@ int main() {
     try {
         UET::Runtime::EventLoop loop;
         UET::Runtime::Services services{loop,loop,[]{}};
+        // This unit exercises the transport tracker directly. SES result
+        // validation is covered through rxAck in SelectiveAcknowledgmentTest.
+        services.standard_wire=false;
         I_PDC sender(&services); CHECK(sender.initPDC(1));
         sender.start_psn=UINT32_MAX-1; sender.tx_cur_psn=sender.start_psn;
         sender.clear_psn=sender.start_psn-1;

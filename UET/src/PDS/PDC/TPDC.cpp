@@ -28,12 +28,15 @@
 
 
 #include "TPDC.hpp"
+#include "../DefaultSemanticResponse.hpp"
 
 bool T_PDC::initPDC(uint16_t id)
 {
     resetCloseSafety();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    semantic_completed_tx_.clear();
+    peer_clear_requests_.clear();
     fast_retransmit_psn_.reset();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
@@ -568,8 +571,16 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
         {
             diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] error_chk is ACK_ERROR" << std::endl;
             LOG_INFO(__FUNCTION__, formatLogMessage("Duplicate packet, respond with ACK immediately"));
-            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn))
-                sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, pkt->PDS_header.RUOD_req_header.psn, nullptr, false);
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn)) {
+                const auto sequence=pkt->PDS_header.RUOD_req_header.psn;
+                const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+                    [sequence](const auto& request) { return request.second.psn==sequence; });
+                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr);
+                else if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Standard_Header) {
+                    auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
+                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false);
+                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false);
+            }
         }
         else if (error_chk == DROP)
         {
@@ -617,6 +628,8 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
     }
     processPeerAcknowledgment(*pkt);
     processCongestionAck(*pkt);
+    processDeliveryAcknowledgment(*pkt);
+    processSemanticAcknowledgment(*pkt);
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx ack,ack_psn:" << ack_psn << ",cack_psn:" << cack_psn << std::endl;
     // Record ACK processing information
     std::stringstream ack_process_info;
@@ -635,8 +648,9 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
     {
         diagnostics() << getCurrentTimestamp() << "ack has rsp" << std::endl;
         LOG_DEBUG(__FUNCTION__, formatLogMessage("Forward response to SES layer"));
-        if (pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE ||
-            pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE_DATA)
+        if ((!runtime_ || !runtime_->standard_wire) &&
+            (pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE ||
+             pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE_DATA))
             fwdRsp2SES(&pkt->SESpkt,ack_psn);
     }
     // FUNCTION_LOG_EXIT();

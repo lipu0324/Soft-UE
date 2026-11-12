@@ -30,15 +30,23 @@ endpoint. Network atomics support signed/unsigned integer types and min, max,
 - A standard-wire subset explicitly encodes Ethernet, IPv4/IPv6, native UET/UDP,
   CRC32C, RUD/ROD/UUD request headers, ACK, NACK, CP, standard SES requests and
   semantic responses. Encoding a header does not establish its complete protocol
-  implementation. CC extensions, optimized/local
-  headers, security and IPv6 extension headers are not implemented by this codec.
+  implementation. ACK_CC, NSCC feedback and plaintext trimming are also encoded;
+  optimized/local headers, security and IPv6 extension headers remain unsupported.
 - A deterministic store-and-forward fabric models directed links, serialization,
-  propagation/FEC delay, bounded FIFO byte queues, tail/random packet loss,
-  link up/down and shortest-hop ECMP. It does not currently implement ECN/trim
-  feedback, NSCC/RCCC, LLR, CBFC/PFC, negotiated capabilities or a PHY error model.
+  propagation/FEC delay, eight independent traffic-class queues with byte deficit
+  round-robin scheduling, tail/random loss, dequeue ECN, plaintext trimming,
+  link generations and shortest-hop ECMP. NSCC is connected to actual PDS new-data
+  and retry admission. RCCC, LLR, CBFC/PFC, negotiated link capabilities and a full
+  PHY error model remain open; see [NSCC](NSCC.md) and [trimming](TRIMMING.md).
 - YAML experiments produce memory-verified results, a structured virtual-time
   trace, an Ethernet nanosecond PCAP, diagnostic protocol logs and source/spec
   provenance. The runner supports 2–64 hosts and the operations listed above.
+
+- PDS processes per-packet SACK independently of CMS, queries confirmed data for
+  lost semantic responses, infers DEFAULT only from a strictly-higher CACK, and
+  remembers Clear requests across holes. Native SES requires positive results
+  for every transmitted fragment before successful message completion; see
+  [the protocol-state explanation](PDS-SACK.md).
 
 ## Build and run
 
@@ -157,12 +165,13 @@ the report and log as an artifact; ordinary pull-request CI retains the smaller
 streaming and loss regressions. Adding the workflow does not mean its scheduled
 run has already executed.
 
-PDS publishes local events for transmit PSNs, peer CACKs, receive Clear and
-connection termination. SES uses these to retire completed receive records and
-lease message IDs until all fragments through EOM are cleared. A 66,000-operation
+PDS publishes local events for transmit PSNs, the local transmit Clear frontier,
+peer CACKs, receive Clear and connection termination. SES uses these to retire completed receive records and
+lease message IDs until the local semantic Clear frontier covers EOM (or the connection terminates). A 66,000-operation
 regression crosses the full 16-bit message-ID space. An intermediate packet's
-DEFAULT_RESPONSE cannot complete a message; successful completion requires EOM transmission and either an explicit full-length
-response or the default response associated with the EOM PSN. In RUD the explicit
+DEFAULT_RESPONSE cannot complete a message; successful completion requires EOM
+transmission and positive semantic results for every transmitted fragment. SACK
+alone never supplies those results; see [PDS-SACK](PDS-SACK.md). In RUD an explicit
 full-length response may accompany a later gap-filling packet. Early error completion retains the ID while fragments remain.
 
 SES retains the first error through EOM and Clear. Later packets of the rejected
@@ -246,9 +255,9 @@ results are simulation parameters, not calibrated hardware performance.
 |---|---|
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
-| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. The full control/error/wrap matrix and CC ACK variants remain open. |
+| M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. Per-packet SACK, strict DEFAULT inference, response queries and peer MP_RANGE are covered. The full control/error/wrap matrix and Probe remain open. |
 | M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute selection, retirement, first-error handling, bounded ROD unexpected messages and generation recovery are covered. The experimental FI_MSG/WRITE/integer-atomic/DGRAM provider includes recoverable-error retries. Remaining MR key classes, API flags and acceptance remain open. |
-| M4 | Basic packet-fabric substrate; congestion feedback and NSCC are not implemented. |
+| M4 | NSCC gates actual data/retries; ACK_CC byte counters, independent TC queues, dequeue ECN, plaintext trimming and link generations are covered. Control entropy/timestamps, broader workloads, experiment configuration/export and AI Base acceptance remain open. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 
 Network access was restored on 2026-11-12. CMake/CTest, libfabric 2.0.0 and the

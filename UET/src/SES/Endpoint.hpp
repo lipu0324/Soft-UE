@@ -194,7 +194,7 @@ public:
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
         incoming_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
-        exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
+        exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
     }
 private:
     struct SourceMessage {
@@ -212,6 +212,11 @@ private:
         uint32_t connection_start_psn=0,last_transmitted_psn=0;
         bool is_datagram=false;
         bool end_of_message_transmitted=false;
+        // Only outstanding PSNs are retained, so a multi-gigabyte stream
+        // consumes the PDS window's space rather than one entry per fragment.
+        std::set<uint32_t> awaiting_semantic_responses;
+        uint32_t completed_length=0;
+        uint8_t returned_generation=0;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
     struct MessageLease { ConnectionKey connection; uint32_t last_psn; bool end_of_message_transmitted; uint64_t operation; };
@@ -257,7 +262,7 @@ private:
     uint16_t next_message_=0;
     std::map<uint16_t,Pending> pending_;
     std::map<uint16_t,MessageLease> message_leases_;
-    std::map<ConnectionKey,uint32_t> peer_cumulative_acks_;
+    std::map<ConnectionKey,uint32_t> transmit_clear_frontiers_;
     std::deque<Posted> posted_;
     std::map<MessageKey,Incoming> incoming_;
     // Simulator resource policy: if per-message bookkeeping fills up, refuse
@@ -368,9 +373,9 @@ private:
         trace_.record(node_,"operation_complete",it->second.id);
         if (!it->second.is_datagram && !closed_) {
             const ConnectionKey connection{it->second.peer,it->second.local_pdc,it->second.connection_start_psn};
-            const auto peer_ack=peer_cumulative_acks_.find(connection);
-            if (it->second.local_pdc==UINT16_MAX || !it->second.end_of_message_transmitted || peer_ack==peer_cumulative_acks_.end() ||
-                peer_ack->second-it->second.last_transmitted_psn>=0x80000000u)
+            const auto cleared=transmit_clear_frontiers_.find(connection);
+            if (it->second.local_pdc==UINT16_MAX || !it->second.end_of_message_transmitted || cleared==transmit_clear_frontiers_.end() ||
+                cleared->second-it->second.last_transmitted_psn>=0x80000000u)
                 message_leases_[message]={connection,it->second.last_transmitted_psn,it->second.end_of_message_transmitted,it->second.id};
         }
         pending_.erase(it);
@@ -396,20 +401,26 @@ private:
                 operation->second.connection_start_psn=event.connection_start_psn;
                 operation->second.last_transmitted_psn=event.sequence;
                 operation->second.end_of_message_transmitted|=event.end_of_message;
+                if (!operation->second.is_datagram)
+                    operation->second.awaiting_semantic_responses.insert(event.sequence);
             } else if (auto lease=message_leases_.find(event.message_id);lease!=message_leases_.end()) {
                 lease->second={connection,event.sequence,lease->second.end_of_message_transmitted || event.end_of_message,lease->second.operation};
             }
             fragment_transmitted(event.message_id);
-        } else if (event.kind==Runtime::PdcEventKind::PeerCumulativeAcknowledged) {
-            auto previous=peer_cumulative_acks_.find(connection);
-            if (previous!=peer_cumulative_acks_.end() && event.sequence-previous->second>=0x80000000u) return;
-            peer_cumulative_acks_[connection]=event.sequence;
+        } else if (event.kind==Runtime::PdcEventKind::TransmitCleared) {
+            auto previous=transmit_clear_frontiers_.find(connection);
+            if (previous!=transmit_clear_frontiers_.end() && event.sequence-previous->second>=0x80000000u) return;
+            transmit_clear_frontiers_[connection]=event.sequence;
             for (auto lease=message_leases_.begin();lease!=message_leases_.end();) {
                 if (lease->second.connection==connection && lease->second.end_of_message_transmitted &&
                     event.sequence-lease->second.last_psn<0x80000000u)
                     lease=message_leases_.erase(lease);
                 else ++lease;
             }
+        } else if (event.kind==Runtime::PdcEventKind::PeerCumulativeAcknowledged) {
+            // Peer delivery progress is separate from our completed semantic
+            // frontier. It cannot release a message ID on its own.
+            return;
         } else {
             for (auto message=incoming_.begin();message!=incoming_.end();) {
                 const auto& key=message->first;
@@ -446,7 +457,7 @@ private:
                     if (lease->second.connection==connection) {
                         discard_source(lease->first); lease=message_leases_.erase(lease);
                     } else ++lease;
-                peer_cumulative_acks_.erase(connection);
+                transmit_clear_frontiers_.erase(connection);
                 exhausted_contexts_.erase(connection);
                 feed_submissions();
             }
@@ -460,28 +471,40 @@ private:
         if (response.source_fep!=it->second.peer || semantic_header.job_id!=it->second.job || semantic_header.version) return;
         if (response.PDCID!=it->second.local_pdc || response.connection_start_psn!=it->second.connection_start_psn) return;
         if (semantic_header.opcode>1) return;
-        // §3.4.6: a successful response for an intermediate packet does not
-        // complete the application message. In RUD, an explicit full-length
-        // response may accompany the gap-filling packet after EOM arrived.
-        // A DEFAULT_RESPONSE instead inherits its individual packet's scope.
-        const bool explicit_full_response=semantic_header.opcode==1 && semantic_header.modified_length==it->second.length;
-        if (semantic_header.return_code==1 && (!it->second.end_of_message_transmitted ||
-            (!explicit_full_response && response.original_sequence!=it->second.last_transmitted_psn))) return;
-        const uint32_t completed_length=semantic_header.opcode==0 && !semantic_header.modified_length?
-            it->second.length:semantic_header.modified_length;
-        finish(semantic_header.message_id,semantic_header.return_code==1?CompletionStatus::Success:CompletionStatus::RemoteError,
-            completed_length,semantic_header.return_code,semantic_header.ri_generation);
+        if (!it->second.awaiting_semantic_responses.erase(response.original_sequence)) return;
+        if (semantic_header.return_code!=1) {
+            finish(semantic_header.message_id,CompletionStatus::RemoteError,semantic_header.modified_length,
+                semantic_header.return_code,semantic_header.ri_generation);
+            return;
+        }
+        // §3.4.4.3 / §3.5.13: every transmitted packet needs a positive
+        // semantic result. An EOM DEFAULT cannot hide an earlier missing
+        // packet. PDS supplies inferred defaults only for strictly-later CACK.
+        // A RUD gap-filling packet can carry the final explicit response.
+        it->second.completed_length=std::max(it->second.completed_length,
+            semantic_header.opcode==0 && !semantic_header.modified_length?it->second.length:semantic_header.modified_length);
+        it->second.returned_generation=semantic_header.ri_generation;
+        if (it->second.end_of_message_transmitted && it->second.awaiting_semantic_responses.empty())
+            finish(semantic_header.message_id,CompletionStatus::Success,it->second.completed_length,
+                semantic_header.return_code,it->second.returned_generation);
     }
     void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool semantic=true,
                 std::optional<uint8_t> returned_generation={}) {
         SES_PDS_rsp response{}; response.PDCID=request.PDCID;
-        response.rx_pkt_handle=request.rx_pkt_handle; response.rsp_len=semantic?12:0;
+        response.rx_pkt_handle=request.rx_pkt_handle; response.rsp_len=12;
         response.gtd_del=semantic;
         response.rsp.bth_type=Semantic_Response_Header;
         auto& semantic_header=response.rsp.bth_header.Semantic_Response_Header;
-        semantic_header.opcode=1; semantic_header.version=0; semantic_header.return_code=code;
+        // A fully processed intermediate packet can return DEFAULT immediately
+        // (§3.5.13). If EOM arrives before a RUD hole is filled, keep its result
+        // as NO_RESPONSE (Table 3-24, RC_NULL); it cannot finish the message.
+        const bool incomplete_end=!semantic && request.pkt.bth_header.Standard_Header.eom;
+        semantic_header.opcode=semantic?1:(incomplete_end?3:0);
+        semantic_header.version=0; semantic_header.return_code=incomplete_end?0:code;
         semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
-        semantic_header.message_id=request.pkt.bth_header.Standard_Header.msg_id; semantic_header.modified_length=length;
+        semantic_header.message_id=request.pkt.bth_header.Standard_Header.msg_id;
+        semantic_header.modified_length=!semantic && !incomplete_end?
+            request.pkt.bth_header.Standard_Header.request_length:length;
         semantic_header.ri_generation=returned_generation.value_or(request.pkt.bth_header.Standard_Header.ri_generation);
         if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected semantic response");
         host_.wake();

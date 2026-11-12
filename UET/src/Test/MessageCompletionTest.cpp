@@ -31,7 +31,9 @@ public:
     SendResult try_send(const Frame& frame) override {
         auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
         auto& packet=decoded.packet;
-        if (packet.PDS_type==RUOD_ack_header && packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_NONE) {
+        if (packet.PDS_type==RUOD_ack_header && packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE &&
+            (packet.SESpkt.bth_header.Semantic_Response_Header.opcode==0 ||
+             packet.SESpkt.bth_header.Semantic_Response_Header.opcode==3)) {
             packet.PDS_header.RUOD_ack_header.next_hdr=UET_HDR_RESPONSE;
             packet.SESpkt.bth_type=Semantic_Response_Header;
             auto& response=packet.SESpkt.bth_header.Semantic_Response_Header;

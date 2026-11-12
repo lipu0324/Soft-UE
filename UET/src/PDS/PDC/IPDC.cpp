@@ -27,6 +27,7 @@
  */
 
 #include "IPDC.hpp"
+#include "../DefaultSemanticResponse.hpp"
 
 
 /**
@@ -38,6 +39,8 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     resetCloseSafety();
     clearAllPacketTimers();
     acknowledged_tx_.clear();
+    semantic_completed_tx_.clear();
+    peer_clear_requests_.clear();
     fast_retransmit_psn_.reset();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
@@ -328,8 +331,16 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         else if(error_chk == ACK_ERROR) {
             diagnostics() << getCurrentTimestamp() << "I_PDC duplicate packet received, sending ACK" << std::endl;
             LOG_INFO(__FUNCTION__, "Duplicate packet, respond with ACK immediately");
-            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn))
-                sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,pkt->PDS_header.RUOD_req_header.psn,nullptr,false);
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn)) {
+                const auto sequence=pkt->PDS_header.RUOD_req_header.psn;
+                const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+                    [sequence](const auto& request) { return request.second.psn==sequence; });
+                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr);
+                else if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Standard_Header) {
+                    auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
+                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false);
+                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false);
+            }
         }
         else if(error_chk == DROP) {
             diagnostics() << getCurrentTimestamp() << "I_PDC drop packet" << std::endl;
@@ -403,6 +414,8 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
     }
     processPeerAcknowledgment(*pkt);
     processCongestionAck(*pkt);
+    processDeliveryAcknowledgment(*pkt);
+    processSemanticAcknowledgment(*pkt);
 
     // Record ACK packet information
     std::stringstream ack_info;
@@ -457,7 +470,7 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
         LOG_DEBUG(__FUNCTION__, "Forward response to SES layer");
         // A repeated semantic ACK can still carry a newer valid CACK. Apply
         // that transport fact above, but do not redeliver an unmatched response.
-        if ((!runtime_ || matches_outstanding) &&
+        if ((!runtime_ || !runtime_->standard_wire) && (!runtime_ || matches_outstanding) &&
             (pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE ||
              pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE_DATA))
             fwdRsp2SES(&pkt->SESpkt,ack_psn);
