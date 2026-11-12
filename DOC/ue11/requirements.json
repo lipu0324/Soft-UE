@@ -659,14 +659,15 @@
       "tests": [
         "control_establishment_test",
         "uet_wire_test",
-        "initial_sequence_test"
+        "initial_sequence_test",
+        "syn_range_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable."
+      "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable. Established data/control SYNs enforce the initial MP_RANGE boundary, including equality, wrap and ROD gap precedence."
     },
     {
       "id": "SES-UNEXPECTED-RECOVERY",

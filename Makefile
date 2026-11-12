@@ -124,7 +124,7 @@ SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
   $(CORE)/Network_Layer/PdsPacketCodec.cpp \
   $(CORE)/Network_Layer/UetWireCodec.cpp
 SIM_OBJECTS := $(patsubst %.cpp,$(BUILD)/%.o,$(SIM_SOURCES))
-SIM_TESTS := runtime_test retry_timing_test retry_limit_test initial_sequence_test negative_acknowledgment_test memory_registry_test memory_key_test nscc_test nscc_integration_test fabric_test fabric_congestion_test packet_trimming_test uet_wire_test ses_reserved_fields_test pds_reserved_fields_test \
+SIM_TESTS := runtime_test retry_timing_test retry_limit_test initial_sequence_test syn_range_test negative_acknowledgment_test memory_registry_test memory_key_test nscc_test nscc_integration_test fabric_test fabric_congestion_test packet_trimming_test uet_wire_test ses_reserved_fields_test pds_reserved_fields_test \
   pdc_ack_test peer_sequence_window_test pds_mpr_test pds_fault_test pds_recovery_test uud_delivery_test rud_window_test \
   pdc_lifecycle_test native_atomic_test context_reuse_test message_retirement_test addressing_test resource_lifecycle_test control_ack_test control_establishment_test target_close_test message_completion_test streaming_payload_test semantic_error_test guaranteed_error_test unexpected_message_test \
   pds_allocation_test pds_simulation_test endpoint_test
@@ -170,6 +170,7 @@ $(eval $(call SIM_TEST_RULE,semantic_error_test,SemanticErrorTest.cpp))
 $(eval $(call SIM_TEST_RULE,retry_timing_test,RetryTimingTest.cpp))
 $(eval $(call SIM_TEST_RULE,retry_limit_test,RetryLimitTest.cpp))
 $(eval $(call SIM_TEST_RULE,initial_sequence_test,InitialSequenceTest.cpp))
+$(eval $(call SIM_TEST_RULE,syn_range_test,SynRangeTest.cpp))
 $(eval $(call SIM_TEST_RULE,guaranteed_error_test,GuaranteedErrorTest.cpp))
 $(eval $(call SIM_TEST_RULE,unexpected_message_test,UnexpectedMessageTest.cpp))
 $(eval $(call SIM_TEST_RULE,pds_allocation_test,PdsAllocationTest.cpp))

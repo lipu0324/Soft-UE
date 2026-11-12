@@ -335,7 +335,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 300 are classified and split into obligations
+Profile classification. The first 320 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements

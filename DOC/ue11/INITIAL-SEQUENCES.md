@@ -25,6 +25,18 @@ anti-replay floor。同一源 PDCID 先访问另一个对端再返回时，新�
 记录的半序号空间之外，仍是合法新连接。活动连接的源FA/SPDCID、SYN起点一致性、
 接收窗口和重复包检查继续执行；加密起点验证由后述TSS机制承担。
 
+## 已建立连接的 SYN 范围
+
+同一活动 PDC 的 SYN 包仍需恢复出相同起点，并满足
+`PSN − Start_PSN <= MP_RANGE`（§3.5.8.2）。该范围描述初始序号区间，不能用
+“距当前 Expected_PSN 不远”代替。超过上界返回 `UET_INVALID_SYN`，不进入 SES；
+上界本身合法，ROD 若存在缺口仍按普通有序规则返回 `UET_ROD_OOO`。
+
+`chkRxError` 与 numbered NOOP/Negotiation 的控制处理均先检查此条件，再处理
+重复、乱序和普通接收窗口。无符号差值处理32位回绕。`syn_range_test` 用真实
+PdsHost/Fabric 报文验证数据/控制、RUD/ROD、相等/超出边界以及回绕，检查错误码
+和未交付给 SES。修正前，RUD 超界场景会静默丢包，测试因收不到规定 NACK 失败。
+
 `initial_sequence_test` 检查2万次复用、回绕、间隔、种子重放和非法 ID；实际
 PdsHost/Fabric 路径还检查同 ID 跨对端复用、重新设种子、NOOP 建连与 Close。
 恢复、控制建连、目标 Close、Probe、迟到包及 SACK 测试从捕获报文取得起点，

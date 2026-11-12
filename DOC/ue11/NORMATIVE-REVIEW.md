@@ -428,6 +428,34 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0313-001 | §3.5.8.2，建连程序跨页 | 逐分支处理buffer/trim/资源/安全起点/ROD首包/无SYN peer与窗口；返回方向同起点；未标重传的重复包丢弃。 | 多项独立义务，现有回归只覆盖子集；资源准入、完整错误事件和TSS仍待补，不整体标通过。 |
 | UE11-p0314-001 | §3.5.8.2，NACK与分配 | 普通NACK不能自行创建PDC；NEW_START_PSN/ROD_OOO仅在原SYN请求触发的规定场景分配。 | 源端不将无context NACK当建连请求，ROD首包乱序已有回归；安全新起点流程缺失。 |
 
-复核进度为上述 300 个候选的分类与义务拆分；其余 429 个候选、表格/算法的额外
+## 第 301～320 个候选
+
+本批检查建连后SYN范围、安全起点、关闭流程和封装。安全起点两种方法的正文及
+关闭流程续页已连读；明文PRNG起点和TSS anti-replay不是同一机制。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0315-001 | §3.5.8.2，逐包身份 | 每包验证源FA/SPDCID；tuple不匹配丢弃并记录HDR_MISMATCH。 | manager peer binding已有回归；完整分类管理事件仍未完成。 |
+| UE11-p0315-002 | §3.5.8.2，已建连SYN范围 | SYN PSN不超过Start_PSN+MP_RANGE，否则NACK INVALID_SYN。 | 已补充data/control的初始范围检查；native RUD/ROD、相等/超界和回绕在普通及sanitizer定向回归通过，修正前静默丢弃场景保留为失败基线。 |
+| UE11-p0315-003 | §3.5.8.2，未分配目标PDC | NACK.spdcid0时暂停非控制流量，到NACK重试时间或收到非零peer ID回复再恢复。 | NACK resource pause、去重计时及恢复有覆盖；安全NEW_START_PSN是独立未实现分支。 |
+| UE11-p0315-004 | §3.5.8.2，丢SYN时间跨页 | 保存最近一次被判丢SYN的时间；优先原发送时刻，允许判丢时刻；只需最近一项。 | MAC-time timing、重传与关闭安全等待已有回归，成功重试不延长安全等待。 |
+| UE11-p0317-001 | §3.5.8.2.1，TSS建连 | 加密PDC fully established前验证安全起点；两种方法互通，RANDOM_1RTT为必需基础。 | M6缺失；当前明文PRNG不满足加密起点义务。 |
+| UE11-p0319-001 | §3.5.8.2.1.4，方法适用 | TSS必须支持target新起点NACK/源采纳并重启；EXPECTED_0RTT为可选优化。 | M6缺失；不能只实现EXPECTED而省略fallback。§3.5.8.2通用步骤与专用方法的NACK.spdcid描述有差别，实施时需明确处理。 |
+| UE11-p0320-001 | §3.5.8.2.1.6，pending资源 | New_PDC_Time限制等待，超时递增计数，超过阈值向provider报告NEW_PDC_TIMEOUT_ERR。 | M6/管理事件未实现；普通连接RTO不等于安全PENDING timer。 |
+| UE11-p0320-002 | §3.5.8.2.2，加密生命周期 | 到Start_PSN+2³¹必须关闭加密PDC，再建新PDC。 | M6缺失；普通32位序号回绕测试不能代替加密周期限制。 |
+| UE11-p0321-001 | §3.5.8.3，关闭后新消息 | 关闭中的PDC不接受新SES消息；RUD可用其他PDC，ROD/RODL延迟到原PDC完全关闭。 | manager quiesce/deferred messages及context reuse有覆盖；RODL未实现。 |
+| UE11-p0321-002 | §3.5.8.3，流程引导 | 关闭流程含后续步骤与续页条件，不能把引导句单独标通过。 | 分解见下项，保留完整PDS/READ/TSS矩阵缺口。 |
+| UE11-p0321-003 | §3.5.8.3，关闭步骤跨页 | 在消息边界停新请求；排空ACK/Clear/NACK及READ返回；按选定方法等待丢SYN安全时间或传给target；可靠Close后释放，超限报错；target Close隐式Clear。 | 当前普通可靠close、SYN等待、close丢失/错误有覆盖；READ、转移安全时间和TSS仍缺。非idle诊断是SHOULD。 |
+| UE11-p0322-001 | §3.5.8.3，Close重复 | Close用下一唯一PSN并重传；目标已关闭时必须NACK，不能重放已退休CP_ACK。 | 当前closed-target NACK路径符合方向；需要持续覆盖普通/丢ACK/迟到复用组合。 |
+| UE11-p0322-002 | §3.5.8.3，READ排空 | 发Close前必须收完READ数据；非stateful read不必再等target Clear。 | M5缺失；缓存结果与普通响应的生命周期要分别处理。 |
+| UE11-p0332-001 | §3.5.10，标准格式 | 全部UET包使用所定义格式。 | 标准codec与legacy明确分离；RUDI/RODL/UFH等未完成。 |
+| UE11-p0332-002 | §3.5.10，PDS保留字段 | 发0、收忽略。 | 已实现格式通过pds_reserved_fields_test；保留码点仍单独拒绝，其他格式不在覆盖范围。 |
+| UE11-p0333-001 | §3.5.10.1，IP/UDP能力 | 支持生成/接收IPv4、IPv6、UDP，部署可选择启用集。 | codec及原生场景覆盖四种组合；provider socket地址仍实验IPv4映射。 |
+| UE11-p0333-002 | §3.5.10.1，UDP字段 | 源端口作entropy，不带UET entropy头；UDP checksum发0收忽略。 | wire/反馈熵/trimming测试已有覆盖，CRC按规定屏蔽该字段。 |
+| UE11-p0333-003 | §3.5.10.1，原生entropy | 原生IP必须带entropy头，允许配置ip.protocol。 | codec/PdsHost可配置；实验IP协议号默认策略仍是已记录符合性缺口。 |
+| UE11-p0333-004 | §3.5.10.1，禁分片 | FEP不做IP分片；IPv4 DF1、MF0、fragment_offset0。 | codec显式编码及拒绝分片有回归，网络MTU检查不等于所有扩展头已验收。 |
+| UE11-p0333-005 | §3.5.10.2，UFH32 | UFH32带专用entropy头，VLAN/CSIG标签在UET EtherType前。 | M7/M8缺失；普通IP entropy头不能代替UFH格式。 |
+
+复核进度为上述 320 个候选的分类与义务拆分；其余 409 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

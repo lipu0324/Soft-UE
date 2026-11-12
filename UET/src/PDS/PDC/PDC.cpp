@@ -948,7 +948,11 @@ void PDC::chkRxError(PDStoNET_pkt* packet)
     const uint32_t distance_from_contiguous=sequence-rx_cur_psn;
     if ((header.type==RUD_REQ)!=(mode==RUD)) {
         error_chk=INV_SYN;
-    } else if (header.flags.syn && sequence-header.psn_off!=start_psn) {
+    } else if (header.flags.syn && (sequence-header.psn_off!=start_psn ||
+                                   sequence-start_psn>static_cast<uint32_t>(MPR))) {
+        // §3.5.8.2: even a consistent SYN start cannot extend past the
+        // initial receive range after establishment. Report INVALID_SYN
+        // before duplicate/out-of-order/general-window handling.
         error_chk=INV_SYN;
     } else if (!distance_from_clear || distance_from_clear>=0x80000000u) {
         error_chk=DROP;
@@ -975,7 +979,9 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     if (carries_mode && header.flags.pdc_type!=(mode==ROD?1:0)) {
         sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr,packet); return false;
     }
-    if (header.flags.syn && header.psn-header.psn_off!=start_psn) {
+    if (header.flags.syn && (header.psn-header.psn_off!=start_psn ||
+                            header.psn-start_psn>static_cast<uint32_t>(MPR))) {
+        // Numbered NOOP/Negotiation share data's established-SYN limit.
         sendNack(header.flags.retx,header.psn,UET_INVALID_SYN,0,nullptr,packet); return false;
     }
     // Unique CP PSNs share the receive window with semantic requests. A NOOP
