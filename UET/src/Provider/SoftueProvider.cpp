@@ -11,6 +11,7 @@
 #include <rdma/fi_rma.h>
 #include <rdma/fi_atomic.h>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <type_traits>
@@ -68,9 +69,10 @@ struct ProviderDomain;
 struct ProviderEndpoint;
 struct ProviderAddressVector;
 struct ProviderCompletionQueue;
+struct ProviderEventQueue;
 struct ProviderRegion;
 
-struct ProviderFabric { fid_fabric handle{}; size_t domains=0; };
+struct ProviderFabric { fid_fabric handle{}; size_t domains=0,event_queues=0; };
 struct ProviderDomain {
     fid_domain handle{};
     ProviderFabric* fabric=nullptr;
@@ -92,6 +94,16 @@ struct ProviderCompletionQueue {
     fi_cq_format format=FI_CQ_FORMAT_DATA;
     std::deque<fi_cq_data_entry> completions;
     std::deque<fi_cq_err_entry> errors;
+};
+// EQs contain control events (fi_eq(3)), separately from data-transfer CQs.
+// The application owns its original event buffer; each FIFO record owns a copy.
+struct ProviderEventQueue {
+    struct Event { uint32_t type; std::vector<uint8_t> payload; };
+    fid_eq handle{};
+    ProviderFabric* fabric=nullptr;
+    size_t bindings=0,capacity=256;
+    bool writable=false;
+    std::deque<Event> events;
 };
 struct ProviderRegion {
     fid_mr handle{};
@@ -115,6 +127,7 @@ struct ProviderEndpoint {
     ProviderDomain* domain=nullptr;
     ProviderAddressVector* addresses=nullptr;
     ProviderCompletionQueue *send_cq=nullptr,*receive_cq=nullptr;
+    ProviderEventQueue* event_queue=nullptr;
     sockaddr_in local_address{};
     bool enabled=false;
     bool datagram=false;
@@ -142,6 +155,7 @@ fi_ops_domain domain_ops{};
 fi_ops_mr memory_ops{};
 fi_ops_av address_ops{};
 fi_ops_cq completion_ops{};
+fi_ops_eq event_ops{};
 fi_ops endpoint_object_ops{};
 fi_ops_ep endpoint_ops{};
 fi_ops_cm connection_ops{};
@@ -326,7 +340,7 @@ int close_object(fid* handle) {
         switch (handle->fclass) {
         case FI_CLASS_FABRIC: {
             auto& fabric=owner<ProviderFabric>(handle);
-            if (fabric.domains) return -FI_EBUSY;
+            if (fabric.domains || fabric.event_queues) return -FI_EBUSY;
             delete &fabric; return 0;
         }
         case FI_CLASS_DOMAIN: {
@@ -344,6 +358,11 @@ int close_object(fid* handle) {
             if (queue.bindings) return -FI_EBUSY;
             --queue.domain->children; delete &queue; return 0;
         }
+        case FI_CLASS_EQ: {
+            auto& queue=owner<ProviderEventQueue>(handle);
+            if (queue.bindings) return -FI_EBUSY;
+            --queue.fabric->event_queues; delete &queue; return 0;
+        }
         case FI_CLASS_MR: {
             auto& region=owner<ProviderRegion>(handle);
             region.domain->memory.deregister(region.region);
@@ -358,6 +377,7 @@ int close_object(fid* handle) {
             if (endpoint.addresses) --endpoint.addresses->bindings;
             if (endpoint.send_cq) --endpoint.send_cq->bindings;
             if (endpoint.receive_cq) --endpoint.receive_cq->bindings;
+            if (endpoint.event_queue) --endpoint.event_queue->bindings;
             endpoint.domain->endpoint=nullptr; --endpoint.domain->children;
             delete &endpoint; return 0;
         }
@@ -440,6 +460,56 @@ int open_completion_queue(fid_domain* domain,fi_cq_attr* attributes,fid_cq** res
         ++queue->domain->children; *result=&queue.release()->handle; return 0;
     });
 }
+int open_event_queue(fid_fabric* fabric,fi_eq_attr* attributes,fid_eq** result,void* context) {
+    return guarded([&]() -> int {
+        const fi_eq_attr defaults{}; const auto& requested=attributes?*attributes:defaults;
+        if (!result || requested.size>4096) return -FI_EINVAL;
+        // Only nonblocking control polling is implemented. WAIT_UNSPEC asks
+        // for sread support, so it must not silently become WAIT_NONE.
+        if ((requested.flags&~FI_WRITE) || requested.wait_obj!=FI_WAIT_NONE || requested.wait_set)
+            return -FI_EOPNOTSUPP;
+        auto queue=std::make_unique<ProviderEventQueue>(); queue->fabric=&owner<ProviderFabric>(fabric);
+        queue->capacity=requested.size?requested.size:256; queue->writable=requested.flags&FI_WRITE;
+        initialize_fid(queue->handle.fid,FI_CLASS_EQ,context); queue->handle.ops=&event_ops;
+        ++queue->fabric->event_queues; *result=&queue.release()->handle; return 0;
+    });
+}
+ssize_t write_event(fid_eq* handle,uint32_t event,const void* buffer,size_t length,uint64_t flags) {
+    return guarded([&]() -> ssize_t {
+        auto& queue=owner<ProviderEventQueue>(handle);
+        if (!queue.writable) return -FI_EOPNOTSUPP;
+        if (flags || !buffer || length<sizeof(fi_eq_entry)) return -FI_EINVAL;
+        if (length>4096) return -FI_EMSGSIZE; // Explicit local control-record bound.
+        if (queue.events.size()>=queue.capacity) return -FI_EAGAIN;
+        ProviderEventQueue::Event record{event,{}};
+        const auto* bytes=static_cast<const uint8_t*>(buffer); record.payload.assign(bytes,bytes+length);
+        queue.events.push_back(std::move(record)); return static_cast<ssize_t>(length);
+    });
+}
+ssize_t read_event(fid_eq* handle,uint32_t* event,void* buffer,size_t length,uint64_t flags) {
+    return guarded([&]() -> ssize_t {
+        if (!event || (length && !buffer) || (flags&~FI_PEEK)) return -FI_EINVAL;
+        auto& queue=owner<ProviderEventQueue>(handle);
+        if (queue.events.empty()) return -FI_EAGAIN;
+        const auto& record=queue.events.front();
+        if (length<record.payload.size()) return -FI_ETOOSMALL; // Preserve the event for a larger read.
+        *event=record.type; std::memcpy(buffer,record.payload.data(),record.payload.size());
+        const auto bytes=static_cast<ssize_t>(record.payload.size());
+        if (!(flags&FI_PEEK)) queue.events.pop_front();
+        return bytes;
+    });
+}
+ssize_t read_event_error(fid_eq*,fi_eq_err_entry* result,uint64_t flags) {
+    if (!result || (flags&~FI_PEEK)) return -FI_EINVAL;
+    // MR/AV are synchronous and RDM has no connection-management operations.
+    // No asynchronous control-error producer is enabled in this adapter yet.
+    return -FI_EAGAIN;
+}
+const char* event_error_string(fid_eq*,int error,const void*,char* buffer,size_t length) {
+    const auto* description=fi_strerror(error);
+    if (buffer && length) { std::snprintf(buffer,length,"%s",description); return buffer; }
+    return description;
+}
 ssize_t read_completions(fid_cq* handle,void* result,size_t count) {
     return guarded([&]() -> ssize_t {
         if (count && !result) return -FI_EINVAL;
@@ -510,6 +580,11 @@ int bind_endpoint(fid* handle,fid* resource,uint64_t flags) {
         auto& addresses=owner<ProviderAddressVector>(resource);
         if (flags || endpoint.addresses || addresses.domain!=endpoint.domain) return -FI_EINVAL;
         endpoint.addresses=&addresses; ++addresses.bindings; return 0;
+    }
+    if (resource->fclass==FI_CLASS_EQ) {
+        auto& events=owner<ProviderEventQueue>(resource);
+        if (flags || endpoint.event_queue || events.fabric!=endpoint.domain->fabric) return -FI_EINVAL;
+        endpoint.event_queue=&events; ++events.bindings; return 0;
     }
     if (resource->fclass==FI_CLASS_CQ) {
         auto& queue=owner<ProviderCompletionQueue>(resource);
@@ -869,7 +944,7 @@ void initialize_operations() {
     UNSUPPORTED(object_ops,tostr); UNSUPPORTED(object_ops,ops_set);
     endpoint_object_ops=object_ops; endpoint_object_ops.bind=bind_endpoint; endpoint_object_ops.control=control_endpoint;
     fabric_ops.size=sizeof(fabric_ops); fabric_ops.domain=open_domain;
-    UNSUPPORTED(fabric_ops,passive_ep); UNSUPPORTED(fabric_ops,eq_open); UNSUPPORTED(fabric_ops,wait_open);
+    UNSUPPORTED(fabric_ops,passive_ep); fabric_ops.eq_open=open_event_queue; UNSUPPORTED(fabric_ops,wait_open);
     UNSUPPORTED(fabric_ops,trywait); UNSUPPORTED(fabric_ops,domain2);
     domain_ops.size=sizeof(domain_ops); domain_ops.av_open=open_addresses;
     domain_ops.cq_open=open_completion_queue; domain_ops.endpoint=open_endpoint;
@@ -885,6 +960,8 @@ void initialize_operations() {
     address_ops.straddr=[](fid_av*,const void*,char*,size_t*) -> const char* { return nullptr; };
     completion_ops.size=sizeof(completion_ops); completion_ops.read=read_completions;
     completion_ops.readerr=read_errors; completion_ops.strerror=error_string;
+    event_ops.size=sizeof(event_ops); event_ops.read=read_event; event_ops.write=write_event;
+    event_ops.readerr=read_event_error; event_ops.strerror=event_error_string; UNSUPPORTED(event_ops,sread);
     UNSUPPORTED(completion_ops,readfrom); UNSUPPORTED(completion_ops,sread); UNSUPPORTED(completion_ops,sreadfrom); UNSUPPORTED(completion_ops,signal);
     endpoint_ops.size=sizeof(endpoint_ops);
     UNSUPPORTED(endpoint_ops,cancel); UNSUPPORTED(endpoint_ops,getopt); UNSUPPORTED(endpoint_ops,setopt);

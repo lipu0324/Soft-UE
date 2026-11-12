@@ -10,7 +10,7 @@
 ```sh
 cmake -S . -B build/provider -DSOFTUE_ENABLE_LIBFABRIC=ON \
   -DSOFTUE_PROVIDER_LIBFABRIC_ROOT=/path/to/libfabric-2.0-prefix
-cmake --build build/provider --target libfabric_mode_selection_test libfabric_inject_test libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer -j2
+cmake --build build/provider --target libfabric_mode_selection_test libfabric_inject_test libfabric_event_queue_test libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer -j2
 ctest --test-dir build/provider -R 'libfabric_' --output-on-failure
 FI_PROVIDER_PATH="$PWD/build/provider" FI_PROVIDER=softue fi_info -p softue
 ```
@@ -40,6 +40,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
 | 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
 | 注入 | SEND/WRITE/非取回 ATOMIC inject API 和逐调用 `FI_INJECT`；`inject_size=256` 字节；成功抑制与异步错误按 API 规则分别处理 |
+| 控制事件 | 非阻塞 EQ 的实际 FIFO/PEEK/背压、endpoint 绑定和父子生命周期；见 [EQ](PROVIDER-EQ.md) |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
 
 `mr_key_size=6` 表示标准 RKEY 的 48 位范围；`fi_mr_key()` 仍返回完整 64 位 key。

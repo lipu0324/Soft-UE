@@ -346,14 +346,15 @@
         "libfabric_datagram_processes",
         "libfabric_mode_selection_test",
         "libfabric_unordered_recovery_processes",
-        "libfabric_inject_test"
+        "libfabric_inject_test",
+        "libfabric_event_queue_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open. Public API tests now verify independent SEND/RW mode selection, mixed-mode FIFO, any-JobID MR registration and both explicit ROD and RUD late-receive recovery. Standard UET addressing and full authorization configuration remain incomplete. Injection API/flags use bounded owned copies and preserve success/error CQ rules through semantic retries; RDM completion thresholds use the explicitly stronger globally-observable point; DGRAM thresholds use local transmit acceptance. Standard UET addressing, EQ and full authorization remain incomplete."
+      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open. Public API tests now verify independent SEND/RW mode selection, mixed-mode FIFO, any-JobID MR registration and both explicit ROD and RUD late-receive recovery. Standard UET addressing and full authorization configuration remain incomplete. Injection API/flags use bounded owned copies and preserve success/error CQ rules through semantic retries; RDM completion thresholds use the explicitly stronger globally-observable point; DGRAM thresholds use local transmit acceptance. Basic nonblocking EQ FIFO/binding is tested; standard UET addressing, full authorization and asynchronous control production remain incomplete."
     },
     {
       "id": "CMS-NSCC",

@@ -56,7 +56,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0100-001 | 表 2-11，fi_getinfo 条件项 | 非空 node 指向 UET 地址；其 FI_SOURCE 过滤建议另建 SHOULD 项。 | 当前使用 socket 地址/端口的实验入口，不能通过；service 描述在下一页继续。 |
 | UE11-p0101-001 | 表 2-11，多个 API 义务 | 配置文件中的同名 service 优先；按指定 service 过滤；支持 FI_SOURCE；非 FI_ADDR_UET 不返回 info；返回规定源地址字段并保留 service 识别；不返回目的地址。 | 至少分为配置优先、过滤、flag、地址格式、源地址字段与目的地址六组，不能整体算一项。上游 libfabric 2.0 与固定参考头缺少 FI_ADDR_UET 定义；需显式兼容方案和独立公开 API 验收。 |
 | UE11-p0101-002 | §2.2.5.2.2，端点类型条件项 | scalable endpoint 的每个 RX context 获得独立 resource index；普通 endpoint 获得一个 index。 | 本段跨页；scalable endpoint 未实现。当前 native/provider 的固定目标索引不等于完整服务索引分配。 |
-| UE11-p0103-001 | §2.2.5.3.2，基础要求 | provider 支持 EQ，且每个 endpoint 至少支持绑定一个。 | 当前 `fabric_ops.eq_open` 明确为 unsupported；需要 EQ 对象、绑定、生命周期及公开 API 测试。 |
+| UE11-p0103-001 | §2.2.5.3.2，基础要求 | provider 支持 EQ，且每个 endpoint 至少支持绑定一个。 | 现已实现非阻塞 EQ 的 owned FIFO、PEEK、背压、同 fabric 绑定和生命周期，公开 API 测试通过；阻塞等待和异步管理/错误生产者仍未接入。 |
 | UE11-p0103-002 | §2.2.5.3.4，目标内存要求 | 远程 RMA/atomic 的目标 buffer 先注册到资源 domain；本地发送缓冲注册是可选条件。 | provider 和 native 共享受检 MR，非法 key/撤销/越界有回归；完整授权与 domain 绑定仍需联合验收。 |
 | UE11-p0104-001 | 表 2-13，多个 key 字段约束 | IDEMPOTENT_SAFE=0 禁止幂等传输；保留位为零；用户 key 的 vendor 位为零；optimized key 的中间保留位为零且使用 12 位 index。 | `memory_key_test` 验证格式与 namespace；RUDI 尚未实现，所以幂等传输的使用约束不能通过。optimized 头也未实现。 |
 | UE11-p0104-002 | §2.2.5.3.4.1，key API 格式 | 用户和 provider key 都使用标准 64 位格式；API 传递完整 64 位；RKEY 范围由 mr_key_size 决定。 | native 用户 key 与 provider 生成 key 有部分覆盖，公开 provider 仅 FI_MR_PROV_KEY；mr_key_size 约束由下一段续完。 |

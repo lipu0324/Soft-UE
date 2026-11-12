@@ -139,6 +139,13 @@ if(BUILD_TESTING)
     add_dependencies(libfabric_inject_test softue_fabric)
     set_tests_properties(libfabric_inject_test PROPERTIES TIMEOUT 40
       ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
+    add_executable(libfabric_event_queue_test ${CORE}/Test/LibfabricEventQueueTest.c)
+    target_include_directories(libfabric_event_queue_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_event_queue_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_dependencies(libfabric_event_queue_test softue_fabric)
+    add_test(NAME libfabric_event_queue_test COMMAND libfabric_event_queue_test)
+    set_tests_properties(libfabric_event_queue_test PROPERTIES TIMEOUT 20
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
     add_executable(libfabric_provider_peer ${CORE}/Test/LibfabricProviderPeer.c)
     target_include_directories(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_INCLUDE})
     target_link_libraries(libfabric_provider_peer PRIVATE ${SOFTUE_FABRIC_LIBRARY})
