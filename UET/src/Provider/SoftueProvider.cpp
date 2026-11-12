@@ -28,8 +28,9 @@ constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|
 // its successor, including while a recoverable semantic error is retried.
 // It therefore enforces FI_FENCE for every transmit (§3.4.2.7.1.1), even
 // across peers. This conservative policy trades concurrency for simplicity.
-constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_FENCE;
-constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE|FI_FENCE;
+constexpr size_t maximum_inject_bytes=256; // Advertised local copy bound, not a protocol MTU.
+constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_FENCE|FI_INJECT;
+constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_TRANSMIT_COMPLETE|FI_FENCE|FI_INJECT;
 // §2.2.6 defines two independent ordering predicates. A cross-operation flag
 // can participate in both. The provider's one application FIFO also supplies
 // source-side fencing between ordered operations using different PDC modes.
@@ -100,6 +101,7 @@ struct ApplicationOperation {
     size_t retries=0;
     Runtime::Time retry_at=0;
     bool waiting_retry=false;
+    bool suppress_success_completion=false; // inject APIs still report asynchronous failures.
 };
 struct ProviderEndpoint {
     fid_ep handle{};
@@ -111,6 +113,7 @@ struct ProviderEndpoint {
     bool datagram=false;
     uint64_t next_receive_token=0;
     uint64_t message_ordering=0;
+    uint64_t default_operation_flags=0;
     uint64_t next_transmit_token=0;
     Runtime::RealtimeRuntime runtime;
     Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
@@ -202,6 +205,7 @@ int completion_error(const SES::Completion& completion) {
 void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation& application,
                       const SES::Completion& completion) {
     if (completion.status==SES::CompletionStatus::Success || completion.status==SES::CompletionStatus::LocalSuccess) {
+        if (application.suppress_success_completion) return;
         fi_cq_data_entry entry{};
         entry.op_context=application.context; entry.flags=application.flags;
         entry.len=completion.length; entry.buf=application.buffer;
@@ -532,10 +536,13 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
         const auto available_ordering=datagram?uint64_t{0}:supported_ordering_modes;
         if (!info->tx_attr || (info->tx_attr->msg_order&~available_ordering) ||
             (info->rx_attr && (info->rx_attr->msg_order&~available_ordering))) return -FI_EINVAL;
+        if ((info->tx_attr->op_flags&~(datagram?datagram_operation_flags:supported_operation_flags)) ||
+            info->tx_attr->inject_size>maximum_inject_bytes) return -FI_EINVAL;
         if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
         auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
         endpoint->datagram=datagram;
         endpoint->message_ordering=info->tx_attr->msg_order;
+        endpoint->default_operation_flags=info->tx_attr->op_flags;
         endpoint->local_address.sin_family=AF_INET;
         endpoint->local_address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
         if (info->src_addr) {
@@ -574,12 +581,16 @@ std::optional<uint32_t> resolve_peer(ProviderEndpoint& endpoint,fi_addr_t addres
 }
 
 ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr_t destination,
-                          uint64_t offset,uint64_t key,void* context,bool write,std::optional<uint64_t> immediate={}) {
+                          uint64_t offset,uint64_t key,void* context,bool write,std::optional<uint64_t> immediate={},
+                          std::optional<uint64_t> flags={},bool suppress_success=false) {
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
         if (write && endpoint.datagram) return -FI_EOPNOTSUPP;
         if ((length && !buffer) || length>(endpoint.datagram?1024:uint64_t{UINT32_MAX})) return -FI_EMSGSIZE;
+        const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
+        const bool inject=operation_flags&FI_INJECT;
+        if (inject && length>maximum_inject_bytes) return -FI_EMSGSIZE;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
@@ -587,19 +598,27 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
         SES::Operation operation; operation.type=write?SES::OperationType::Write:
             (endpoint.datagram?SES::OperationType::DatagramSend:SES::OperationType::Send);
         operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
-        // fi_* retains application ownership until completion. SES pulls each
-        // bounded fragment from this local span instead of copying a whole RMA
-        // message (potentially 4 GiB-1) during the API call.
-        auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
-        operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
-        enqueue_transmission(endpoint,std::move(operation),
-            {context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
+        if (inject) {
+            // FI_INJECT returns ownership before network progress. Keep an
+            // owned, bounded copy for PDS and for any later semantic retry.
+            if (length) operation.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+length);
+        } else {
+            // Ordinary transfers retain application ownership until completion.
+            // SES pulls bounded fragments, including for 4 GiB-1 messages.
+            auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
+            operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
+        }
+        ApplicationOperation application{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,
+            suppress_success?nullptr:const_cast<void*>(buffer)};
+        application.suppress_success_completion=suppress_success;
+        enqueue_transmission(endpoint,std::move(operation),std::move(application));
         return 0;
     });
 }
 
-ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_addr_t destination,
-                       uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+ssize_t submit_atomic_operation(fid_ep* handle,const void* buffer,size_t count,fi_addr_t destination,
+                       uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context,
+                       std::optional<uint64_t> flags={},bool suppress_success=false) {
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
@@ -608,6 +627,8 @@ ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_add
         const int supported=query_atomic(nullptr,datatype,operation,&limits,0);
         if (supported) return supported;
         if (!buffer || !count || count>limits.count || offset%limits.size) return -FI_EINVAL;
+        if ((flags.value_or(endpoint.default_operation_flags)&FI_INJECT) && count>maximum_inject_bytes/limits.size)
+            return -FI_EMSGSIZE;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
@@ -616,13 +637,25 @@ ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_add
         request.remote_key=key; request.remote_offset=offset;
         request.atomic_datatype=*atomic_datatype(datatype); request.atomic_operation=*atomic_operation(operation);
         const size_t bytes=count*limits.size; // count was bounded before multiplying.
+        // Keep owned operands for FI_INJECT and semantic replay. Ordinary
+        // bulk atomics also use this bounded (at most 16 MiB) operand vector.
         request.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+bytes);
         // The native integer-memory model is little endian. The platform used
         // by this provider is Linux/little endian; SES separately encodes each
         // operand in network order. Fetching/CAS capabilities remain absent.
-        enqueue_transmission(endpoint,std::move(request),{context,FI_ATOMIC|FI_WRITE,const_cast<void*>(buffer)});
+        ApplicationOperation application{context,FI_ATOMIC|FI_WRITE,suppress_success?nullptr:const_cast<void*>(buffer)};
+        application.suppress_success_completion=suppress_success;
+        enqueue_transmission(endpoint,std::move(request),std::move(application));
         return 0;
     });
+}
+ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_addr_t destination,
+                       uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    return submit_atomic_operation(handle,buffer,count,destination,offset,key,datatype,operation,context);
+}
+ssize_t inject_atomic(fid_ep* handle,const void* buffer,size_t count,fi_addr_t destination,
+                       uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation) {
+    return submit_atomic_operation(handle,buffer,count,destination,offset,key,datatype,operation,nullptr,FI_INJECT,true);
 }
 ssize_t write_atomic_vector(fid_ep* endpoint,const fi_ioc* buffers,void**,size_t count,fi_addr_t destination,
                              uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
@@ -633,8 +666,8 @@ ssize_t write_atomic_message(fid_ep* endpoint,const fi_msg_atomic* message,uint6
     if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1 ||
         (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
     if (message->msg_iov[0].count!=message->rma_iov[0].count) return -FI_EINVAL;
-    return write_atomic_vector(endpoint,message->msg_iov,message->desc,1,message->addr,message->rma_iov[0].addr,
-        message->rma_iov[0].key,message->datatype,message->op,message->context);
+    return submit_atomic_operation(endpoint,message->msg_iov[0].addr,message->msg_iov[0].count,
+        message->addr,message->rma_iov[0].addr,message->rma_iov[0].key,message->datatype,message->op,message->context,flags);
 }
 int atomic_valid(fid_ep* handle,fi_datatype datatype,fi_op operation,size_t* count) {
     if (!count) return -FI_EINVAL;
@@ -655,6 +688,12 @@ ssize_t send_message(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_
 ssize_t send_message_data(fid_ep* endpoint,const void* buffer,size_t length,void*,uint64_t data,fi_addr_t destination,void* context) {
     return submit_operation(endpoint,buffer,length,destination,0,0,context,false,data);
 }
+ssize_t inject_message(fid_ep* endpoint,const void* buffer,size_t length,fi_addr_t destination) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,nullptr,false,{},FI_INJECT,true);
+}
+ssize_t inject_message_data(fid_ep* endpoint,const void* buffer,size_t length,uint64_t data,fi_addr_t destination) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,nullptr,false,data,FI_INJECT,true);
+}
 ssize_t send_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,void* context) {
     if (count!=1 || !buffers) return -FI_EINVAL;
     return send_message(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,context);
@@ -664,7 +703,7 @@ ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags
     if (!message || !message->msg_iov || message->iov_count!=1 || (flags&~(allowed|FI_REMOTE_CQ_DATA))) return -FI_EOPNOTSUPP;
     const auto& local=message->msg_iov[0];
     return submit_operation(endpoint,local.iov_base,local.iov_len,message->addr,0,0,message->context,false,
-        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt);
+        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt,flags);
 }
 ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
     return guarded([&]() -> ssize_t {
@@ -706,13 +745,20 @@ ssize_t write_data(fid_ep* endpoint,const void* buffer,size_t length,void*,uint6
                     fi_addr_t destination,uint64_t offset,uint64_t key,void* context) {
     return submit_operation(endpoint,buffer,length,destination,offset,key,context,true,immediate);
 }
+ssize_t inject_write(fid_ep* endpoint,const void* buffer,size_t length,fi_addr_t destination,uint64_t offset,uint64_t key) {
+    return submit_operation(endpoint,buffer,length,destination,offset,key,nullptr,true,{},FI_INJECT,true);
+}
+ssize_t inject_write_data(fid_ep* endpoint,const void* buffer,size_t length,uint64_t data,
+                          fi_addr_t destination,uint64_t offset,uint64_t key) {
+    return submit_operation(endpoint,buffer,length,destination,offset,key,nullptr,true,data,FI_INJECT,true);
+}
 ssize_t write_message_flags(fid_ep* endpoint,const fi_msg_rma* message,uint64_t flags) {
     if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1 ||
         (flags&~(supported_operation_flags|FI_REMOTE_CQ_DATA))) return -FI_EOPNOTSUPP;
     const auto& local=message->msg_iov[0]; const auto& remote=message->rma_iov[0];
     if (local.iov_len!=remote.len) return -FI_EINVAL;
     return submit_operation(endpoint,local.iov_base,local.iov_len,message->addr,remote.addr,remote.key,message->context,true,
-        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt);
+        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt,flags);
 }
 
 int register_memory_vector(fid* handle,const iovec* buffers,size_t count,uint64_t access,uint64_t offset,
@@ -747,6 +793,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
             // passes all current modes). Return our required PROV_KEY subset,
             // rather than rejecting additional modes the application supports.
             if (hints->tx_attr && (hints->tx_attr->op_flags&~(datagram?datagram_operation_flags:supported_operation_flags))) return -FI_ENODATA;
+            if (hints->tx_attr && hints->tx_attr->inject_size>maximum_inject_bytes) return -FI_ENODATA;
             if (hints->tx_attr && ((datagram && (hints->tx_attr->op_flags&FI_DELIVERY_COMPLETE)) ||
                 (hints->tx_attr->msg_order&~(datagram?uint64_t{0}:supported_ordering_modes)))) return -FI_ENODATA;
             if (hints->rx_attr && (hints->rx_attr->msg_order&~(datagram?uint64_t{0}:supported_ordering_modes))) return -FI_ENODATA;
@@ -763,6 +810,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.ep_attr->max_order_waw_size=datagram?0:UINT32_MAX;
         info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
+        info.tx_attr->inject_size=maximum_inject_bytes;
         info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;
         if (hints && hints->tx_attr) info.tx_attr->op_flags|=hints->tx_attr->op_flags;
         info.tx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->tx_attr?hints->tx_attr->msg_order:uint64_t{FI_ORDER_SAS});
@@ -840,15 +888,15 @@ void initialize_operations() {
     message_ops.sendmsg=send_message_flags; message_ops.recv=receive_message; message_ops.recvv=receive_vector;
     message_ops.recvmsg=receive_message_flags;
     message_ops.senddata=send_message_data;
-    UNSUPPORTED(message_ops,inject); UNSUPPORTED(message_ops,injectdata);
+    message_ops.inject=inject_message; message_ops.injectdata=inject_message_data;
     rma_ops.size=sizeof(rma_ops); rma_ops.write=write_memory; rma_ops.writev=write_vector;
     rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
     UNSUPPORTED(rma_ops,read); UNSUPPORTED(rma_ops,readv); UNSUPPORTED(rma_ops,readmsg);
-    UNSUPPORTED(rma_ops,inject); UNSUPPORTED(rma_ops,injectdata);
+    rma_ops.inject=inject_write; rma_ops.injectdata=inject_write_data;
     atomic_ops.size=sizeof(atomic_ops); atomic_ops.write=write_atomic; atomic_ops.writev=write_atomic_vector;
     atomic_ops.writemsg=write_atomic_message; atomic_ops.writevalid=atomic_valid;
     atomic_ops.readwritevalid=fetching_atomic_unavailable; atomic_ops.compwritevalid=fetching_atomic_unavailable;
-    UNSUPPORTED(atomic_ops,inject); UNSUPPORTED(atomic_ops,readwrite); UNSUPPORTED(atomic_ops,readwritev);
+    atomic_ops.inject=inject_atomic; UNSUPPORTED(atomic_ops,readwrite); UNSUPPORTED(atomic_ops,readwritev);
     UNSUPPORTED(atomic_ops,readwritemsg); UNSUPPORTED(atomic_ops,compwrite); UNSUPPORTED(atomic_ops,compwritev);
     UNSUPPORTED(atomic_ops,compwritemsg);
 }

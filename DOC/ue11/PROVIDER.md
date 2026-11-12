@@ -10,8 +10,8 @@
 ```sh
 cmake -S . -B build/provider -DSOFTUE_ENABLE_LIBFABRIC=ON \
   -DSOFTUE_PROVIDER_LIBFABRIC_ROOT=/path/to/libfabric-2.0-prefix
-cmake --build build/provider --target softue_fabric libfabric_provider_peer libfabric_datagram_peer -j2
-ctest --test-dir build/provider -R 'libfabric_.*processes' --output-on-failure
+cmake --build build/provider --target libfabric_mode_selection_test libfabric_inject_test libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer -j2
+ctest --test-dir build/provider -R 'libfabric_' --output-on-failure
 FI_PROVIDER_PATH="$PWD/build/provider" FI_PROVIDER=softue fi_info -p softue
 ```
 
@@ -39,9 +39,11 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 访问权限 | 仅 `FI_WRITE` 不授予远端写；`FI_REMOTE_WRITE` 才授予相应 MR 权限；撤销使 key 立即失效 |
 | 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
 | 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
+| 注入 | SEND/WRITE/非取回 ATOMIC inject API 和逐调用 `FI_INJECT`；`inject_size=256` 字节；成功抑制与异步错误按 API 规则分别处理 |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
 
 `mr_key_size=6` 表示标准 RKEY 的 48 位范围；`fi_mr_key()` 仍返回完整 64 位 key。
+注入的缓冲区所有权、默认 flags、大小上限和语义重试见 [注入路径](PROVIDER-INJECTION.md)。
 `FI_MR_PROV_KEY` 模式下会保留请求的 IDEMPOTENT_SAFE 标志，OPTIMIZED 回退为零。
 
 `fi_mr_reg`、`fi_mr_regv` 和 `auth_key_size=0` 的 `fi_mr_regattr` 按 §2.2.4.3.3
