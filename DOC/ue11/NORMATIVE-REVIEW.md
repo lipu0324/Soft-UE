@@ -118,6 +118,63 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0121-002 | §2.2.6，DGRAM 模式 | FI_EP_DGRAM 使用 UUD。 | 已有公开 DGRAM 进程与 wire 路径；不能推断为远端可靠交付。 |
 | UE11-p0121-003 | §2.2.6，RDM 模式跨页续文 | RDM 使用 RUD/ROD，HPC 可使用 RUDI；AI Base/Full 依操作和排序按表 2-29/30 选择，HPC 按表 2-31。 | 当前 provider 默认可靠操作统一使用 ROD；SEND 排序与 R/W 排序须分开接入并按四种组合测试。RUDI 未实现。后续 p0122 候选包含同一段义务的细化。 |
 
-复核进度为上述 80 个候选的分类与义务拆分；其余 649 个候选、表格/算法的额外
+## 第 81～100 个候选
+
+本批同时检查表格和跨页上下文。§2.2.10.4 对 small/medium 头的文字与表题
+存在不一致，后续编码依据 §3.4 的正式线格式；不能直接复制 API 映射表题作为类型值。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0121-004 | §2.2.6，前段 RDM 选择的细化 | AI Base/Full 只使用 RUD/ROD，按操作和配置的排序选择。 | 与 p0121-003、后续两张表共享实现差距，不重复算已实现功能。 |
+| UE11-p0122-001 | 表 2-29，AI Base 四种组合 | SEND 排序只控制 SEND 的 ROD/RUD；R/W 排序只控制 RMA/ATOMIC 的 ROD/RUD，两者独立。 | provider 统一 ROD 尚不满足；需要四行、两类操作及实际线格式验证。 |
+| UE11-p0122-002 | 表 2-30，AI Full 四种组合 | SEND/TAGGED 与 RMA/ATOMIC 分别遵循各自排序；有 SEND 排序的 deferrable tagged 初始/eager 数据用 ROD，后续数据用 RUD。 | 基础模式选择与 M5 延迟恢复均缺失；不能只修改一个 Operation 字段就通过整表。 |
+| UE11-p0122-003 | 表 2-31，HPC 组合与策略 | SEND/TAGGED、rendezvous 初始/后续、RMA、ATOMIC 分别选择表列模式；无 R/W 排序的 RMA 可依策略用 RUD 或 RUDI。 | RUDI 为可选分支而非所有 RMA 强制；当前未实现 HPC/rendezvous/RUDI，未作能力声明。 |
+| UE11-p0124-001 | §2.2.8.1，排序端点条件项 | 配置消息排序的 endpoint 操作约束到一个发送队列。 | provider 当前串行应用队列符合这一局部分支；多队列及流量类别映射是 SHOULD，PDC 内 packet window 不等于多个应用发送队列。 |
+| UE11-p0126-001 | §2.2.9，选定 TSS 后的条件项 | provider 支持表 2-33 的完整安全绑定参数，并由特权地址分配流程取得。 | M6/M7 管理与 TSS 缺失；真实 kernel driver 后续系统集成。 |
+| UE11-p0126-002 | 表 2-33，字段与保留位 | 支持 AES-GCM-256、三种模式、AN/automatic rekey 选择、shift/mask、四种封装及 offset/AN/SDI/SSI；rekey 保留位必须为零。 | 需逐字段、范围、组合和无效保留值建项，当前未实现。AES 库调用本身不代替安全绑定。 |
+| UE11-p0126-003 | 表 2-34，rekey 条件项 | 支持 AN/SDI/SSI、16 位 epoch、96 位 IVMASK、raw/wrapped key 类型、长度及 key 参数。 | M6 缺失。后页 C 示例把 IVMASK octet 常数写为 96，与表中 96 bit 不一致，需以正式 TSS 结构/算法交叉复核。 |
+| UE11-p0127-001 | §2.2.9，三方管理流程 | driver 发请求；特权进程返回参数；driver 接受主动推送及请求响应并编程安全状态。 | 本轮需 M6/M7 行为模型；真实驱动不在 M0–M8 范围。请求/响应权限与主动推送分别验收。 |
+| UE11-p0127-002 | 表 2-35，请求字段 | rekey 请求带 AN、31 位 SDI、32 位 SSI。 | 当前缺失；必须校验安全域与源归属，不能仅把任意 key 写入对象。 |
+| UE11-p0131-001 | §2.2.10.4，optimized 原子条件项 | 原子操作使用与 RMA 相同的 optimized 头前提；使用该头的建议另列 SHOULD。 | optimized 未实现。该段将 SMALL 表示 optimized non-matching；与后续 small-message 表题须按正式 SES 格式区分。 |
+| UE11-p0132-001 | §2.2.10.4，small RMA 原子条件项 | 原子也采用 small RMA 的适用前提。 | small RMA 未实现；与 optimized 条件分开，不把两类紧凑头合并。 |
+| UE11-p0132-002 | 表 2-43，small RMA 映射 | hd 必须为零，其余 opcode/dc/rel/index/generation/Job/PID/长度/offset/initiator/key 按各自来源映射。 | 未实现；无 CQ data 是必要前提，不能静默丢弃调用者提供的 CQ data 来选择该头。 |
+| UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | M5 缺失；需要跨 endpoint/并发/取消/复用的唯一性与迟到 RTR 回归。 |
+| UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | M5 缺失；源 MR 撤销、偏移边界及全消息 READ 必须共同验证。 |
+| UE11-p0133-002 | §2.2.10.4，原子映射 | libfabric datatype/op 映射至 SES 对应 mnemonic。 | 当前支持的 8 种整数类型、12 种非取回操作已有 native/wire/provider 回归；不据此声明浮点、fetching 或 CAS。 |
+| UE11-p0133-003 | §2.2.10.4，CAS 扩展 | compare/swap 来自 API，每个值尺寸不超过 16 字节，并带正确 opcode/datatype。 | CAS 未实现；后续还需类型允许集、单单位和目标对齐/权限检查。 |
+| UE11-p0134-001 | §2.2.11，Linux 控制接口部署项 | Linux UET Control API 使用 UET family 的 Netlink 消息及规定 typed attributes。 | 真实 kernel 接口留后续系统集成；M7 软件管理模型仍需保留相应消息/权限语义，不宣称提供实际 UET Netlink family。 |
+| UE11-p0145-001 | §2.3.4.1，verbs 条件项 | UET verbs 设备支持至少一种 UET GID 类型，应用通过 GID 选择 UET。 | UE verbs 按 ROADMAP 在 M8 后独立增强；当前不声明 verbs 设备或 GID 支持。 |
+| UE11-p0147-001 | §2.3.5.1.3，verbs 创建授权 | 拒绝 PIDonFEP/resource index 已占用或调用进程未获授权的 QP 创建。 | verbs/kernel 路径未实现；M7 管理资源分配模型可共享授权规则，但不代替真实 QP API 验收。 |
+
+## 第 101～120 个候选
+
+本批涉及 roadmap 明确放在 M8 后的 UE verbs 与 INC。这里记录其条件义务，
+不把未选定扩展算成当前 Profile 的已通过功能。INC 表格中九个整数必选操作是
+MIN/MAX/SUM/LOR/LAND/BOR/BAND/LXOR/BXOR，不能把其他 vendor 支持的操作也当成必选。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0150-001 | §2.3.6.1，verbs Job 对象 | Job 关联 JobID、port、源 GID；JobID 映射到 SES，GID 决定协议/源网络地址。 | verbs 独立增强未实现；native JobID 检查不代替这些 API 对象。 |
+| UE11-p0153-001 | §2.3.11.5，verbs key 格式 | 返回标准格式 64 位 RKey；返回 64 位 RKey 时也返回 64 位 LKey；legacy 32 位 key 可另提供。 | 标题提取误归入前一节。native/provider 64 位 MR key 不能证明 verbs LKey/QP 功能；扩展未选定。 |
+| UE11-p0154-001 | §2.4.1，INC 拓扑/传输条件 | 单一逻辑 SEP 行为；FEP 直接连接 SEP 端口，使用 PFC/CBFC 无损网络上的 ROD。 | INC 未选定；普通多跳 fabric/NSCC 不能代替该拓扑与无损保证。 |
+| UE11-p0155-001 | §2.4.1，INC 元素与编码 | 元素不跨包、同 communicator 使用相同 Job；payload 小端且不额外 padding。 | INC 未实现；复合 MINLOC/MAXLOC 的内部 padding 按脚注单独处理，不能把“一律无 padding”误用于复合值。 |
+| UE11-p0156-001 | §2.4.2，INC 在途上限 | 每 rank 未完成 collective 不超过 SEP 能力，也不超过 4096 个 CSN。 | 未实现；需容量、12 位回绕及迟到响应测试。 |
+| UE11-p0156-002 | 表 2-49，INC 操作集 | REDUCE/ALLREDUCE/BARRIER 必选；BCAST 与 SYNCBCAST 至少一个；EXSCAN 可选。 | 未实现；不能以支持任意一种规约宣称整套 collective。 |
+| UE11-p0158-001 | 表 2-51，INC INT32 | 支持本表九个整数必选操作。 | 未实现；与 SES 单目标 integer atomic 的已实现操作不属于同一验收项。 |
+| UE11-p0158-002 | 表 2-51，INC UINT32 | 支持本表九个整数必选操作。 | 同上；有符号/无符号 MIN/MAX 需分别验证。 |
+| UE11-p0158-003 | 表 2-51，INC BF16 | 必选 MIN/MAX/SUM。 | 未实现；浮点舍入规则另由 §2.4.7 约束。 |
+| UE11-p0158-004 | 表 2-51，INC FP16 | 必选 MIN/MAX/SUM。 | 未实现；不能用 BF16 或整数结果代替 FP16。 |
+| UE11-p0158-005 | §2.4.6，INC 顺序选择 | IM 配置下至少支持无序、同 communicator 一致、跨 communicator 一致、跨 Job 一致、自然 rank 顺序之一。 | 未选定 INC；未来必须公布实际支持模式并拒绝未支持配置，不要求同时实现全部五种。 |
+| UE11-p0158-006 | §2.4.7，INC 浮点舍入 | round-to-nearest ties-to-even 必选；其他列出的模式可选。 | 未实现；内部 accumulator 长度的建议不能冒充额外强制位宽。 |
+| UE11-p0161-001 | §2.4.9，INC comm_key | 使用 packed 结构大小，version=1，16 字节 unique_id 为选定 communicator ID。 | 未实现；与线头 inc_info.ver=0 是不同字段，不能混用版本常数。 |
+| UE11-p0161-002 | §2.4.10，INC switch 能力 | 标准请求/响应、DS/RTR、reserved ROD PDC、ROD_REQ/ACK/NACK/Close CP、CRC。 | 未实现；TFC/TSS 在本节属于可选，但一旦选定仍需遵循各自协议。 |
+| UE11-p0163-001 | §2.4.11.1，INC 版本错误 | 未知 inc_info.ver 时忽略其余 inc_info、拒绝消息并返回 RC_UNSUPPORTED_OP。 | 提取的章节候选 0 是错误标题，人工归回本节；INC 未实现。 |
+| UE11-p0163-002 | §2.4.11.2，INC reserved PDC | 支持 INC 的 Profile 支持 reserved PDC。 | 未选定 INC；当前动态 PDC ID 池不等于已实现 reserved PDC 生命周期。 |
+| UE11-p0167-001 | §2.4.15.1，RPC 注释中的义务 | communicator 创建在资源/能力不足时失败；Join 幂等，所有 rank 加入后建立；Leave 不可逆并销毁 communicator。 | 即使关键词位于代码注释也不能丢弃。INC 管理扩展未实现。 |
+| UE11-p0170-001 | §2.4.15.1，Join 字段约束 | 16 字节 UID 在 Job 生命周期不复用、各 rank 一致；required capabilities 缺失时失败；scale_factor 非零。 | 未实现；desired capabilities 是提示而非强制满足项。必须分别校验字段与跨 rank 一致性。 |
+| UE11-p0176-001 | §2.4.17.3，管理状态转换 | 所有数据结构初始化后才能将 admin-status 置 UP。 | INC 管理模型未实现；配置事务失败不得留下可发送的半初始化 communicator。 |
+| UE11-p0176-002 | §2.4.17.3，运行失败状态 | admin UP 后，无法/拒绝遵循初始化状态的 switch 把 oper-status 置 FAILED。 | 未实现；admin 与 oper 是独立状态，不得只用一个布尔开关替代。 |
+
+复核进度为上述 120 个候选的分类与义务拆分；其余 609 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
