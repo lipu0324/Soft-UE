@@ -30,12 +30,12 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 |---|---|
 | Endpoint | `FI_EP_RDM` 或 `FI_EP_DGRAM`；每个 domain 一个 endpoint；域间状态独立 |
 | 线程和 progress | `FI_THREAD_DOMAIN`、手动 progress；应用串行调用域内 API；`fi_cq_read/readerr` 推进 socket 和协议定时器 |
-| 消息 | `fi_send/recv`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；ROD 允许后投递接收缓冲区 |
+| 消息 | `fi_send/recv/senddata`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；SENDMSG 支持逐调用 `FI_REMOTE_CQ_DATA`；ROD 允许后投递接收缓冲区 |
 | 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
 | RMA | `fi_write/writev/writemsg/writedata`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
 | 原子 | 非取回 `fi_atomic/atomicv/atomicmsg`；8/16/32/64 位有符号/无符号整数；逐元素原子性和标准能力查询 |
-| DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；仅本地发送完成，无 PDC/确认/重传 |
-| 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data |
+| DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；支持 SEND CQ data；仅本地发送完成，无 PDC/确认/重传 |
+| 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
 | 访问权限 | 仅 `FI_WRITE` 不授予远端写；`FI_REMOTE_WRITE` 才授予相应 MR 权限；撤销使 key 立即失效 |
 | 地址和 key | `FI_AV_TABLE`、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
@@ -95,3 +95,5 @@ generation 返回值、旧尝试的退休约束和 PDC 失败时的部分接收�
 
 `Runtime::Trace` 在 provider 中显式关闭，避免长期应用累积实验轨迹。独立仿真仍保留
 有上限的结构化 trace；文本协议诊断可通过 `Services::diagnostic_output` 接入流。
+
+SEND/WRITE 的 CQ data 路由、零值数据和 deferrable 兼容接收见 [SEND-HEADER-DATA](SEND-HEADER-DATA.md)。

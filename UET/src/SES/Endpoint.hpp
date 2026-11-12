@@ -25,7 +25,7 @@ struct Operation {
     std::vector<uint8_t> payload;
     IntegerAtomicOperation atomic_operation = IntegerAtomicOperation::Sum;
     IntegerAtomicDatatype atomic_datatype = IntegerAtomicDatatype::Uint64;
-    std::optional<uint64_t> immediate_data; // Write-with-immediate remote CQ data.
+    std::optional<uint64_t> immediate_data; // Remote CQ data: WRITE, SEND or DATAGRAM_SEND.
     bool relative_addressing=true;
     uint8_t target_generation=0;
     std::shared_ptr<const PayloadSource> payload_source; // Optional lazy bytes; cannot accompany a nonempty payload vector.
@@ -46,6 +46,7 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=false, atomic=true, libfabric=false, write_immediate=true;
+    bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
         IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
         IntegerAtomicDatatype::Uint32,IntegerAtomicDatatype::Int64,IntegerAtomicDatatype::Uint64};
@@ -122,7 +123,7 @@ public:
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-            (operation.immediate_data && operation.type!=OperationType::Write) ||
+            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && !is_datagram) ||
             (operation.type==OperationType::Noop && payload_length)) {
             complete_local(CompletionStatus::InvalidRequest); return id;
         }
@@ -500,7 +501,10 @@ private:
         // A fully processed intermediate packet can return DEFAULT immediately
         // (§3.5.13). If EOM arrives before a RUD hole is filled, keep its result
         // as NO_RESPONSE (Table 3-24, RC_NULL); it cannot finish the message.
-        const bool incomplete_end=!semantic && request.pkt.bth_header.Standard_Header.eom;
+        // Deferrable-as-SEND instead signals acceptance with OK/full length
+        // (§3.4.4.6.1); the source still needs results for every data packet.
+        const bool incomplete_end=!semantic && request.pkt.bth_header.Standard_Header.eom &&
+            request.pkt.bth_header.Standard_Header.opcode!=0x08;
         semantic_header.opcode=semantic?1:(incomplete_end?3:0);
         semantic_header.version=0; semantic_header.return_code=incomplete_end?0:code;
         semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
@@ -574,7 +578,7 @@ private:
                 }
                 if (message.received==message.total) {
                     message.completed=true; message.completion_reported=true;
-                    completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
+                    completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                     if (message.deferred_response) {
                         message.completion_psn=message.deferred_response->orig_psn;
                         reply(*message.deferred_response,SemanticReturnCode::Ok,message.total);
@@ -591,11 +595,14 @@ private:
     // rejected message or receive any of its remaining bytes.
     void report_receive_error(Incoming& message) {
         if (!message.first_error || message.completion_reported) return;
-        const bool immediate_completion=message.has_immediate && message.immediate_data.has_value();
-        if (!message.matched_receive && !immediate_completion) return;
+        // SEND still needs a matched receive to identify its completion. Its
+        // header data must not create a separate unsolicited RMA notification.
+        const bool has_header_data=message.has_immediate && message.immediate_data.has_value();
+        const bool unsolicited_completion=message.opcode!=static_cast<uint8_t>(OperationType::Send) && has_header_data;
+        if (!message.matched_receive && !unsolicited_completion) return;
         Completion completion{0,message.context,message.target_error,static_cast<uint32_t>(message.received),
             static_cast<uint8_t>(*message.first_error),true,
-            immediate_completion?message.immediate_data:std::optional<uint64_t>{},message.error_generation};
+            has_header_data?message.immediate_data:std::optional<uint64_t>{},message.error_generation};
         completion.original_length=message.total;
         completions_.push_back(completion); message.completion_reported=true;
     }
@@ -620,7 +627,16 @@ private:
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
-        const auto& header=request.pkt.bth_header.Standard_Header;
+        auto interpreted_header=request.pkt.bth_header.Standard_Header;
+        // §3.3.5 / §3.4.4.6.1: AI Base accepts DEFERRABLE_SEND (0x08) as SEND.
+        // Interpret a copy: restart tokens remain intact in the captured wire
+        // request, but cannot become an RMA address or a posted-buffer offset.
+        const bool deferrable_as_send=interpreted_header.opcode==0x08;
+        if (deferrable_as_send) {
+            interpreted_header.opcode=static_cast<uint8_t>(OperationType::Send);
+            if (interpreted_header.som) trace_.record(node_,"deferrable_as_send",interpreted_header.msg_id);
+        }
+        const auto& header=interpreted_header;
         const MessageKey key{request.source_fep,request.PDCID,header.job_id,header.initiator,
             header.msg_id,request.connection_start_psn};
         const ConnectionKey connection{request.source_fep,request.PDCID,request.connection_start_psn};
@@ -637,6 +653,8 @@ private:
             found=incoming_.emplace(key,std::move(incoming)).first;
         }
         auto& message=found->second;
+        if (header.som && message.opcode==0x0f && header.opcode!=0x0f)
+            message.opcode=header.opcode; // Late SOM identifies an earlier MSG_ERROR's resource space.
         if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
         if (header.som && header.hd) message.immediate_data=header.diff.som_true.header_data;
         if (message.first_error) {
@@ -664,7 +682,7 @@ private:
                     original_opcode==5?ResourceSpace::Send:ResourceSpace::Rma,header.ri_generation);
             }
         } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
-        if (header.version || (header.hd && header.opcode!=1 && !message_error) ||
+        if (header.version || (header.hd && header.opcode!=1 && header.opcode!=5 && !message_error) ||
             (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && !message_error) ||
             (message_error && !header.eom)) {
             reject(SemanticReturnCode::UnsupportedOperation); return;
@@ -706,7 +724,10 @@ private:
                     });
                     if (posted==posted_.end()) {
                         if (poisoned) { reject(SemanticReturnCode::InitiatorError); return; }
-                        if (request.delivery_mode==RUD) { reject(SemanticReturnCode::NoMatch); return; }
+                        // §3.4.4.6.1: a non-deferring target must tell a
+                        // deferrable source NO_MATCH/0 or OK/full length. It
+                        // cannot silently choose ordinary ROD buffering here.
+                        if (request.delivery_mode==RUD || deferrable_as_send) { reject(SemanticReturnCode::NoMatch); return; }
                         if (header.request_length>unexpected_limit_-unexpected_bytes_) {
                             const auto generation=resources_.disable_for_exhaustion(selected.absolute_pid,
                                 selected.resource_index,ResourceSpace::Send);
@@ -787,7 +808,7 @@ private:
             }
             if (message.received==message.total) {
                 message.completed=true; message.completion_reported=true; message.completion_psn=request.orig_psn;
-                if (header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true});
+                if (header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 trace_.record(node_,"memory_delivered",message.total);
@@ -801,7 +822,7 @@ private:
         // §3.4.2.13–14: one packet, DATAGRAM_SEND only, message ID zero.
         // No responses or deduplication are provided for unreliable delivery.
         if (header.opcode!=7 || header.version || header.msg_id || header.dc ||
-            !header.som || !header.eom || header.hd || header.ie ||
+            !header.som || !header.eom || header.ie ||
             header.request_length!=request.pkt.payload.size() || (header.rel && !memory_.has_job(header.job_id))) return;
         ResourceSelection selected{};
         try {
@@ -816,7 +837,8 @@ private:
         try {
             memory_.write_registration(posted->registration,header.job_id,posted->pid,posted->offset,request.pkt.payload,selected.resource_index);
             completions_.push_back({0,posted->context,CompletionStatus::Success,
-                static_cast<uint32_t>(request.pkt.payload.size()),0,true});
+                static_cast<uint32_t>(request.pkt.payload.size()),0,true,
+                header.hd?std::optional<uint64_t>{header.diff.som_true.header_data}:std::nullopt});
             posted_.erase(posted);
         } catch (const MemoryAccessError&) {
             // Unreliable receive errors are local drops, never ACK/NACKs.

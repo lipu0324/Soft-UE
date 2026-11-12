@@ -18,7 +18,7 @@ int main(int argc,char** argv) {
     CHECK(argc==2); const int server=!strcmp(argv[1],"server");
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
     CHECK(hints); hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_DGRAM;
-    hints->caps=FI_MSG; hints->addr_format=FI_SOCKADDR_IN;
+    hints->caps=FI_MSG|FI_REMOTE_CQ_DATA; hints->addr_format=FI_SOCKADDR_IN;
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && info->ep_attr->type==FI_EP_DGRAM && info->ep_attr->max_msg_size==1024);
     CHECK(!(info->caps&(FI_RMA|FI_ATOMIC)) && info->tx_attr->msg_order==FI_ORDER_NONE);
@@ -44,7 +44,7 @@ int main(int argc,char** argv) {
     remote.sin_port=htons((uint16_t)peer_port); fi_addr_t peer;
     CHECK(fi_av_insert(addresses,&remote,1,&peer,0,NULL)==1);
     CHECK(fi_send(endpoint,send_buffer,1025,NULL,peer,NULL)==-FI_EMSGSIZE);
-    if (!server) SUCCESS(fi_send(endpoint,send_buffer,1024,NULL,peer,(void*)2));
+    if (!server) SUCCESS(fi_senddata(endpoint,send_buffer,1024,NULL,server?0:0x1234,peer,(void*)2));
     int sent=0,received=0,reply_started=0;
     const time_t deadline=time(NULL)+8;
     while ((!sent || !received) && time(NULL)<deadline) {
@@ -54,11 +54,12 @@ int main(int argc,char** argv) {
             CHECK(entry->len==1024);
             if (entry->flags&FI_RECV) {
                 CHECK(entry->op_context==(void*)1 && !received);
+                CHECK((entry->flags&FI_REMOTE_CQ_DATA) && entry->data==(server?0x1234:0));
                 CHECK(!memcmp(receive_buffer,send_buffer,1024)); received=1;
             } else { CHECK((entry->flags&FI_SEND) && entry->op_context==(void*)2 && !sent); sent=1; }
         } else CHECK(count==-FI_EAGAIN);
         if (server && received && !reply_started) {
-            SUCCESS(fi_send(endpoint,send_buffer,1024,NULL,peer,(void*)2)); reply_started=1;
+            SUCCESS(fi_senddata(endpoint,send_buffer,1024,NULL,server?0:0x1234,peer,(void*)2)); reply_started=1;
         }
         if (!sent || !received) poll(NULL,0,1);
     }

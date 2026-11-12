@@ -17,7 +17,7 @@
 
 namespace {
 using namespace UET;
-constexpr uint64_t datagram_caps=FI_MSG|FI_SEND|FI_RECV;
+constexpr uint64_t datagram_caps=FI_MSG|FI_SEND|FI_RECV|FI_REMOTE_CQ_DATA;
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__
 constexpr bool native_atomic_platform=true;
 #else
@@ -257,7 +257,10 @@ void progress(ProviderDomain& domain) {
     endpoint->runtime.progress();
     SES::Completion completion{};
     while (endpoint->semantic->poll_completion(completion)) {
-        if (completion.receive && completion.immediate_data) {
+        // Native receive tokens start at one. Context zero is reserved for
+        // unsolicited WRITE-with-data notifications, which consume no RQ entry.
+        // SEND data belongs to its posted receive and must retire that posting.
+        if (completion.receive && completion.immediate_data && completion.context==0) {
             if (endpoint->receive_cq)
                 queue_completion(*endpoint->receive_cq,{nullptr,FI_RMA|FI_REMOTE_WRITE,nullptr},completion);
         } else {
@@ -621,14 +624,19 @@ int fetching_atomic_unavailable(fid_ep*,fi_datatype,fi_op,size_t* count) {
 ssize_t send_message(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,void* context) {
     return submit_operation(endpoint,buffer,length,destination,0,0,context,false);
 }
+ssize_t send_message_data(fid_ep* endpoint,const void* buffer,size_t length,void*,uint64_t data,fi_addr_t destination,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,context,false,data);
+}
 ssize_t send_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,void* context) {
     if (count!=1 || !buffers) return -FI_EINVAL;
     return send_message(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,context);
 }
 ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
     const auto allowed=owner<ProviderEndpoint>(endpoint).datagram?datagram_operation_flags:supported_operation_flags;
-    if (!message || (flags&~allowed)) return -FI_EOPNOTSUPP;
-    return send_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
+    if (!message || !message->msg_iov || message->iov_count!=1 || (flags&~(allowed|FI_REMOTE_CQ_DATA))) return -FI_EOPNOTSUPP;
+    const auto& local=message->msg_iov[0];
+    return submit_operation(endpoint,local.iov_base,local.iov_len,message->addr,0,0,message->context,false,
+        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt);
 }
 ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
     return guarded([&]() -> ssize_t {
@@ -637,6 +645,7 @@ ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_
         if (source!=FI_ADDR_UNSPEC) return -FI_EOPNOTSUPP;
         if ((length && !buffer) || length>UINT32_MAX) return -FI_EINVAL;
         if (endpoint.receives.size()>=4096) return -FI_EAGAIN;
+        if (endpoint.next_receive_token==UINT64_MAX) return -FI_ENOSPC; // Keep native context zero reserved for RMA CQ data.
         progress(*endpoint.domain);
         const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
             static_cast<uint8_t>(SES::Access::Write));
@@ -794,7 +803,8 @@ void initialize_operations() {
     message_ops.size=sizeof(message_ops); message_ops.send=send_message; message_ops.sendv=send_vector;
     message_ops.sendmsg=send_message_flags; message_ops.recv=receive_message; message_ops.recvv=receive_vector;
     message_ops.recvmsg=receive_message_flags;
-    UNSUPPORTED(message_ops,inject); UNSUPPORTED(message_ops,senddata); UNSUPPORTED(message_ops,injectdata);
+    message_ops.senddata=send_message_data;
+    UNSUPPORTED(message_ops,inject); UNSUPPORTED(message_ops,injectdata);
     rma_ops.size=sizeof(rma_ops); rma_ops.write=write_memory; rma_ops.writev=write_vector;
     rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
     UNSUPPORTED(rma_ops,read); UNSUPPORTED(rma_ops,readv); UNSUPPORTED(rma_ops,readmsg);

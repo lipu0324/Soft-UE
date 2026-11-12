@@ -271,7 +271,8 @@
       "summary": "预投递缓冲区 SEND 与 NO_OP",
       "status": "partial",
       "tests": [
-        "endpoint_test"
+        "endpoint_test",
+        "send_header_data_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -281,18 +282,21 @@
     },
     {
       "id": "SES-IMM",
-      "reference": "Table 3-1",
-      "summary": "WRITE IMM 与远端完成数据",
+      "reference": "Table 3-1; §3.4.2.9",
+      "summary": "WRITE IMM 及 SEND/DGRAM 的远端完成数据",
       "status": "partial",
       "tests": [
-        "native_atomic_test"
+        "native_atomic_test",
+        "send_header_data_test",
+        "libfabric_provider_processes",
+        "libfabric_datagram_processes"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Fragmented WRITE immediate produces a separate target completion; complete addressing/profile matrix remains open."
+      "evidence_note": "WRITE data creates a standalone RMA completion; SEND/DGRAM data retains the matching receive context and consumes one posting. Zero/max data, late posting and IE tested; complete profile/address/error combinations remain open."
     },
     {
       "id": "SES-ATOMIC",
@@ -339,7 +343,7 @@
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "A dynamically loaded libfabric 2.0 provider exercises FI_MSG, WRITE/WRITE IMM, bulk non-fetching integer atomics and UUD/DGRAM through the common kernel. Remaining recovery/error/flag mappings and full-profile acceptance remain open."
+      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open."
     },
     {
       "id": "CMS-NSCC",
@@ -676,6 +680,20 @@
         "HPC"
       ],
       "evidence_note": "Native non-optimized application keys cover full 48-bit range, zero Job/PID/key/index and distinct relative Job/PID/index scopes. Absolute selection ignores Job for lookup and rejects ambiguous equal RKEYs, including differing idempotent metadata. SEND/UUD postings pin live registration identity, preventing cross-Job reselection and stale-key rebinding. Duplicate binding, permission fallback and stale/foreign revocation are rejected. Provider declares six RKEY bytes and preserves 64-bit idempotent metadata with optimized fallback. Optimized headers and provider application-assigned key mode remain open."
+    },
+    {
+      "id": "SES-DEFER-FALLBACK",
+      "reference": "§3.3.5 Table 3-4; §3.4.4.6.1",
+      "summary": "接收端将非匹配 DEFERRABLE_SEND 作为 SEND 处理",
+      "status": "verified",
+      "tests": [
+        "send_header_data_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "HPC"
+      ],
+      "evidence_note": "Narrow receiver compatibility behavior only: opcode 0x08, token/address separation, posting/NoMatch in both ROD and RUD, explicit retry and header data. Full deferral/RTR/restart and tagged deferrable sends remain unimplemented."
     }
   ]
 }

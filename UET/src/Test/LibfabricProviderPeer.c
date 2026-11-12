@@ -24,7 +24,7 @@ int main(int argc,char** argv) {
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
     CHECK(hints!=NULL);
     hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
-    hints->caps=FI_MSG|FI_RMA; hints->addr_format=FI_SOCKADDR_IN;
+    hints->caps=FI_MSG|FI_RMA|FI_REMOTE_CQ_DATA; hints->addr_format=FI_SOCKADDR_IN;
     hints->domain_attr->mr_mode=~3; // fi_info's supported-mode mask, not required modes.
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && !strcmp(info->fabric_attr->prov_name,"softue"));
@@ -97,7 +97,7 @@ int main(int argc,char** argv) {
         for (size_t byte=0;byte<4097;++byte) buffer[16+byte]=(uint8_t)(byte*7);
         SUCCESS(fi_writedata(endpoint,buffer+16,4097,fi_mr_desc(region),123,peer,16,peer_key,(void*)11));
         SUCCESS(fi_atomic(endpoint,increments,512,NULL,peer,0,peer_atomic_key,FI_UINT64,FI_SUM,(void*)17));
-        SUCCESS(fi_send(endpoint,"abc",3,NULL,peer,(void*)12));
+        SUCCESS(fi_senddata(endpoint,"abc",3,NULL,456,peer,(void*)12));
         SUCCESS(fi_send(endpoint,oversized_message,sizeof(oversized_message),NULL,peer,(void*)18));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,0,(void*)13));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
@@ -122,12 +122,13 @@ int main(int argc,char** argv) {
         } else if (count>0) {
             for (ssize_t index=0;index<count;++index) {
                 struct fi_cq_data_entry *entry=&entries[index];
-                if (entry->flags&FI_REMOTE_CQ_DATA) {
+                if ((entry->flags&FI_REMOTE_CQ_DATA) && (entry->flags&FI_REMOTE_WRITE)) {
                     CHECK(server && entry->data==123 && entry->len==4097 && (entry->flags&FI_REMOTE_WRITE));
                     ++remote_writes;
                 } else if (entry->flags&FI_RECV) {
-                    if (server && entry->op_context==(void*)78) done_received=1;
-                    else { CHECK(entry->op_context==(void*)77); ++receives; }
+                    CHECK(entry->flags&FI_REMOTE_CQ_DATA);
+                    if (server && entry->op_context==(void*)78) { CHECK(entry->data==0); done_received=1; }
+                    else { CHECK(entry->op_context==(void*)77 && entry->data==(server?456:789)); ++receives; }
                 } else { CHECK(entry->flags&(FI_SEND|FI_WRITE)); ++send_completions; }
             }
         } else CHECK(count==-FI_EAGAIN);
@@ -135,11 +136,14 @@ int main(int argc,char** argv) {
             CHECK(!memcmp(buffer+5000,"abc",3));
             for (size_t byte=0;byte<4097;++byte) CHECK(buffer[16+byte]==(uint8_t)(byte*7));
             for (size_t element=0;element<512;++element) CHECK(counters[element]==1);
-            SUCCESS(fi_send(endpoint,"reply",5,NULL,peer,(void*)14)); reply_started=1;
+            struct iovec reply_buffer={(void*)"reply",5};
+            struct fi_msg reply_message={0}; reply_message.msg_iov=&reply_buffer; reply_message.iov_count=1;
+            reply_message.addr=peer; reply_message.context=(void*)14; reply_message.data=789;
+            SUCCESS(fi_sendmsg(endpoint,&reply_message,FI_REMOTE_CQ_DATA)); reply_started=1;
         }
         if (!server && send_completions==3 && errors==3 && receives==1 && !done_started) {
             CHECK(!memcmp(buffer,"reply",5));
-            SUCCESS(fi_send(endpoint,"done",4,NULL,peer,(void*)15)); done_started=1;
+            SUCCESS(fi_senddata(endpoint,"done",4,NULL,0,peer,(void*)15)); done_started=1;
         }
         finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==4);
         if (!finished) poll(NULL,0,1); // Application wait; fi_cq_read owns manual progress.
