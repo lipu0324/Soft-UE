@@ -501,6 +501,7 @@ protected:
     }
     void processCongestionAck(const PDStoNET_pkt& packet);
     void releaseCongestionState();
+    void rejectTrimmed(const PDStoNET_pkt& packet);
     void observeCongestionDuplicate(const PDStoNET_pkt& packet) {
         if (error_chk==ACK_ERROR && runtime_ && runtime_->congestion_control)
             runtime_->congestion_control->received(congestionConnection(),packet,true);

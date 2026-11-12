@@ -112,6 +112,8 @@ python3 scripts/test_large_message.py --binary build/release/streaming_payload_t
 完整 4 GiB−1 NSCC 命令需要跨越一次 24 位接收字节计数回绕；夜间工作流分别保存
 NSCC 开启和关闭两种运行的报告。命令和工作流的存在不代替实际运行记录。
 
-仍需完成：合规 trimming、完整 Probe/base RTT 初始化、MPR/SACK 与所有控制路径的
+无 TSS 的真实截短、NACK 与恢复路径见 [trimming](TRIMMING.md)。
+
+仍需完成：trimming 的完整故障组合与安全扩展、完整 Probe/base RTT 初始化、MPR/SACK 与所有控制路径的
 联合验收、控制路径 entropy 完整覆盖、端口/MAC 时间戳细化、incast/竞争流/不对称路径
 验收与场景配置输出。RCCC、TFC、CSIG 和其他 Profile 的相关路径在后续阶段实现。

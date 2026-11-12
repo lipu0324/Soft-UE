@@ -29,6 +29,7 @@
 #define PDSMANAGER_HPP
 
 #include "../../Transport_Layer.hpp"
+#include "../TrimmedPacket.hpp"
 #include "../../logger/Logger.hpp"
 #include "../PDC/process/TPDCProcessManager.hpp"
 #include "../PDC/process/IPDCProcessManager.hpp"
@@ -311,6 +312,27 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
+        if (received_packet.trimmed) {
+            // Trimmed headers are not authenticated by the missing CRC. Resolve
+            // only an already-bound tuple for NACK generation; never allocate
+            // a PDC or learn a new peer ID from this packet (§3.5.15.1).
+            if (received_packet.PDS_type!=RUOD_req_header) { ++event_cnt; return; }
+            const auto& request=received_packet.PDS_header.RUOD_req_header;
+            uint16_t existing=UINT16_MAX;
+            if (request.flags.syn) {
+                const auto found=rx_contexts_.find({received_packet.src_fep,received_packet.dst_fep,request.spdcid});
+                if (found!=rx_contexts_.end()) existing=found->second;
+            } else existing=request.dpdcid;
+            if (existing<MAX_PDC*2 && pdc_list[existing].is_open) {
+                const auto& identity=connection_identities_[existing];
+                if (identity.remote_pdc_known && identity.remote_pdc_id==request.spdcid &&
+                    identity.remote_endpoint==received_packet.src_fep && identity.local_endpoint==received_packet.dst_fep) {
+                    fwdPkt2PDC(&received_packet,existing); return;
+                }
+            }
+            PDStoNet.push(UET::PDS::trimmed_negative_ack(received_packet));
+            return;
+        }
         if (received_packet.PDS_type == UUD_req_header) {
             // §3.5.7.5: datagrams bypass connection allocation, sequence
             // tracking and acknowledgements. SES validates the operation.

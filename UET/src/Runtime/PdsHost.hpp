@@ -32,7 +32,7 @@ public:
                     packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
                 else {
                     auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
-                        network_.crc,network_.native_ip_protocol);
+                        network_.crc,network_.native_ip_protocol,trimming_);
                     if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                         decoded.network.source.ip != address(frame.source).ip ||
                         decoded.network.destination.ip != address(node_).ip)
@@ -47,6 +47,7 @@ public:
                     throw std::invalid_argument("frame and packet addressing disagree");
                 if (!manager_.pushNetworkPacket(packet)) throw std::runtime_error("PDS inbound queue rejected frame");
                 trace_.record(node_, "pds_rx", static_cast<uint64_t>(packet.PDS_type));
+                if (packet.trimmed) trace_.record(node_,"trimmed_rx",packet.trimmed_last_hop?2:1);
                 if (packet.PDS_type==nack_header)
                     trace_.record(node_,"pds_nack",packet.PDS_header.nack_header.nack_code);
                 wake();
@@ -68,6 +69,12 @@ public:
         services_.congestion_control=congestion_.get();
     }
     const CMS::NsccEngine* nscc() const { return congestion_.get(); }
+    void configure_trimming(const NetworkLayer::TrimmingOptions& options) {
+        options.validate();
+        if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
+            throw std::logic_error("configure trimming before opening connections");
+        trimming_=options;
+    }
     void cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id) {
         if (!stopped_) manager_.cancelQueuedMessage(peer,job,message_id);
     }
@@ -145,6 +152,7 @@ private:
     std::function<void(const PDC_SES_rsp&)> response_handler_;
     WireFormat format_;
     NetworkLayer::WireOptions network_;
+    std::optional<NetworkLayer::TrimmingOptions> trimming_;
 
     NetworkLayer::WireAddress address(uint32_t node) const {
         NetworkLayer::WireAddress result;
@@ -182,9 +190,13 @@ private:
                     if (services_.congestion_control) {
                         options.entropy=packet.wire_entropy; options.ecn=packet.network_ecn;
                         frame.entropy=packet.wire_entropy;
-                        if (packet.PDS_type!=RUOD_req_header && packet.PDS_type!=UUD_req_header) {
-                            frame.traffic_class=1; options.dscp=48; // Explicit two-class simulator mapping.
-                        }
+                        if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
+                    }
+                    const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header;
+                    if (trimming_ && data) options.dscp=trimming_->trimmable_dscp;
+                    if ((services_.congestion_control || trimming_) && !data) {
+                        frame.traffic_class=1;
+                        options.dscp=trimming_?trimming_->control_dscp:48;
                     }
                     frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                 }

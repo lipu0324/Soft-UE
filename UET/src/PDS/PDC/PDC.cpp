@@ -28,6 +28,7 @@
 
 
 #include "PDC.hpp"
+#include "../TrimmedPacket.hpp"
 #include <algorithm>
 #include <functional>
 
@@ -163,6 +164,11 @@ void PDC::releaseCongestionState() {
     congestion_engaged_=false;
     congestion_connection_.reset();
     congestion_deferred_retries_.clear();
+}
+
+void PDC::rejectTrimmed(const PDStoNET_pkt& packet) {
+    auto reply=UET::PDS::trimmed_negative_ack(packet,SPDCID,rx_cur_psn+1);
+    if (public_net_queue) public_net_queue->push(reply); else tx_pkt_q.push(std::move(reply));
 }
 
 void PDC::processCongestionAck(const PDStoNET_pkt& packet) {

@@ -315,6 +315,7 @@ uint32_t UetWireCodec::crc32c(const uint8_t* bytes, size_t length) {
     return ~crc;
 }
 std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const WireOptions& network_options) {
+    if (packet.trimmed) throw std::invalid_argument("trimmed packets cannot be reconstituted as complete UET packets");
     if (network_options.dscp>63 || network_options.ecn>3 || !network_options.hop_limit) throw std::invalid_argument("invalid network fields");
     const auto body=encode_pds(packet);
     const size_t ip_size=network_options.ipv6?40:20, transport=network_options.udp?8:4;
@@ -347,7 +348,8 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
     return encoded_bytes;
 }
 
-DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol) {
+DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol,
+                                  std::optional<TrimmingOptions> trimming) {
     if (!bytes || size<34) throw std::invalid_argument("truncated Ethernet/IP frame");
     DecodedPacket result;
     auto& network_options=result.network; network_options.crc=crc_enabled; network_options.native_ip_protocol=native_ip_protocol;
@@ -372,6 +374,40 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
     if (protocol!=17 && protocol!=native_ip_protocol) throw std::invalid_argument("unsupported IP protocol");
     network_options.udp=protocol==17;
     const size_t transport=network_options.udp?8:4, start=ip_begin+ip_size;
+    if (trimming) trimming->validate();
+    const bool trimmed=trimming && trimming->is_trimmed(network_options.dscp);
+    if (trimmed) {
+        // §3.5.15.1: neither the IP nor UDP length is verified for a trimmed
+        // packet. Bounds below use captured bytes, never the untrusted lengths.
+        // Its CRC may have been removed. No semantic header/payload is decoded.
+        if (!network_options.hop_limit || size<start+transport+2)
+            throw std::invalid_argument("truncated trimmed packet");
+        network_options.entropy=get(bytes+start,2);
+        if (network_options.udp && get(bytes+start+2,2)!=49150)
+            throw std::invalid_argument("unsupported trimmed UDP destination");
+        auto& packet=result.packet;
+        packet.trimmed=true;
+        packet.trimmed_last_hop=trimming->last_hop_dscp && network_options.dscp==*trimming->last_hop_dscp;
+        const auto* pds=bytes+start+transport;
+        const auto type=get(pds,2)>>11;
+        if (type==2 || type==3) {
+            if (size<start+transport+12) throw std::invalid_argument("incomplete trimmed PDS request");
+            packet.PDS_type=RUOD_req_header;
+            auto& header=packet.PDS_header.RUOD_req_header;
+            header.type=type==2?RUD_REQ:ROD_REQ; header.next_hdr=UET_HDR_NONE;
+            const auto flags=get(pds,2)&0x7f;
+            header.flags.syn=(flags>>2)&1; header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1;
+            header.clear_psn_off=static_cast<int16_t>(get(pds+2,2)); header.psn=get(pds+4,4); header.spdcid=get(pds+8,2);
+            const auto destination=get(pds+10,2);
+            if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; }
+            else header.dpdcid=destination;
+        } else if (type==7 || type==8 || type==9) packet.PDS_type=RUOD_ack_header;
+        else if (type==11) packet.PDS_type=RUOD_cp_header;
+        else if (type==10 || type==12) packet.PDS_type=nack_header;
+        else if (type==6) packet.PDS_type=UUD_req_header;
+        else throw std::invalid_argument("unsupported trimmed PDS type");
+        return result;
+    }
     if (!network_options.hop_limit || end>size || end<start+transport+2+(crc_enabled?4:0))
         throw std::invalid_argument("invalid IP length or hop limit");
     network_options.entropy=get(bytes+start,2);
@@ -416,5 +452,58 @@ bool UetWireCodec::mark_ecn(std::vector<uint8_t>& frame) {
         frame[15]|=0x30;
     } else throw std::invalid_argument("unsupported ECN EtherType");
     return true;
+}
+
+bool UetWireCodec::trim_packet(std::vector<uint8_t>& frame,const TrimmingOptions& options,bool last_hop) {
+    options.validate();
+    if (frame.size()<34) throw std::invalid_argument("truncated trimming frame");
+    const auto ether=get(frame.data()+12,2);
+    const bool ipv6=ether==0x86dd;
+    if (ether!=0x0800 && !ipv6) throw std::invalid_argument("trimming requires IP");
+    const size_t ip_begin=14,ip_size=ipv6?40:20;
+    if (frame.size()<ip_begin+ip_size) throw std::invalid_argument("truncated trimming IP header");
+    auto* ip=frame.data()+ip_begin;
+    uint8_t traffic;
+    size_t ip_length;
+    if (ipv6) {
+        if ((ip[0]>>4)!=6) throw std::invalid_argument("invalid trimming IPv6 header");
+        traffic=static_cast<uint8_t>(get(ip,2)>>4); ip_length=40+get(ip+4,2);
+    } else {
+        if (ip[0]!=0x45 || ip_checksum(ip)!=0 || (get(ip+6,2)&0xbfff))
+            throw std::invalid_argument("invalid trimming IPv4 header");
+        traffic=ip[1]; ip_length=get(ip+2,2);
+    }
+    if (ip_length<ip_size || ip_length>frame.size()-ip_begin)
+        throw std::invalid_argument("invalid trimming IP length");
+    if ((traffic>>2)!=options.trimmable_dscp) return false;
+    const size_t retained=std::min(options.minimum_ip_payload,ip_length-ip_size);
+    const auto codepoint=last_hop && options.last_hop_dscp?*options.last_hop_dscp:options.trimmed_dscp;
+    traffic=static_cast<uint8_t>((codepoint<<2)|(traffic&3));
+    if (ipv6) {
+        ip[0]=static_cast<uint8_t>((ip[0]&0xf0)|(traffic>>4)); ip[1]=static_cast<uint8_t>((traffic<<4)|(ip[1]&0xf));
+        ip[4]=static_cast<uint8_t>(retained>>8); ip[5]=static_cast<uint8_t>(retained);
+    } else {
+        ip[1]=traffic; const auto total=ip_size+retained;
+        ip[2]=static_cast<uint8_t>(total>>8); ip[3]=static_cast<uint8_t>(total);
+        ip[10]=ip[11]=0; const auto checksum=ip_checksum(ip);
+        ip[10]=static_cast<uint8_t>(checksum>>8); ip[11]=static_cast<uint8_t>(checksum);
+    }
+    // §4.1: UDP length/checksum, entropy and PDS/SES bytes are untouched.
+    // Ethernet FCS is abstracted by IPacketPort and absent from stored frames.
+    // Release the discarded payload allocation as well as its logical length:
+    // many tiny trim notifications must not retain MTU-sized vector buffers.
+    Bytes retained_frame(frame.begin(),frame.begin()+ip_begin+ip_size+retained);
+    frame.swap(retained_frame);
+    return true;
+}
+std::optional<uint8_t> UetWireCodec::packet_dscp(const std::vector<uint8_t>& frame) {
+    if (frame.size()<34) return {};
+    const auto ether=get(frame.data()+12,2);
+    if (ether==0x0800 && frame[14]==0x45 && ip_checksum(frame.data()+14)==0) return frame[15]>>2;
+    if (ether==0x86dd && frame.size()>=54 && (frame[14]>>4)==6) {
+        const auto traffic=static_cast<uint8_t>(get(frame.data()+14,2)>>4);
+        return traffic>>2;
+    }
+    return {};
 }
 } // namespace UET::NetworkLayer

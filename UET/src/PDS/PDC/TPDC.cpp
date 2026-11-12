@@ -421,6 +421,7 @@ void T_PDC::netRxReq(PDStoNET_pkt *pkt)
         // FUNCTION_LOG_EXIT();
         return;
     }
+    if (pkt->trimmed) { rejectTrimmed(*pkt); return; }
 
     // Record packet information
     std::stringstream pkt_info;

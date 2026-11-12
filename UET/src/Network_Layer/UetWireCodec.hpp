@@ -1,5 +1,6 @@
 #pragma once
 #include "../Transport_Layer.hpp"
+#include "PacketTrimming.hpp"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -35,7 +36,9 @@ public:
     static uint32_t crc32c(const uint8_t* bytes, size_t length);
     static std::vector<uint8_t> encode(const PDStoNET_pkt& packet, const WireOptions& options);
     static DecodedPacket decode(const uint8_t* bytes, size_t size, bool crc_enabled = true,
-                                uint8_t native_ip_protocol = 253);
+                                uint8_t native_ip_protocol = 253,std::optional<TrimmingOptions> trimming={});
     static bool mark_ecn(std::vector<uint8_t>& frame); // Only ECT(0/1) transitions to CE.
+    static bool trim_packet(std::vector<uint8_t>& frame,const TrimmingOptions& options,bool last_hop=false);
+    static std::optional<uint8_t> packet_dscp(const std::vector<uint8_t>& frame);
 };
 } // namespace UET::NetworkLayer

@@ -70,14 +70,15 @@
       "status": "partial",
       "tests": [
         "uet_wire_test",
-        "reference_wire_comparison"
+        "reference_wire_comparison",
+        "packet_trimming_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Network byte order, corruption and UDP checksum masking tested; trimmed/TSS/UFH cases remain open."
+      "evidence_note": "Network byte order, corruption, UDP checksum masking and the explicit trimmed-packet CRC exception tested; TSS/UFH cases remain open."
     },
     {
       "id": "WIRE-SES",
@@ -193,13 +194,16 @@
       "id": "PDS-TRIM",
       "reference": "§3.5.15.1; §4.1",
       "summary": "trimming 检测及 NACK 恢复",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "packet_trimming_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Plain IPv4/IPv6/native/UDP switch trimming, unchanged UDP fields, bounds-only restricted parsing, no PDC creation/SES placement from a trimmed header, normal/last-hop NACK and RUD/ROD recovery tested. Additional loss/resource combinations and TSS/other modes remain open."
     },
     {
       "id": "SES-JOB",
@@ -337,14 +341,15 @@
         "nscc_test",
         "nscc_integration_test",
         "fabric_congestion_test",
-        "uet_wire_test"
+        "uet_wire_test",
+        "packet_trimming_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Original PDS send/retransmit admission, signed nominal-byte ACK clock, four ECN/delay cases and quick adapt implemented. Trimming, complete Probe/MPR/SACK/control handling, MAC timing accuracy and incast/profile acceptance remain open; see NSCC.md."
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, four ECN/delay cases, quick adapt and plaintext trimming feedback implemented. Complete Probe/MPR/SACK/control handling, MAC timing accuracy and incast/profile acceptance remain open; see NSCC.md and TRIMMING.md."
     },
     {
       "id": "NET-BASE",
@@ -354,10 +359,11 @@
       "tests": [
         "fabric_test",
         "simulation_scenarios",
-        "fabric_congestion_test"
+        "fabric_congestion_test",
+        "packet_trimming_test"
       ],
       "profiles": [],
-      "evidence_note": "Independent traffic-class buffers, byte-deficit round-robin service, dequeue ECN, first-byte arrival timing and link-failure generations are tested; trimming and full M4 workload acceptance remain open."
+      "evidence_note": "Independent traffic-class buffers, byte-deficit round-robin service, dequeue ECN, DSCP trim reclassification, first-byte arrival timing and link-failure generations tested. Full M4 workload acceptance remains open."
     },
     {
       "id": "SES-READ",

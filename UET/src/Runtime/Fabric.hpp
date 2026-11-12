@@ -21,6 +21,7 @@ struct LinkConfig {
     std::array<std::optional<size_t>,8> ecn_threshold_bytes{}; // null disables; zero marks every ECT packet.
     std::array<uint16_t,8> traffic_class_weights{{1,1,1,1,1,1,1,1}};
     size_t scheduling_quantum_bytes=256; // Deficit round robin, local switch policy.
+    std::optional<NetworkLayer::TrimmingOptions> trimming;
 };
 
 struct LinkStats {
@@ -28,6 +29,7 @@ struct LinkStats {
     size_t queued_bytes = 0, peak_queue_bytes = 0;
     std::array<size_t,8> queued_by_class{},peak_by_class{};
     uint64_t ecn_marked=0;
+    uint64_t trimmed=0,trimmed_bytes=0;
 };
 
 // A deterministic packet fabric. Switches store and forward complete frames.
@@ -70,6 +72,7 @@ public:
         if (!nodes_.insert(node).second) throw std::invalid_argument("duplicate node");
     }
     void add_link(uint32_t from, uint32_t to, const LinkConfig& config) {
+        if (config.trimming) config.trimming->validate();
         if (from == to || !nodes_.count(from) || !nodes_.count(to) ||
             !config.rate_bps || !config.mtu || config.buffer_bytes < config.mtu ||
             config.drop_ppm > 1000000 || !config.scheduling_quantum_bytes ||
@@ -176,13 +179,41 @@ private:
         const auto key = std::make_pair((*path)[hop-1], (*path)[hop]);
         auto& edge = edges_.at(key);
         auto& stats = edge.stats;
-        const auto size = frame->bytes.size();
-        const auto traffic_class=frame->traffic_class;
-        if (!edge.up || size > edge.config.buffer_bytes - stats.queued_by_class[traffic_class] || random_.chance(edge.config.drop_ppm)) {
+        auto size=frame->bytes.size();
+        if (edge.config.trimming) {
+            // Reclassify from the actual DSCP on every configured ingress.
+            // In particular, a trim notification received from another switch
+            // must not depend on the sender carrying our local Frame metadata.
+            if (const auto dscp=NetworkLayer::UetWireCodec::packet_dscp(frame->bytes)) {
+                if (edge.config.trimming->is_trimmed(*dscp)) frame->traffic_class=edge.config.trimming->trimmed_traffic_class;
+                else if (*dscp==edge.config.trimming->control_dscp) frame->traffic_class=1;
+                else if (*dscp==edge.config.trimming->trimmable_dscp) frame->traffic_class=0;
+            }
+        }
+        auto traffic_class=frame->traffic_class;
+        const auto drop=[&] {
             ++stats.dropped;
             trace_.record(key.first, "link_drop", key.second);
-            return;
+        };
+        if (!edge.up) { drop(); return; }
+        if (size>edge.config.buffer_bytes-stats.queued_by_class[traffic_class]) {
+            bool trimmed=false;
+            if (edge.config.trimming) {
+                try {
+                    trimmed=NetworkLayer::UetWireCodec::trim_packet(frame->bytes,*edge.config.trimming,hop+1==path->size());
+                } catch (const std::invalid_argument&) { /* Invalid IP cannot become a trim notification. */ }
+            }
+            if (!trimmed) { drop(); return; }
+            ++stats.trimmed; stats.trimmed_bytes+=size-frame->bytes.size();
+            trace_.record(key.first,"packet_trim",key.second);
+            size=frame->bytes.size();
+            traffic_class=edge.config.trimming->trimmed_traffic_class;
+            frame->traffic_class=traffic_class;
+            // §4.1: trimmed traffic is a new admission into its own queue,
+            // and still drops normally if that queue has insufficient space.
+            if (size>edge.config.buffer_bytes-stats.queued_by_class[traffic_class]) { drop(); return; }
         }
+        if (random_.chance(edge.config.drop_ppm)) { drop(); return; }
         stats.queued_bytes+=size; stats.queued_by_class[traffic_class]+=size;
         stats.peak_queue_bytes=std::max(stats.peak_queue_bytes,stats.queued_bytes);
         stats.peak_by_class[traffic_class]=std::max(stats.peak_by_class[traffic_class],stats.queued_by_class[traffic_class]);

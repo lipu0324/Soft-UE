@@ -139,9 +139,34 @@ void duplicate_feedback_and_cancelled_first_send() {
     cancel_loop.run(); CHECK(cancel_loop.pending()==0);
 }
 
+void datagram_ecn_without_reliable_window() {
+    EventLoop loop; Trace trace(loop); Fabric fabric(loop,trace,55);
+    auto& source_port=fabric.add_host(1); auto& target_port=fabric.add_host(2);
+    fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
+    PdsHost source_host(1,loop,trace,source_port),target_host(2,loop,trace,target_port);
+    source_host.enable_nscc(NsccConfig{}); target_host.enable_nscc(NsccConfig{});
+    Endpoint source(1,source_host,loop,trace),target(2,target_host,loop,trace);
+    source.memory().add_job(1); target.memory().add_job(1);
+    const auto region=target.memory().register_region(1,1,32,7);
+    target.post_receive(1,1,region.key,0,32);
+    size_t datagrams=0;
+    fabric.set_capture([&](Time,const Frame& frame) {
+        const auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
+        if (decoded.packet.PDS_type==UUD_req_header) { ++datagrams; CHECK(decoded.network.ecn==2); }
+    });
+    Operation send; send.type=OperationType::DatagramSend; send.peer=2; send.payload={1,2,3};
+    source.submit(send); loop.run(); Completion completion{};
+    CHECK(source.poll_completion(completion) && completion.status==CompletionStatus::LocalSuccess);
+    CHECK(target.poll_completion(completion) && completion.receive && completion.status==CompletionStatus::Success);
+    CHECK(datagrams==1 && target.memory().read(1,1,region.key,0,3)==send.payload);
+    CHECK(source_host.nscc()->congestion_context_count()==0 && target_host.nscc()->congestion_context_count()==0);
+    source.close(); target.close(); source_host.close(); target_host.close(); CHECK(loop.pending()==0);
+}
+
 int main() {
     context_sharing();
     duplicate_feedback_and_cancelled_first_send();
+    datagram_ecn_without_reliable_window();
     for (const auto ordered:{false,true}) {
         transport_case(ordered,false,false);
         transport_case(ordered,true,false);

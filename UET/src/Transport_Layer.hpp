@@ -563,6 +563,7 @@ struct PDStoNET_pkt
     uint8_t network_ecn=0;
     uint32_t nominal_packet_size=0;
     uint64_t receive_time_ns=0; // Local timing metadata; never serialized.
+    bool trimmed=false,trimmed_last_hop=false; // DSCP classification, never an SES payload promise.
 };
 
 
