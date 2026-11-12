@@ -204,6 +204,34 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0191-003 | §3.3.6，模式总要求 | 各 Profile 支持表 3-5 列出的模式及对应网络行为。 | 不能用一种通用可靠网络后端覆盖所有模式；当前仍由原 PDC 实现 RUD/ROD/UUD。 |
 | UE11-p0191-004 | 表 3-5，模式矩阵跨页截断 | AI Base/Full/HPC 都需 RUD/ROD/UUD；HPC 需 RUDI；Unified Local 需 RODL。 | 原图确认本候选文本遗漏表后两行。前两种可靠模式与 UUD 有回归；RUDI/RODL 缺失，独立能力保持 false。 |
 
-复核进度为上述 140 个候选的分类与义务拆分；其余 589 个候选、表格/算法的额外
+## 第 141～160 个候选
+
+本批补完 Profile 模式表的拆行，并复核基础寻址/授权。JobID 授权与 TSS 安全域
+授权是两道独立检查；成功定位一个 buffer 不能替代随后检查权限。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0191-005 | 表 3-5，RUDI | HPC 必选幂等操作的 RUDI。 | 与 p0191-004 的原图补行相同义务；尚未实现，不因 provider 可为某次 RMA 选 RUD 就免除 HPC RUDI 能力要求。 |
+| UE11-p0191-006 | 表 3-5，UUD | AI Base/Full/HPC 必选 UUD。 | native/provider DGRAM 已有回归；不推断远端收到或可靠交付。 |
+| UE11-p0192-001 | 表 3-6/3-7，网络条件 | 最佳努力网络中 AI Base/Full/HPC 必选 NSCC；无损表的 NSCC/RCCC 格为空。 | NSCC 已接入发送准入、反馈及真实 trim；尚未全部规范验收。RCCC 虽非此表通用必选，仍按 roadmap 在 M5 实现。 |
+| UE11-p0199-001 | §3.4.2.3，key namespace | 两种 namespace 都遵守 key 格式及绑定；未找到或不允许的 MR 映射返回 RC_BAD_MKEY。 | native exact/any/Job/PID/index 优先与 key 格式已有回归；权限错误与映射错误需按标准区分，不能统一报告成功或任意错误。 |
+| UE11-p0200-001 | §3.4.2.3，本地直接内存隔离 | 无 PID/index/key/initiator 的本地事务用 JobID 隔离：单一授权 Job，或 Job 对应地址基址。 | M8 未实现；应使用受检模拟地址空间，管理翻译是软件策略，不能直接解引用远端地址。 |
+| UE11-p0201-001 | §3.4.2.3.1，Job provisioning | 同一可达网络内同时运行、不可互通的实体使用不同 JobID；可通信实体可共享；应用可用多个 Job。 | native 能表示多 Job，但网络级特权分配/冲突检测与回收生命周期待 M7；单 registry 的集合不代替全局 provisioning。 |
+| UE11-p0201-002 | §3.4.2.3.2，进程隔离 | 各 OS 进程有不同 PIDonFEP；同一 OS 进程可有多个，且与 OS PID/PASID 解耦。 | 当前 native 可配置 PID namespace，尚无特权进程分配模型；固定 PID=1 的 provider 不是完整跨进程隔离证明。 |
+| UE11-p0202-001 | §3.4.2.3.2，PID scope | PIDonFEP 范围相对于 Job 或 Fabric Address。 | `ResourceDirectory` 支持相对映射和绝对 PID；provider 标准地址入口仍缺失。 |
+| UE11-p0202-002 | §3.4.2.3.3，资源空间/optimized | SEND/tag/RMA index 空间独立；optimized RMA 的 index 精确选择一个 RMA resource。 | native SEND/RMA 空间已分开；tag 与 optimized 单资源关联未实现。标准头允许一个 RMA resource 的情形不能反推所有 index 强制只有一个 MR。 |
+| UE11-p0204-001 | §3.4.2.3.5，匹配顺序 | ROD wildcard 在所有匹配的 posted buffers 中按 FIFO 消耗；RUD FIFO 为 SHOULD，网络乱序可导致不同次序。 | tagged 未实现。ROD 普通 receive 的 FIFO 测试不等于 wildcard 匹配验证。 |
+| UE11-p0204-002 | §3.4.2.3.5，API key 映射 | 采用 RMA memory key 时把 API key 映射到线头 match_bits，保持相应 namespace。 | native/provider 标准头已有 key 到线格式与目标授权回归；optimized 通过 index 选择的无 key 路径另验。 |
+| UE11-p0204-003 | §3.4.2.3.7，唯一 buffer 选择 | 未标记 tuple 唯一选择一个 buffer；匹配 tuple+criteria 也唯一选择 buffer，可采用不同内部数据结构。 | native untagged/RMA 受检选择有覆盖；tag 缺失，不把具体 map 容器误写成标准要求。 |
+| UE11-p0205-001 | §3.4.2.3.7，无 key RMA | 未携 key 时 tuple 唯一选择 buffer；三种操作使用独立 index 空间。 | optimized/index-only RMA 与 tag 缺失；标准头 key lookup 不代替无 key 条件项。 |
+| UE11-p0206-001 | §3.4.2.4，定位后授权 | buffer 定位后执行 JobID 与适用安全域授权。 | native Job/MR 检查已有负向回归；M6 SDI 检查尚缺。 |
+| UE11-p0206-002 | §3.4.2.4.1，源端可信 Job | 由发起节点可信层分配或验证 JobID。 | native 源端检查配置 Job，但任意应用可自行配置的教学 API 不等于特权管理；M7 授权对象/可信边界待实现。 |
+| UE11-p0206-003 | §3.4.2.4.1，逐 buffer 授权 | 每次访问确认 Job 可访问该 buffer；至少一个 Job。只确认 Job 属于 FEP 集合不充分。 | exact/any MR 与相对/绝对访问已有回归；provider 固定 Job 和未完成的配置链仍需补全。 |
+| UE11-p0207-001 | §3.4.2.4.2，选定 TSS 后的 SDI 授权 | SDI 必须被 endpoint 允许；失败按 TSS 丢弃并报告，不发送 SES response 或 PDS NACK。 | M6 缺失；认证失败不得沿当前普通 semantic error 路径回复。UET_NO_RESPONSE 的提前返回例外不允许最终成功完成。 |
+| UE11-p0207-002 | §3.4.2.5，消息大小与分包 | bulk 上限由标准头 32 位长度决定，可分别限制 RMA/send；分包遵循 Payload MTU，紧凑头还有更窄限制。 | streamed WRITE 已验证 UINT32_MAX 和内存有界；其他大消息与紧凑头仍缺失，provider 大小能力不能由 WRITE 单测推广到全部操作。 |
+| UE11-p0211-001 | §3.4.2.6.1，use-once 生命周期 | 一条消息独占已匹配 buffer，其他消息不可再用；保留到该消息完成才还给应用。支持 SEND/RECV，支持 tag 时也覆盖 tag。 | native posted receive 绑定 registration identity 并在最终完成前保留，撤销/重复/晚到有回归；tag 与 RMA use-once 仍未实现。 |
+| UE11-p0212-001 | §3.4.2.6.3，HPC tag 匹配 | HPC 目标支持 tagged；使用 match_bits 和 initiator，是否硬件加速不影响要求。 | M5 未实现；后续测试同时验证 tag 与 source criteria，不能只比较 tag。 |
+
+复核进度为上述 160 个候选的分类与义务拆分；其余 569 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
