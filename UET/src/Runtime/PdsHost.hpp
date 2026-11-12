@@ -66,6 +66,14 @@ public:
         return true;
     }
     void set_request_handler(std::function<void(const PDC_SES_req&)> callback) { request_handler_ = std::move(callback); }
+    // Establish the transport without inventing an SES NO_OP message. The
+    // optional negotiation request uses NO_NEG and enables no optional feature.
+    uint16_t open_connection(uint32_t peer,uint32_t job=1,pdc_mode mode=ROD,bool negotiation=false) {
+        if (stopped_ || format_!=WireFormat::Uet11) return UINT16_MAX;
+        const auto context=manager_.openWithControl(node_,peer,job,mode,negotiation);
+        if (context!=UINT16_MAX) wake();
+        return context;
+    }
     void set_response_handler(std::function<void(const PDC_SES_rsp&)> callback) { response_handler_ = std::move(callback); }
     void set_datagram_transmit_handler(std::function<void(uint16_t,SendResult)> callback) {
         datagram_transmit_handler_ = std::move(callback);

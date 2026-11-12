@@ -63,8 +63,11 @@ int main() {
         }
         auto cp=packet; cp.PDS_type=RUOD_cp_header; cp.PDS_header={}; cp.SESpkt={};
         auto& control=cp.PDS_header.RUOD_cp_header; control.type=CP; control.ctl_type=9; control.psn=7;
+        check_throws<std::invalid_argument>([&] { UetWireCodec::encode(cp,{}); });
+        cp.control_extension.assign(28,0); // §3.5.16.7: NO_NEG has 32 payload bytes.
         const auto control_bytes=UetWireCodec::encode(cp,{});
-        CHECK(UetWireCodec::decode(control_bytes.data(),control_bytes.size()).packet.PDS_header.RUOD_cp_header.ctl_type==9);
+        const auto decoded_control=UetWireCodec::decode(control_bytes.data(),control_bytes.size()).packet;
+        CHECK(decoded_control.PDS_header.RUOD_cp_header.ctl_type==9 && decoded_control.control_extension.size()==28);
         auto unsupported=packet; unsupported.SESpkt.bth_header.Standard_Header.version=1;
         check_throws<std::invalid_argument>([&] { UetWireCodec::encode(unsupported,{}); });
         WireOptions configured; configured.native_ip_protocol=252;

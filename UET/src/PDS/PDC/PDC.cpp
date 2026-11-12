@@ -297,7 +297,13 @@ void PDC::reTx(uint32_t psn){
     const auto found = tx_pkt_buffer.find(psn);
     if (found == tx_pkt_buffer.end()) return;
     PDStoNET_pkt p = found->second;
-    if (p.PDS_type == RUOD_cp_header) p.PDS_header.RUOD_cp_header.flags.retx = 1;
+    if (p.PDS_type == RUOD_cp_header) {
+        auto& control=p.PDS_header.RUOD_cp_header;
+        control.flags.retx=1;
+        if (!SYN && (control.ctl_type==Noop || control.ctl_type==Negotiation)) {
+            control.flags.syn=0; control.dpdcid=DPDCID;
+        }
+    }
     else if (p.PDS_type == RUOD_req_header) {
         p.PDS_header.RUOD_req_header.flags.retx = 1;
         if (!SYN) {
@@ -329,8 +335,10 @@ void PDC::txRto(uint32_t psn){
     }
     TX_pkt_meta meta = tx_pkt_map.at(psn);
     const auto& lost_packet=tx_pkt_buffer.at(psn);
-    if (runtime_ && lost_packet.PDS_type==RUOD_req_header &&
-        lost_packet.PDS_header.RUOD_req_header.flags.syn) {
+    const bool lost_syn=lost_packet.PDS_type==RUOD_req_header?
+        lost_packet.PDS_header.RUOD_req_header.flags.syn:
+        lost_packet.PDS_type==RUOD_cp_header && lost_packet.PDS_header.RUOD_cp_header.flags.syn;
+    if (runtime_ && lost_syn) {
         syn_safety_deadline_=std::max(syn_safety_deadline_,
             UET::Runtime::add_time(meta.last_transmit_time,runtime_->syn_retransmission_safety_time));
         if (closing) armCloseSafetyWake();
@@ -544,6 +552,7 @@ void PDC::txCtrl(){
             tx_pkt_buffer.insert(std::make_pair(sequence,p));
             TX_pkt_meta meta{};
             meta.rto = runtime_ ? runtime_->rto_ms : Base_RTO;
+            if (runtime_) meta.last_transmit_time=runtime_->clock.now();
             tx_pkt_map.emplace(sequence,meta);
             if(rtoEnabled()){
                 startPacketTimer(sequence, 0);
@@ -657,66 +666,65 @@ void PDC::chkRxError(PDStoNET_pkt* packet)
  * @brief Process NOOP control message 
  * @param p Data packet to process // 需要处理的数据包
  */
-void PDC::rxCtrlNoop(PDStoNET_pkt *p)
+bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
 {
-    if (!p) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("输入数据包指针为空"));
-        return;
-    } else if (p->PDS_header.RUOD_cp_header.flags.ar) {
-        sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, p->PDS_header.RUOD_cp_header.psn, nullptr, false);
-        return;
-    } else {
-        return;
+    if (!packet) return false;
+    const auto& header=packet->PDS_header.RUOD_cp_header;
+    const bool carries_mode=header.ctl_type==Noop || header.ctl_type==Negotiation;
+    if (carries_mode && bool(header.flags.isrod)!=(mode==ROD)) {
+        sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr); return false;
     }
+    if (header.flags.syn && header.psn-header.psn_off!=start_psn) {
+        sendNack(header.flags.retx,header.psn,UET_INVALID_SYN,0,nullptr); return false;
+    }
+    // Unique CP PSNs share the receive window with semantic requests. A NOOP
+    // cannot leave a hole that would stall the following request's CACK.
+    const auto distance=header.psn-rx_cur_psn;
+    const auto since_clear=header.psn-rx_clear_psn;
+    if (!since_clear || since_clear>=0x80000000u) return false;
+    const bool duplicate=!distance || distance>=0x80000000u || received_rx_psns_.count(header.psn);
+    if (duplicate) {
+        if (header.flags.retx) sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false);
+        return false;
+    }
+    if (mode==ROD && distance!=1) {
+        sendNack(header.flags.retx,header.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr); return false;
+    }
+    if (mode==RUD && distance>MPR) return false;
+    received_rx_psns_.insert(header.psn); completed_rx_psns_.insert(header.psn);
+    while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
+    advanceCumulativeAck();
+    sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false);
+    return true;
 }
 
+void PDC::rxCtrlNoop(PDStoNET_pkt* packet)
+{
+    acknowledgeNumberedControl(packet);
+}
 /**
  * @brief Process ACK_req control message 
  * @param p Data packet to process // 需要处理的数据包
  */
-void PDC::rxCtrlAckReq(PDStoNET_pkt *p)
+void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
 {
-    if (!p) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("输入数据包指针为空"));
-        return;
+    if (!packet) return;
+    const auto requested_sequence=packet->PDS_header.RUOD_cp_header.psn;
+    // §3.5.16.2: a delayed request below Clear is silently discarded. Use
+    // modular distance so this decision also works across the 32-bit wrap.
+    if (requested_sequence-rx_clear_psn>=0x80000000u) return;
+    if (replaySemanticAck(requested_sequence)) return;
+    const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+        [requested_sequence](const auto& request) { return request.second.psn==requested_sequence; });
+    if (processing) {
+        sendNack(0,requested_sequence,UET_RCVD_SES_PROCG,0,nullptr); return;
     }
-
-    uint32_t req_psn = p->PDS_header.RUOD_cp_header.psn;
-
-    std::stringstream req_info;
-    req_info << "Receive ACK Request - Request PSN: " << req_psn
-                << ", SPDCID: " << p->PDS_header.RUOD_cp_header.spdcid
-                << ", DPDCID: " << p->PDS_header.RUOD_cp_header.dpdcid;
-    LOG_INFO(__FUNCTION__, formatLogMessage(req_info.str()));
-
-    diagnostics() << getCurrentTimestamp() << formatLogMessage("rx_ctrl_ack_req - Request PSN: ") << req_psn << std::endl;
-
-    auto ack_it = tx_ack_buffer.find(req_psn);
-    if (ack_it != tx_ack_buffer.end()) {
-        LOG_INFO(__FUNCTION__, formatLogMessage("Found corresponding ACK packet in ACK buffer, retransmit"));
-        diagnostics() << getCurrentTimestamp() << formatLogMessage("Retransmit cached ACK packet, PSN: ") << req_psn << std::endl;
-        PDStoNET_pkt ack_pkt = ack_it->second;
-        tx_pkt_q.push(ack_pkt);
-    } else {
-        LOG_WARN(__FUNCTION__, formatLogMessage("ACK缓冲区中未找到对应PSN,构造新ACK包"));
-        diagnostics() << getCurrentTimestamp() << formatLogMessage("Construct new ACK packet, PSN: ") << req_psn << std::endl;
-
-        if (req_psn > rx_cur_psn) {
-            LOG_ERROR(__FUNCTION__, formatLogMessage("Requested PSN exceeds current receive PSN range"));
-            sendNack(0, req_psn, UET_PKT_NOT_RCVD, rx_cur_psn + 1, nullptr);
-            return;
-        }
-
-        if (req_psn < cack_psn) {
-            LOG_INFO(__FUNCTION__, formatLogMessage("Requested PSN has been cumulatively acknowledged, send current acknowledgment status"));
-            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, req_psn, nullptr, false);
-        } else {
-            LOG_INFO(__FUNCTION__, formatLogMessage("Construct normal ACK response"));
-            sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, req_psn, nullptr, false);
-        }
+    const auto since_cumulative=requested_sequence-cack_psn;
+    if (received_rx_psns_.count(requested_sequence) || !since_cumulative || since_cumulative>=0x80000000u) {
+        sendAck(UET_HDR_NONE,0,0,requested_sequence,nullptr,false); return;
     }
+    sendNack(0,requested_sequence,UET_PKT_NOT_RCVD,rx_cur_psn+1,nullptr);
 }
-
 /**
  * @brief Process Clear_cmd control message 
  * @param p Data packet to process // 需要处理的数据包
@@ -869,13 +877,13 @@ void PDC::sendCtrlNoop(PDStoNET_pkt *p){
     p->PDS_header.RUOD_cp_header.psn = setPsn();         
     p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;           
-    p->PDS_header.RUOD_cp_header.flags.isrod = 1;        //ROD
+    p->PDS_header.RUOD_cp_header.flags.isrod = mode==ROD;
     p->PDS_header.RUOD_cp_header.flags.syn = SYN;        
     p->PDS_header.RUOD_cp_header.payload = 0;            
     if(!SYN)p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
     else{
         p->PDS_header.RUOD_cp_header.pdc_info = 0;      
-        p->PDS_header.RUOD_req_header.psn_off = p->PDS_header.RUOD_cp_header.psn - start_psn;
+        p->PDS_header.RUOD_cp_header.psn_off = p->PDS_header.RUOD_cp_header.psn - start_psn;
     }
 
     updateTxPsnTracker();
@@ -980,35 +988,18 @@ void PDC::sendCtrlCredit(PDStoNET_pkt *p)
  * @brief Send Negotiation control message 
  * @param p Data packet to process // 需要处理的数据包
  */
-void PDC::sendCtrlNegotiation(PDStoNET_pkt *p)
+void PDC::sendCtrlNegotiation(PDStoNET_pkt* packet)
 {
-    LOG_INFO(__FUNCTION__, formatLogMessage("Send Negotiation control packet"));
-    
-    if(!p) {
-        LOG_ERROR(__FUNCTION__, formatLogMessage("输入数据包指针为空"));
-        return;
-    }
-    
-    p->PDS_header.RUOD_cp_header.flags.isrod = 1;   
-    p->PDS_header.RUOD_cp_header.ctl_type = gen_cm; 
-    p->PDS_header.RUOD_cp_header.flags.ar = 1;
-    p->PDS_header.RUOD_cp_header.flags.syn = 0;
-    p->PDS_header.RUOD_cp_header.psn = tx_cur_psn;
-    p->PDS_header.RUOD_cp_header.spdcid = SPDCID;
-    p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
-    p->PDS_header.RUOD_cp_header.pdc_info = 0;
-    p->PDS_header.RUOD_cp_header.payload = 0x0; 
-
-    std::stringstream negotiation_info;
-    negotiation_info << "Negotiation control packet parameters - gen_cm: " << CM_TYPE_STR(gen_cm)
-                        << ", PSN: " << tx_cur_psn
-                        << ", SPDCID: " << SPDCID
-                        << ", DPDCID: " << DPDCID;
-    LOG_DEBUG(__FUNCTION__, formatLogMessage(negotiation_info.str()));
-    
-    LOG_INFO(__FUNCTION__, formatLogMessage("Negotiation control packet construction complete"));
+    auto& header=packet->PDS_header.RUOD_cp_header;
+    header.ctl_type=Negotiation; header.flags.ar=1; header.flags.syn=SYN;
+    header.flags.isrod=mode==ROD; header.psn=setPsn(); header.spdcid=SPDCID;
+    if (SYN) { header.pdc_info=0; header.psn_off=header.psn-start_psn; }
+    else header.dpdcid=DPDCID;
+    // NO_NEG: no optional feature is requested or enabled. The standard keeps
+    // this payload at 32 zero bytes for compatibility (§3.5.16.7).
+    header.payload=0; packet->control_extension.assign(28,0);
+    updateTxPsnTracker();
 }
-
 /**
  * @brief Get unacknowledged packet count // 获取未确认包计数
  * @return Number of unacknowledged packets // 未确认包数量

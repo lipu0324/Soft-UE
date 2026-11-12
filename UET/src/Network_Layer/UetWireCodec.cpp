@@ -52,6 +52,15 @@ PDS_next_hdr next_host(uint8_t next) {
     if (next > 6) throw std::invalid_argument("unsupported next header");
     return names[next];
 }
+size_t negotiation_payload_size(uint32_t payload_prefix) {
+    const auto type=payload_prefix>>24;
+    const auto length=(payload_prefix>>16)&0xffu;
+    // §3.5.16.7: NO_NEG/length=0 deliberately retains the older fixed
+    // 32-byte payload. Other negotiation lengths include their first 4 bytes.
+    if (!type && !length) return 32;
+    if (!length) throw std::invalid_argument("zero-length negotiation payload");
+    return length*4;
+}
 void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr next) {
     if (next==UET_HDR_CP_ACK) {
         const auto& acknowledgement=packet.control_ack;
@@ -192,6 +201,11 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         put(encoded_bytes,(11<<11)|(header.ctl_type<<7)|(header.flags.isrod<<5)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
         put(encoded_bytes,header.probe_opaque,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
         put(encoded_bytes,header.flags.syn ? (header.pdc_info<<12)|header.psn_off : header.dpdcid,2); put(encoded_bytes,header.payload,4);
+        if (header.ctl_type==Negotiation) {
+            if (packet.control_extension.size()+4!=negotiation_payload_size(header.payload))
+                throw std::invalid_argument("negotiation payload length mismatch");
+            encoded_bytes.insert(encoded_bytes.end(),packet.control_extension.begin(),packet.control_extension.end());
+        } else if (!packet.control_extension.empty()) throw std::invalid_argument("unexpected CP extension");
     } else if (packet.PDS_type == UUD_req_header) {
         next=packet.PDS_header.UUD_req_header.next_hdr;
         if (packet.PDS_header.UUD_req_header.type!=UUD_REQ)
@@ -238,6 +252,12 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         const auto destination=reader.take(2);
         if (header.flags.syn) { header.pdc_info=destination>>12; header.psn_off=destination&0xfff; } else header.dpdcid=destination;
         header.payload=reader.take(4); next=UET_HDR_NONE;
+        if (header.ctl_type==Negotiation) {
+            packet.control_extension=reader.rest();
+            if (packet.control_extension.size()+4!=negotiation_payload_size(header.payload))
+                throw std::invalid_argument("invalid negotiation length");
+            return packet;
+        }
     } else if (type==6) {
         // UUD flags/reserved bits are ignored on reception (§3.5.10.14).
         reader.take(2);

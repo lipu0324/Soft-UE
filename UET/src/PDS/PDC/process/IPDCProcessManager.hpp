@@ -601,6 +601,18 @@ public:
              found->second->ipdc_instance->state.load()==CLOSE_ACK_WAIT);
     }
 
+    bool openWithControl(uint16_t pdcid,pdc_mode mode,bool negotiation) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        if (found==ipdc_processes.end()) return false;
+        auto& context=*found->second->ipdc_instance;
+        if (context.state==ESTABLISHED || context.state==CREATING) return true;
+        if (context.state!=CLOSED) return false;
+        context.mode=mode; context.SYN=true; context.state=CREATING;
+        context.gen_cm=negotiation?NEGOTIATION:NOOP;
+        return true;
+    }
+
     bool hasOutstandingPacket(uint16_t pdcid,uint32_t sequence) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=ipdc_processes.find(pdcid);

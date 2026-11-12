@@ -131,6 +131,8 @@ The full boundary experiment is separate from the fast CTest regression:
 cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
 cmake --build build/release --target streaming_payload_test -j2
 build/release/streaming_payload_test --bytes 4294967295
+# Or preserve the source commit, binary hash, log and executor measurements:
+python3 scripts/test_large_message.py --binary build/release/streaming_payload_test --output build/large-message
 ```
 
 It sends 524,288 actual 8192-byte-or-smaller fragments through the original
@@ -140,6 +142,11 @@ producer peak is eight fragments, the ordered receiver retains one interval,
 and only three sparse pages are allocated. The default regression also tests
 8 MiB, packet-loss recovery, permanent loss and rejection of 4 GiB before reading
 the payload. These are correctness experiments, not hardware throughput results.
+The `large message boundary` GitHub workflow runs this experiment nightly on the
+default branch and supports manual dispatch once available there. It preserves
+the report and log as an artifact; ordinary pull-request CI retains the smaller
+streaming and loss regressions. Adding the workflow does not mean its scheduled
+run has already executed.
 
 PDS publishes local events for transmit PSNs, peer CACKs, receive Clear and
 connection termination. SES uses these to retire completed receive records and
@@ -174,6 +181,22 @@ requests and duplicate wire requests do not restart the handshake. The standard
 initiator requires the Close Command CP_ACK payload, so a plain ACK with the
 same PSN cannot cancel close recovery. ROD/RUD loss, silent-peer and stripped
 CP_ACK tests exercise these transitions; other control variants remain open.
+
+`PdsHost::open_connection(peer, job, mode, negotiation)` can establish a ROD/RUD
+transport with a NOOP CP or a `NO_NEG` Negotiation CP before submitting an SES
+operation. This generates no synthetic semantic request or application
+completion. Numbered CPs share the request PSN window. The following WRITE uses
+the established tuple and next PSN; lost SYN CPs use the same safety wait as lost
+SYN data requests. NO_NEG carries its required 32 zero payload bytes. The codec
+also parses length-delimited on-off negotiation payloads; this implementation
+responds with a plain ACK and enables no optional negotiated feature.
+
+ACK Request handling distinguishes a cached guaranteed response, a packet still
+being processed by SES, a processed default response and a packet not received.
+It replays the cached response, reports `UET_RCVD_SES_PROCG` or
+`UET_PKT_NOT_RCVD` as appropriate, and silently drops requests below Clear.
+Tests include the 32-bit sequence wrap. Probe/Credit/PCM and negotiated SYN
+safety transfer remain outside this increment's protocol capability claims.
 
 Simulation addresses are generated deterministically from numeric host IDs.
 `RealtimeRuntime` and `UdpFramePort` provide explicit monotonic and nonblocking

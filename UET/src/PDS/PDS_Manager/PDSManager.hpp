@@ -50,6 +50,14 @@ private:
 
 public:
 
+    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation) {
+        if (!local_node || !peer || (mode!=ROD && mode!=RUD)) return UINT16_MAX;
+        uint16_t local_pdc=UINT16_MAX;
+        if (!assignPDC(job,peer,0,mode,0,&local_pdc)) return UINT16_MAX;
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,peer,local_node)) return UINT16_MAX;
+        return IPDC_Processmanager.openWithControl(local_pdc,mode,negotiation)?local_pdc:UINT16_MAX;
+    }
+
     // Remove unsent fragments after the owning PDC terminates. They must not
     // accidentally establish a replacement context under a retired message ID.
     void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
@@ -332,6 +340,10 @@ public:
         else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
 
         if (starts_connection) {
+            if (is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type!=Noop &&
+                received_packet.PDS_header.RUOD_cp_header.ctl_type!=Negotiation) {
+                sendNack(&received_packet,UET_PDC_HDR_MISMATCH); return;
+            }
             if (!remote_pdc_id) {
                 // §3.5.8.2 reserves ID zero for replies without a valid PDC.
                 // A SYN must never create a context under that identity.

@@ -644,6 +644,7 @@ public:
      * @param p Data packet to process Data packet to process
      */
     void rxCtrlNoop(PDStoNET_pkt *p);
+    bool acknowledgeNumberedControl(PDStoNET_pkt* packet);
 
     /**
      * @brief Process ACK_req control message Process ACK_req control message Process ACK_req control message

@@ -1,0 +1,25 @@
+name: large message boundary
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  streaming-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the bounded streaming experiment
+        run: |
+          cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/release --target streaming_payload_test -j2
+      - name: Verify 4 GiB minus one through the protocol and fabric
+        run: python3 scripts/test_large_message.py --binary build/release/streaming_payload_test --output build/large-message
+      - name: Preserve source and boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-message-evidence
+          path: build/large-message/

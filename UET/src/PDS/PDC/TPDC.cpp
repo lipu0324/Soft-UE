@@ -141,22 +141,21 @@ void T_PDC::processOpen1(PDStoNET_pkt *pkt)
     }
 }
 
+void T_PDC::establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_mode delivery_mode)
+{
+    DPDCID=remote_pdc; start_psn=initial_sequence; mode=delivery_mode;
+    rx_cur_psn=start_psn-1; cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
+    tx_cur_psn=start_psn; clear_psn=start_psn-1;
+    bad_psn=false; state=ESTABLISHED;
+}
+
 void T_PDC::processOpen2(PDStoNET_pkt *pkt)
 {
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] process open2" << std::endl;
     if (!secure_psn)
     {
-        DPDCID = pkt->PDS_header.RUOD_req_header.spdcid; // Set destination PDC ID
-        start_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off;
-        mode = pkt->PDS_header.RUOD_req_header.type==RUD_REQ?RUD:ROD;
-        // Determine starting receive PSN based on SYN packet
-        rx_cur_psn = pkt->PDS_header.RUOD_req_header.psn - pkt->PDS_header.RUOD_req_header.psn_off - 1;
-        cack_psn = rx_cur_psn;
-        tx_cur_psn = start_psn; // Forward and return directions start at the same PSN.
-        clear_psn = tx_cur_psn - 1;
-        rx_clear_psn = rx_cur_psn; // Record TX clear PSN
-        bad_psn = false;
-        state = ESTABLISHED; // Set to established state
+        const auto& header=pkt->PDS_header.RUOD_req_header;
+        establishContext(header.spdcid,header.psn-header.psn_off,header.type==RUD_REQ?RUD:ROD);
         LOG_INFO(__FUNCTION__, formatLogMessage("process2 running - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", cack_psn: " + std::to_string(cack_psn)));
     }
     else
@@ -309,6 +308,7 @@ void T_PDC::openChk()
                 LOG_DEBUG(__FUNCTION__, formatLogMessage("Process request packet in closed state"));
                 netRxReq(&p); // Handle request packet / Process request packet
             }
+            else if (p.PDS_type==RUOD_cp_header) netRxCm(&p);
         }
     }
 
@@ -493,7 +493,13 @@ void T_PDC::netRxNack(PDStoNET_pkt* packet)
 
 void T_PDC::netRxCm(PDStoNET_pkt *pkt)
 {
-
+    const auto& header=pkt->PDS_header.RUOD_cp_header;
+    if (state==CLOSED) {
+        // §3.5.16: NOOP and Negotiation are the only CPs that can establish
+        // a PDC. No semantic request or application completion is fabricated.
+        if (!header.flags.syn || (header.ctl_type!=Noop && header.ctl_type!=Negotiation)) return;
+        establishContext(header.spdcid,header.psn-header.psn_off,header.flags.isrod?ROD:RUD);
+    }
     if (pkt->PDS_header.RUOD_cp_header.ctl_type == 4){
         LOG_INFO(__FUNCTION__, formatLogMessage("TPDC received close command, PSN:" + std::to_string(pkt->PDS_header.RUOD_cp_header.psn)));
         if(pkt->PDS_header.RUOD_cp_header.psn == rx_cur_psn + 1){
@@ -657,6 +663,11 @@ void T_PDC::rxCtrl(PDStoNET_pkt *pkt)
         switch (pkt->PDS_header.RUOD_cp_header.ctl_type)
         {
         case Noop:
+            rxCtrlNoop(pkt);
+            break;
+        case Negotiation:
+            // Optional negotiation is disabled; acknowledge the numbered CP
+            // without enabling features or transferring SYN safety tracking.
             rxCtrlNoop(pkt);
             break;
         case ACK_req:

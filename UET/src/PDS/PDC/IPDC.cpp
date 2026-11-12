@@ -477,29 +477,14 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
         case Clear_req:
             rxCtrlClearReq(pkt);
             break;
-        case Close_req:
-        {
-            const auto& control=pkt->PDS_header.RUOD_cp_header;
-            // §3.5.16.4.2: Close Request consumes a PSN in the return
-            // direction and receives a plain ACK. A retransmitted request must
-            // be ACKed again without restarting an in-progress close command.
-            const auto distance=control.psn-rx_cur_psn;
-            const bool duplicate=distance==0 || distance>=0x80000000u || received_rx_psns_.count(control.psn);
-            if (duplicate) {
-                if (control.flags.retx) sendAck(UET_HDR_NONE,0,0,control.psn,nullptr,false);
-                break;
-            }
-            if (mode==ROD && distance!=1) {
-                sendNack(control.flags.retx,control.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr); break;
-            }
-            if (mode==RUD && distance>MPR) break;
-            received_rx_psns_.insert(control.psn); completed_rx_psns_.insert(control.psn);
-            while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
-            advanceCumulativeAck();
-            sendAck(UET_HDR_NONE,0,0,control.psn,nullptr,false);
-            if (!close_req && !closing && state!=CLOSE_ACK_WAIT) closeReq();
+        case Negotiation:
+            // Optional feature negotiation is not enabled; a plain ACK is the
+            // prescribed response from such an implementation (§3.5.16.7).
+            rxCtrlNoop(pkt);
             break;
-        }
+        case Close_req:
+            if (acknowledgeNumberedControl(pkt) && !close_req && !closing && state!=CLOSE_ACK_WAIT) closeReq();
+            break;
             // case
         }
     }

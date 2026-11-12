@@ -542,6 +542,9 @@ struct PDStoNET_pkt
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
     uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
+    // Bytes following the CP's first four payload bytes. Negotiation has a
+    // variable payload (§3.5.16.7); these bytes are not an SES payload.
+    std::vector<uint8_t> control_extension;
     struct {
         uint8_t cp_ack_type=0,cp_ack_length=2,start_psn_method=0,reserved=0;
         uint32_t expected_psn=0;
