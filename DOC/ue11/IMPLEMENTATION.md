@@ -21,7 +21,9 @@ by each regression, concrete remaining placeholders and the next gated work.
   It uses the existing PDS/PDC implementation, not a replacement transport.
 - Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
-  immediate. Network atomics support signed/unsigned integer types and min, max,
+  immediate. Native integer bytes remain little endian while atomic operand fields
+are encoded in network byte order, checked against an independent reference
+endpoint. Network atomics support signed/unsigned integer types and min, max,
   sum, difference, product, logical/bitwise operations and atomic write. Fetching,
   compare-and-swap, floating-point types and semantic-control hints remain outside
   this increment's advertised atomic capabilities.
@@ -142,7 +144,7 @@ results are simulation parameters, not calibrated hardware performance.
 | M0 | Fixed baselines, reviewed initial inventory, normative-candidate extraction, regression/build/report tools. Full clause-by-clause review remains open. |
 | M1 | Working virtual runtime connected to original protocol state machines, cancellation/lifetime tests and replayable scenarios. |
 | M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. The full control/error/wrap matrix and CC ACK variants remain open. |
-| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute resource selection and protocol-driven message retirement are covered. A real experimental FI_MSG/WRITE provider runs; remaining AMO types/controls, API mappings and acceptance remain open. |
+| M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute resource selection and protocol-driven message retirement are covered. A real experimental FI_MSG/WRITE/integer-atomic/DGRAM provider runs; remaining AMO types/controls, API mappings and acceptance remain open. |
 | M4 | Basic packet-fabric substrate; congestion feedback and NSCC are not implemented. |
 | M5–M8 | Not implemented; remain subsequent gated milestones. |
 
@@ -151,7 +153,7 @@ pinned reference's `libuet_fabric.so`/`uet` application now build successfully.
 The optional `softue` libfabric provider now loads and runs public fi_* calls.
 The current executor has no CAP_NET_RAW. An independent process test therefore
 links unchanged reference SES/PDS code with a test-only NIC override that carries
-frames over unprivileged sockets. It verifies WRITE/SEND, a return SEND and Clear
+frames over unprivileged sockets. It verifies WRITE/SEND, a non-fetching uint64 SUM, a return SEND and Clear
 retirement. Raw-socket/veth interoperability remains separate and unverified.
 
 The optional independent comparison builds a small C harness against the reference

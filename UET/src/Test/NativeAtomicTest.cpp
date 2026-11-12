@@ -20,6 +20,26 @@ private:
     IPacketPort& lower_;
 };
 
+class AtomicWireProbe : public IPacketPort {
+public:
+    explicit AtomicWireProbe(IPacketPort& lower):lower_(lower) {}
+    SendResult try_send(const Frame& frame) override {
+        const auto packet=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        if (!checked && packet.PDS_type==RUOD_req_header && packet.SESpkt.bth_header.Standard_Header.opcode==3) {
+            // Independent expected encoding of uint64_t(1), not a codec
+            // round-trip or a comparison against the conversion helper.
+            CHECK(packet.SESpkt.payload==std::vector<uint8_t>({0,0,0,0,0,0,0,1}));
+            checked=true;
+        }
+        return lower_.try_send(frame);
+    }
+    void set_receiver(Receiver receiver) override { lower_.set_receiver(std::move(receiver)); }
+    void set_writable_handler(Writable callback) override { lower_.set_writable_handler(std::move(callback)); }
+    bool checked=false;
+private:
+    IPacketPort& lower_;
+};
+
 int main() {
     try {
         // Independent arithmetic boundary checks: signed comparison and
@@ -34,7 +54,8 @@ int main() {
         auto& source_port=fabric.add_host(1); auto& target_port=fabric.add_host(2);
         fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
         LostAcknowledgementPort lossy_target(target_port);
-        PdsHost source_host(1,event_loop,trace,source_port),target_host(2,event_loop,trace,lossy_target);
+        AtomicWireProbe wire_probe(source_port);
+        PdsHost source_host(1,event_loop,trace,wire_probe),target_host(2,event_loop,trace,lossy_target);
         Endpoint source(1,source_host,event_loop,trace,17),target(2,target_host,event_loop,trace,17);
         source.memory().add_job(1); target.memory().add_job(1);
         const auto region=target.memory().register_region(1,1,1024,7);
@@ -43,6 +64,7 @@ int main() {
         source.submit(atomic); event_loop.run_until(5*kMillisecond);
         Completion completion{};
         CHECK(source.poll_completion(completion) && completion.status==CompletionStatus::Success);
+        CHECK(wire_probe.checked);
         CHECK(target.memory().read(1,1,region.key,0,8)==atomic.payload); // Sum executes once despite lost ACKs.
         CHECK(!source.poll_completion(completion));
 

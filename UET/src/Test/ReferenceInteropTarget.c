@@ -97,13 +97,13 @@ int main(void) {
     uint8_t memory[4096]={0},receive_buffer[32]={0};
     setenv("UET_PDS","pds",1); setenv("UET_PDS_ACK_TYPE","ack",1);
     REQUIRE_SUCCESS(uet_initialize(&instance));
-    hints->caps=FI_MSG|FI_RMA;
+    hints->caps=FI_MSG|FI_RMA|FI_ATOMIC;
     REQUIRE_SUCCESS(uet_getinfo(instance,NULL,hints,&info));
     info->rx_attr->size=16; info->tx_attr->size=16; info->tx_attr->msg_order=FI_ORDER_SAS;
     info->tx_attr->op_flags=FI_DELIVERY_COMPLETE;
     info->domain_attr->mr_mode|=FI_MR_PROV_KEY;
     REQUIRE_SUCCESS(uet_domain(instance,&fabric,info,&fabric_domain,NULL,NULL,NULL,&domain));
-    REQUIRE_SUCCESS(uet_mr_reg(domain,memory,sizeof(memory),FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE,
+    REQUIRE_SUCCESS(uet_mr_reg(domain,memory,sizeof(memory),FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE|FI_ATOMIC,
         UET_MR_KEY_NONE,0,NULL,&region));
     REQUIRE_SUCCESS(uet_endpoint(domain,info,&fabric_endpoint,NULL,&endpoint));
     REQUIRE_SUCCESS(uet_ep_bind_mr(endpoint,region,0));
@@ -136,6 +136,9 @@ int main(void) {
                 fprintf(stderr,"FAIL reference target memory at %zu: %u\n",byte,memory[byte]); return 1;
             }
             if (memcmp(receive_buffer,"abc",3)) return 1;
+            for (size_t byte=0;byte<8;++byte) if (memory[3072+byte]!=(byte==0?1:0)) {
+                fprintf(stderr,"FAIL reference atomic byte %zu: %u\n",byte,memory[3072+byte]); return 1;
+            }
             REQUIRE_SUCCESS((int)uet_send(endpoint,1,reply,sizeof(reply),NULL,peer,(void*)2));
             reply_started=true;
         }
@@ -151,6 +154,6 @@ int main(void) {
     REQUIRE_SUCCESS(uet_cq_close(receive_cq)); REQUIRE_SUCCESS(uet_mr_close(region));
     REQUIRE_SUCCESS(uet_domain_close(domain)); REQUIRE_SUCCESS(uet_finalize(instance));
     fi_freeinfo(info); fi_freeinfo(hints);
-    puts("PASS reference: unchanged SES/PDS received WRITE/SEND and sent a verified reply");
+    puts("PASS reference: unchanged SES/PDS received WRITE/SEND/AMO and sent a verified reply");
     return 0;
 }

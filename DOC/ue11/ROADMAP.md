@@ -19,7 +19,7 @@
 
 | 来源 | 使用方式 |
 |---|---|
-| [UE Specification 1.1](/workspace/attachments/e08a9b60-7d8e-468b-884f-041c53b800c2/UE-Specification-1.1.pdf) | 规范依据，以 §3.3 的 Profile 矩阵及各层规范要求建立验收项 |
+| [UE Specification 1.1](/workspace/attachments/8e9bba17-5adb-426d-abc7-11b4849302ac/UE-Specification-1.1.pdf) | 规范依据，以 §3.3 的 Profile 矩阵及各层规范要求建立验收项 |
 | [Soft-UE](https://github.com/lipu0324/Soft-UE/tree/4a4e6d874909720097b1ae20302a538a97116976) | 自研实现基线，提交 `4a4e6d874909` |
 | [uet-ref-prov](/workspace/uet-ref-prov/README.md) | 差分测试、报文互通和选择性复用，提交 `5b4e0491329b` |
 

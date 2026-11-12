@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <stdexcept>
+#include <algorithm>
+#include <vector>
 
 namespace UET::SES {
 
@@ -21,6 +23,17 @@ inline std::size_t integer_atomic_width(IntegerAtomicDatatype datatype) {
     const auto encoding=static_cast<uint8_t>(datatype);
     if (encoding>7) throw std::invalid_argument("unsupported integer atomic datatype");
     return std::size_t{1}<<(encoding/2);
+}
+
+// The native memory model represents integers in little-endian bytes. Atomic
+// operand fields use network order on the standard wire (§3.4.3.5/§3.5.25).
+// This element-wise involution is used at both SES wire boundaries; ordinary
+// SEND/WRITE payloads remain opaque. Independent reference interop checks it.
+inline void convert_integer_atomic_byte_order(std::vector<uint8_t>& operands,IntegerAtomicDatatype datatype) {
+    const auto width=integer_atomic_width(datatype);
+    if (operands.size()%width) throw std::invalid_argument("incomplete atomic element");
+    for (size_t offset=0;offset<operands.size();offset+=width)
+        std::reverse(operands.begin()+offset,operands.begin()+offset+width);
 }
 
 inline uint64_t integer_atomic_result(uint64_t target,uint64_t operand,

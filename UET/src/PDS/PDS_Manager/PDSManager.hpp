@@ -177,7 +177,7 @@ private:
     bool resource_check_due_=false, checking_resources_=false;
 
     uint16_t initiatorCapacity() const {
-        return runtime_?std::min<uint16_t>(runtime_->initiator_context_limit,MAX_PDC):MAX_PDC;
+        return runtime_?std::min<uint16_t>(runtime_->initiator_context_limit,MAX_PDC-1):MAX_PDC-1;
     }
     uint16_t targetCapacity() const {
         return runtime_?std::min<uint16_t>(runtime_->target_context_limit,MAX_PDC):MAX_PDC;
@@ -326,6 +326,11 @@ public:
         else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
 
         if (starts_connection) {
+            if (!remote_pdc_id) {
+                // §3.5.8.2 reserves ID zero for replies without a valid PDC.
+                // A SYN must never create a context under that identity.
+                ++event_cnt; sendNack(&received_packet,UET_PDC_HDR_MISMATCH); return;
+            }
             const PeerTuple peer{received_packet.src_fep,received_packet.dst_fep,remote_pdc_id};
             const auto retired=retired_receive_contexts_.find(peer);
             if (runtime_ && retired!=retired_receive_contexts_.end()) {
@@ -537,7 +542,7 @@ public:
     {
         // PDC application logic
         // Simple simulation here, actual logic needs implementation based on specific requirements
-        if (pdc_id >= MAX_PDC * 2) return false;
+        if (!pdc_id || pdc_id >= MAX_PDC * 2) return false;
         if (pdc_id<MAX_PDC && IPDC_Processmanager.getActiveProcessCount()>=initiatorCapacity()) return false;
         if (pdc_id>=MAX_PDC && TPDC_Processmanager.getActiveProcessCount()>=targetCapacity()) return false;
         if (!pdc_list[pdc_id].is_open)
@@ -898,7 +903,7 @@ public:
                                  (uint64_t{trafficclass} << 56) ^ (uint64_t{deliverymode} << 48);
         const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % capacity;
         for (uint16_t offset=0;offset<capacity;++offset) {
-            const uint16_t id = (first+offset)%capacity;
+            const uint16_t id = 1+(first+offset)%capacity;
             if (!pdc_list[id].is_open) {
                 for (auto old=tx_contexts_.begin();old!=tx_contexts_.end();)
                     if (old->second==id) old=tx_contexts_.erase(old); else ++old;

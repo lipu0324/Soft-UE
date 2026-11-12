@@ -7,6 +7,7 @@
 #include <rdma/fi_endpoint.h>
 #include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
+#include <rdma/fi_atomic.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <stdio.h>
@@ -24,22 +25,31 @@ int main(int argc,char** argv) {
     CHECK(hints!=NULL);
     hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
     hints->caps=FI_MSG|FI_RMA; hints->addr_format=FI_SOCKADDR_IN;
+    hints->domain_attr->mr_mode=~3; // fi_info's supported-mode mask, not required modes.
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && !strcmp(info->fabric_attr->prov_name,"softue"));
-    CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_ATOMIC|FI_TAGGED)));
+    CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_TAGGED)) && (info->caps&FI_ATOMIC));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
     struct fid_fabric *fabric=NULL; struct fid_domain *domain=NULL;
     struct fid_av *addresses=NULL; struct fid_cq *completions=NULL;
-    struct fid_ep *endpoint=NULL; struct fid_mr *region=NULL,*local_only=NULL;
+    struct fid_ep *endpoint=NULL; struct fid_mr *region=NULL,*local_only=NULL,*atomic_region=NULL;
     SUCCESS(fi_fabric(info->fabric_attr,&fabric,NULL));
     SUCCESS(fi_domain(fabric,info,&domain,NULL));
     CHECK(fi_close(&fabric->fid)==-FI_EBUSY);
     uint8_t buffer[8192]={0},protected_buffer[8]={0};
+    uint64_t counters[512]={0},increments[512];
+    for (size_t element=0;element<512;++element) increments[element]=1;
     // Register before the endpoint exists: the provider's domain MR registry
     // must be the authority used by the eventual SES endpoint.
     SUCCESS(fi_mr_reg(domain,buffer,sizeof(buffer),FI_SEND|FI_RECV|FI_READ|FI_WRITE|FI_REMOTE_WRITE,0,0,0,&region,NULL));
     SUCCESS(fi_mr_reg(domain,protected_buffer,sizeof(protected_buffer),FI_WRITE,0,0,0,&local_only,NULL));
+    SUCCESS(fi_mr_reg(domain,counters,sizeof(counters),FI_ATOMIC|FI_REMOTE_READ|FI_REMOTE_WRITE,
+        0,0,0,&atomic_region,NULL));
+    struct fi_atomic_attr atomic_limits;
+    SUCCESS(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,0));
+    CHECK(atomic_limits.size==8 && atomic_limits.count>=512);
+    CHECK(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,FI_FETCH_ATOMIC)==-FI_EOPNOTSUPP);
     CHECK(fi_mr_key(region)!=fi_mr_key(local_only));
     CHECK(fi_mr_key(region)&(1ULL<<48));
     struct fi_cq_attr queue_attributes={0}; queue_attributes.format=FI_CQ_FORMAT_DATA;
@@ -51,16 +61,20 @@ int main(int argc,char** argv) {
     SUCCESS(fi_ep_bind(endpoint,&addresses->fid,0));
     SUCCESS(fi_ep_bind(endpoint,&completions->fid,FI_TRANSMIT|FI_RECV));
     SUCCESS(fi_enable(endpoint));
+    size_t atomic_count=0;
+    SUCCESS(fi_atomicvalid(endpoint,FI_UINT64,FI_SUM,&atomic_count)); CHECK(atomic_count>=512);
+    CHECK(fi_atomicvalid(endpoint,FI_FLOAT,FI_SUM,&atomic_count)==-FI_EOPNOTSUPP && atomic_count==0);
+    CHECK(fi_fetch_atomicvalid(endpoint,FI_UINT64,FI_SUM,&atomic_count)==-FI_EOPNOTSUPP && atomic_count==0);
     CHECK(fi_close(&addresses->fid)==-FI_EBUSY && fi_close(&completions->fid)==-FI_EBUSY);
     struct sockaddr_in local={0}; size_t local_size=sizeof(local);
     SUCCESS(fi_getname(&endpoint->fid,&local,&local_size));
     CHECK(local.sin_family==AF_INET && local.sin_port);
     SUCCESS(fi_recv(endpoint,buffer+(server?5000:0),32,fi_mr_desc(region),FI_ADDR_UNSPEC,(void*)77));
     if (server) SUCCESS(fi_recv(endpoint,buffer+5100,8,NULL,FI_ADDR_UNSPEC,(void*)78));
-    fprintf(stderr,"READY %u %llu %llu\n",ntohs(local.sin_port),(unsigned long long)fi_mr_key(region),
-        (unsigned long long)fi_mr_key(local_only)); fflush(stderr);
-    unsigned int peer_port=0; unsigned long long peer_key=0,peer_protected_key=0;
-    CHECK(scanf("%u %llu %llu",&peer_port,&peer_key,&peer_protected_key)==3);
+    fprintf(stderr,"READY %u %llu %llu %llu\n",ntohs(local.sin_port),(unsigned long long)fi_mr_key(region),
+        (unsigned long long)fi_mr_key(local_only),(unsigned long long)fi_mr_key(atomic_region)); fflush(stderr);
+    unsigned int peer_port=0; unsigned long long peer_key=0,peer_protected_key=0,peer_atomic_key=0;
+    CHECK(scanf("%u %llu %llu %llu",&peer_port,&peer_key,&peer_protected_key,&peer_atomic_key)==4);
     struct sockaddr_in peer_address={0}; peer_address.sin_family=AF_INET;
     peer_address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); peer_address.sin_port=htons((uint16_t)peer_port);
     fi_addr_t peer;
@@ -71,6 +85,7 @@ int main(int argc,char** argv) {
     if (!server) {
         for (size_t byte=0;byte<4097;++byte) buffer[16+byte]=(uint8_t)(byte*7);
         SUCCESS(fi_writedata(endpoint,buffer+16,4097,fi_mr_desc(region),123,peer,16,peer_key,(void*)11));
+        SUCCESS(fi_atomic(endpoint,increments,512,NULL,peer,0,peer_atomic_key,FI_UINT64,FI_SUM,(void*)17));
         SUCCESS(fi_send(endpoint,"abc",3,NULL,peer,(void*)12));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,0,(void*)13));
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
@@ -100,13 +115,14 @@ int main(int argc,char** argv) {
         if (server && receives==1 && remote_writes==1 && !reply_started) {
             CHECK(!memcmp(buffer+5000,"abc",3));
             for (size_t byte=0;byte<4097;++byte) CHECK(buffer[16+byte]==(uint8_t)(byte*7));
+            for (size_t element=0;element<512;++element) CHECK(counters[element]==1);
             SUCCESS(fi_send(endpoint,"reply",5,NULL,peer,(void*)14)); reply_started=1;
         }
-        if (!server && send_completions==2 && errors==2 && receives==1 && !done_started) {
+        if (!server && send_completions==3 && errors==2 && receives==1 && !done_started) {
             CHECK(!memcmp(buffer,"reply",5));
             SUCCESS(fi_send(endpoint,"done",4,NULL,peer,(void*)15)); done_started=1;
         }
-        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==3);
+        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==4);
         if (!finished) poll(NULL,0,1); // Application wait; fi_cq_read owns manual progress.
     }
     if (!finished) fprintf(stderr,"incomplete server=%d sends=%zu errors=%zu receives=%zu remote_writes=%zu\n",
@@ -114,9 +130,10 @@ int main(int argc,char** argv) {
     CHECK(finished);
     for (size_t byte=0;byte<sizeof(protected_buffer);++byte) CHECK(protected_buffer[byte]==0);
     SUCCESS(fi_close(&endpoint->fid)); SUCCESS(fi_close(&region->fid)); SUCCESS(fi_close(&local_only->fid));
+    SUCCESS(fi_close(&atomic_region->fid));
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&completions->fid));
     SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints);
-    printf("PASS libfabric %s: plugin discovery, manual progress, registered buffers, SEND/WRITE IMM and CQ errors\n",server?"server":"client");
+    printf("PASS libfabric %s: SEND/WRITE IMM, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
     return 0;
 }

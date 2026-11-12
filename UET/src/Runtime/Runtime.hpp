@@ -52,7 +52,7 @@ struct Services {
     std::function<void(const PdcEvent&)> pdc_event;
     // Simulator resource policy, not protocol constants. Each direction owns
     // an independent PDC ID pool; tests can exhaust small pools reproducibly.
-    uint16_t initiator_context_limit = 512;
+    uint16_t initiator_context_limit = 511; // ID zero is reserved (§3.5.8.2).
     uint16_t target_context_limit = 512;
     size_t pending_request_limit = 16384;
     Time pending_request_timeout = 100*kMillisecond;

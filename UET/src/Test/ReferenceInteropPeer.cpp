@@ -44,12 +44,17 @@ int main() {
             write.payload.resize(2049);
             for (size_t byte=0;byte<write.payload.size();++byte) write.payload[byte]=static_cast<uint8_t>(byte*7);
             endpoint.submit(write);
+            Operation increment; increment.type=OperationType::Atomic; increment.peer=2;
+            increment.target_pid=target_pid; increment.target_resource=target_resource;
+            increment.remote_key=target_key; increment.remote_offset=3072;
+            increment.payload={1,0,0,0,0,0,0,0};
+            endpoint.submit(increment);
             Operation send; send.type=OperationType::Send; send.peer=2; send.target_pid=target_pid;
             send.target_resource=target_resource; send.payload={'a','b','c'};
             endpoint.submit(send);
             size_t sends=0,receives=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
-            while ((sends!=2 || receives!=1 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
+            while ((sends!=3 || receives!=1 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
                 port.progress(); runtime.progress(10000);
                 Completion completion{};
                 while (endpoint.poll_completion(completion)) {
@@ -63,7 +68,7 @@ int main() {
                 }
                 pollfd readiness{port.descriptor(),POLLIN,0}; ::poll(&readiness,1,1);
             }
-            if (sends!=2 || receives!=1 || endpoint.retained_receive_messages()!=0) {
+            if (sends!=3 || receives!=1 || endpoint.retained_receive_messages()!=0) {
                 std::cerr<<"FAIL Soft-UE interop timeout sends="<<sends<<" receives="<<receives<<'\n';
                 for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                 return 1;
@@ -71,7 +76,7 @@ int main() {
             CHECK(receive_buffer[0]==6 && receive_buffer[1]==5 && receive_buffer[2]==4);
             endpoint.close(); host.close(); port.close(); CHECK(loop.pending()==0);
         }
-        std::cout<<"PASS Soft-UE: WRITE/SEND completed against the reference stack and reply reached host memory\n";
+        std::cout<<"PASS Soft-UE: WRITE/SEND/AMO completed against the reference stack and reply reached host memory\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<"FAIL "<<error.what()<<'\n'; return 1; }
 }

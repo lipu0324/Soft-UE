@@ -155,6 +155,7 @@ public:
                 }
                 if (offset) { semantic_header.diff.som_false.payload_length=count; semantic_header.diff.som_false.message_offset=offset; }
                 request.pkt.payload.assign(operation.payload.begin()+offset,operation.payload.begin()+offset+count);
+                if (is_atomic) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
                 request.pkt_len=static_cast<uint16_t>(44+(is_atomic?4:0)+count);
                 if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation");
                 offset+=count;
@@ -450,9 +451,11 @@ private:
                 reply(request,SemanticReturnCode::OperationViolation,0); return;
             }
             if (semantic_header.opcode==3) {
+                auto operands=request.pkt.payload;
+                convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
                 memory_.atomic_elements(semantic_header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
                     static_cast<IntegerAtomicOperation>(message.atomic_operation),
-                    static_cast<IntegerAtomicDatatype>(message.atomic_datatype),request.pkt.payload,message.resource_index);
+                    static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index);
             } else if (semantic_header.opcode!=0) memory_.write(semantic_header.job_id,message.pid,message.key,
                 Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
             message.segments.emplace(offset,count); message.received+=count;

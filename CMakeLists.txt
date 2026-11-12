@@ -111,6 +111,13 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
       --binary $<TARGET_FILE:libfabric_provider_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
     set_tests_properties(libfabric_provider_processes PROPERTIES TIMEOUT 40)
+    add_executable(libfabric_datagram_peer ${CORE}/Test/LibfabricDatagramPeer.c)
+    target_include_directories(libfabric_datagram_peer PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_datagram_peer PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_test(NAME libfabric_datagram_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_datagram_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_datagram_processes PROPERTIES TIMEOUT 40)
   endif()
   add_test(NAME realtime_endpoint_processes COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_realtime_endpoint.py --binary $<TARGET_FILE:realtime_endpoint_peer>)

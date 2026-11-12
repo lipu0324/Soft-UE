@@ -186,7 +186,7 @@
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Close/SYN safety, retained per-ID PSNs, late old SYN/ACK rejection, bounded resource queues and reuse tested. Full control/error/sequence-wrap matrix remains open."
+      "evidence_note": "Close/SYN safety, retained per-ID PSNs, late old SYN/ACK rejection, bounded resource queues and reuse tested. Full control/error/sequence-wrap matrix remains open. Reserved PDCID zero is excluded from allocation and rejected on SYN."
     },
     {
       "id": "PDS-TRIM",
@@ -315,14 +315,15 @@
       "summary": "真实 libfabric 2.0 provider",
       "status": "partial",
       "tests": [
-        "libfabric_provider_processes"
+        "libfabric_provider_processes",
+        "libfabric_datagram_processes"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "A dynamically loaded libfabric 2.0 provider exercises FI_MSG and WRITE/WRITE IMM, host buffers and CQ errors over the common SES/PDS kernel. Atomic/DGRAM mappings, further flags and profile acceptance remain open."
+      "evidence_note": "A dynamically loaded libfabric 2.0 provider exercises FI_MSG, WRITE/WRITE IMM, bulk non-fetching integer atomics and UUD/DGRAM through the common kernel. Remaining recovery/error/flag mappings and full-profile acceptance remain open."
     },
     {
       "id": "CMS-NSCC",
@@ -549,7 +550,7 @@
         "reference_process_interop"
       ],
       "profiles": [],
-      "evidence_note": "Independent processes use unchanged pinned reference SES/PDS and a test-only UDP-frame NIC adapter: WRITE/SEND and return SEND, completions and Clear retirement pass. Raw-NIC/veth tests and additional operation/encapsulation/fault combinations remain open."
+      "evidence_note": "Independent processes use unchanged pinned reference SES/PDS and a test-only UDP-frame NIC adapter: WRITE/SEND, uint64 SUM and return SEND, completions and Clear retirement pass. Raw-NIC/veth tests and additional operation/encapsulation/fault combinations remain open."
     },
     {
       "id": "SES-ADDRESS",

@@ -9,6 +9,7 @@
 #include <rdma/fi_endpoint.h>
 #include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
+#include <rdma/fi_atomic.h>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -16,7 +17,13 @@
 
 namespace {
 using namespace UET;
-constexpr uint64_t supported_caps=FI_MSG|FI_SEND|FI_RECV|FI_RMA|FI_WRITE|FI_REMOTE_WRITE;
+constexpr uint64_t datagram_caps=FI_MSG|FI_SEND|FI_RECV;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__
+constexpr bool native_atomic_platform=true;
+#else
+constexpr bool native_atomic_platform=false;
+#endif
+constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|(native_atomic_platform?FI_ATOMIC:0);
 constexpr uint64_t supported_operation_flags=FI_COMPLETION|FI_DELIVERY_COMPLETE|FI_TRANSMIT_COMPLETE;
 
 template<class Signature> struct Unsupported;
@@ -49,6 +56,7 @@ struct ProviderDomain {
     size_t children=0;
     SES::MemoryRegistry memory;
     ProviderEndpoint* endpoint=nullptr;
+    bool datagram=false;
 };
 struct ProviderAddressVector {
     fid_av handle{};
@@ -82,6 +90,7 @@ struct ProviderEndpoint {
     ProviderCompletionQueue *send_cq=nullptr,*receive_cq=nullptr;
     sockaddr_in local_address{};
     bool enabled=false;
+    bool datagram=false;
     uint64_t next_receive_token=0;
     Runtime::RealtimeRuntime runtime;
     Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
@@ -106,6 +115,49 @@ fi_ops_ep endpoint_ops{};
 fi_ops_cm connection_ops{};
 fi_ops_msg message_ops{};
 fi_ops_rma rma_ops{};
+fi_ops_atomic atomic_ops{};
+
+std::optional<SES::IntegerAtomicDatatype> atomic_datatype(fi_datatype datatype) {
+    switch (datatype) {
+    case FI_INT8: return SES::IntegerAtomicDatatype::Int8;
+    case FI_UINT8: return SES::IntegerAtomicDatatype::Uint8;
+    case FI_INT16: return SES::IntegerAtomicDatatype::Int16;
+    case FI_UINT16: return SES::IntegerAtomicDatatype::Uint16;
+    case FI_INT32: return SES::IntegerAtomicDatatype::Int32;
+    case FI_UINT32: return SES::IntegerAtomicDatatype::Uint32;
+    case FI_INT64: return SES::IntegerAtomicDatatype::Int64;
+    case FI_UINT64: return SES::IntegerAtomicDatatype::Uint64;
+    default: return {};
+    }
+}
+std::optional<SES::IntegerAtomicOperation> atomic_operation(fi_op operation) {
+    using Operation=SES::IntegerAtomicOperation;
+    switch (operation) {
+    case FI_MIN: return Operation::Minimum;
+    case FI_MAX: return Operation::Maximum;
+    case FI_SUM: return Operation::Sum;
+    case FI_DIFF: return Operation::Difference;
+    case FI_PROD: return Operation::Product;
+    case FI_LOR: return Operation::LogicalOr;
+    case FI_LAND: return Operation::LogicalAnd;
+    case FI_BOR: return Operation::BitwiseOr;
+    case FI_BAND: return Operation::BitwiseAnd;
+    case FI_LXOR: return Operation::LogicalXor;
+    case FI_BXOR: return Operation::BitwiseXor;
+    case FI_ATOMIC_WRITE: return Operation::Write;
+    default: return {};
+    }
+}
+int query_atomic(fid_domain* domain,fi_datatype datatype,fi_op operation,fi_atomic_attr* attributes,uint64_t flags) {
+    if (!attributes) return -FI_EINVAL;
+    *attributes={0,0};
+    const auto native_type=atomic_datatype(datatype);
+    if (!native_atomic_platform || (domain && owner<ProviderDomain>(domain).datagram) ||
+        flags || !native_type || !atomic_operation(operation)) return -FI_EOPNOTSUPP;
+    attributes->size=SES::integer_atomic_width(*native_type);
+    attributes->count=16*1024*1024/attributes->size;
+    return 0;
+}
 
 void initialize_fid(fid& handle,size_t kind,void* context,fi_ops* operations=&object_ops) {
     handle.fclass=kind; handle.context=context; handle.ops=operations;
@@ -214,10 +266,11 @@ int close_object(fid* handle) {
     });
 }
 
-int open_domain(fid_fabric* fabric,fi_info*,fid_domain** result,void* context) {
+int open_domain(fid_fabric* fabric,fi_info* info,fid_domain** result,void* context) {
     return guarded([&]() -> int {
         if (!result) return -FI_EINVAL;
         auto domain=std::make_unique<ProviderDomain>(); domain->fabric=&owner<ProviderFabric>(fabric);
+        domain->datagram=info && info->ep_attr && info->ep_attr->type==FI_EP_DGRAM;
         domain->memory.add_job(1);
         initialize_fid(domain->handle.fid,FI_CLASS_DOMAIN,context);
         domain->handle.ops=&domain_ops; domain->handle.mr=&memory_ops;
@@ -327,6 +380,7 @@ int register_memory(fid* domain_handle,const void* buffer,size_t length,uint64_t
         uint8_t permissions=0;
         if (access&FI_REMOTE_READ) permissions|=static_cast<uint8_t>(SES::Access::Read);
         if (access&FI_REMOTE_WRITE) permissions|=static_cast<uint8_t>(SES::Access::Write);
+        if (access&FI_ATOMIC) permissions|=static_cast<uint8_t>(SES::Access::Atomic);
         auto region=std::make_unique<ProviderRegion>(); region->domain=&domain;
         region->region=domain.memory.register_buffer(1,0,static_cast<uint8_t*>(const_cast<void*>(buffer)),length,permissions);
         initialize_fid(region->handle.fid,FI_CLASS_MR,context);
@@ -362,21 +416,26 @@ int bind_endpoint(fid* handle,fid* resource,uint64_t flags) {
 }
 int control_endpoint(fid* handle,int command,void*) {
     return guarded([&]() -> int {
-    if (command!=FI_ENABLE) return -FI_ENOSYS;
-    auto& endpoint=owner<ProviderEndpoint>(handle);
-    if (endpoint.enabled) return -FI_EOPBADSTATE;
-    if (!endpoint.addresses || !endpoint.send_cq || !endpoint.receive_cq) return -FI_ENOCQ;
-    for (const auto& peer:endpoint.addresses->addresses) if (peer) configure_peer(endpoint,*peer);
-    endpoint.enabled=true; return 0;
+        if (command!=FI_ENABLE) return -FI_ENOSYS;
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (endpoint.enabled) return -FI_EOPBADSTATE;
+        if (!endpoint.addresses || !endpoint.send_cq || !endpoint.receive_cq) return -FI_ENOCQ;
+        for (const auto& peer:endpoint.addresses->addresses) if (peer) configure_peer(endpoint,*peer);
+        endpoint.enabled=true; return 0;
     });
 }
 
 int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context) {
     return guarded([&]() -> int {
         auto& domain=owner<ProviderDomain>(handle);
-        if (!info || !result || info->ep_attr->type!=FI_EP_RDM || (info->caps&~supported_caps)) return -FI_EINVAL;
+        if (!info || !result || !info->ep_attr ||
+            (info->ep_attr->type!=FI_EP_RDM && info->ep_attr->type!=FI_EP_DGRAM)) return -FI_EINVAL;
+        const bool datagram=info->ep_attr->type==FI_EP_DGRAM;
+        if (datagram!=domain.datagram) return -FI_EINVAL;
+        if (info->caps&~(datagram?datagram_caps:supported_caps)) return -FI_EINVAL;
         if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
         auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
+        endpoint->datagram=datagram;
         endpoint->local_address.sin_family=AF_INET;
         endpoint->local_address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
         if (info->src_addr) {
@@ -395,6 +454,7 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
         initialize_fid(endpoint->handle.fid,FI_CLASS_EP,context,&endpoint_object_ops);
         endpoint->handle.ops=&endpoint_ops; endpoint->handle.cm=&connection_ops;
         endpoint->handle.msg=&message_ops; endpoint->handle.rma=&rma_ops;
+        endpoint->handle.atomic=&atomic_ops;
         domain.endpoint=endpoint.get(); ++domain.children;
         *result=&endpoint.release()->handle; return 0;
     });
@@ -414,18 +474,73 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
-        if ((length && !buffer) || length>16*1024*1024) return -FI_EMSGSIZE;
+        if (write && endpoint.datagram) return -FI_EOPNOTSUPP;
+        if ((length && !buffer) || length>(endpoint.datagram?1024:16*1024*1024)) return -FI_EMSGSIZE;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
         if (!peer) return -FI_EADDRNOTAVAIL;
-        SES::Operation operation; operation.type=write?SES::OperationType::Write:SES::OperationType::Send;
+        SES::Operation operation; operation.type=write?SES::OperationType::Write:
+            (endpoint.datagram?SES::OperationType::DatagramSend:SES::OperationType::Send);
         operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
         if (length) operation.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+length);
         const auto identifier=endpoint.semantic->submit(std::move(operation));
         endpoint.transmits.emplace(identifier,ApplicationOperation{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
         return 0;
     });
+}
+
+ssize_t write_atomic(fid_ep* handle,const void* buffer,size_t count,void*,fi_addr_t destination,
+                       uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    return guarded([&]() -> ssize_t {
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (!endpoint.enabled) return -FI_EOPBADSTATE;
+        if (endpoint.datagram) return -FI_EOPNOTSUPP;
+        fi_atomic_attr limits{};
+        const int supported=query_atomic(nullptr,datatype,operation,&limits,0);
+        if (supported) return supported;
+        if (!buffer || !count || count>limits.count || offset%limits.size) return -FI_EINVAL;
+        if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
+        progress(*endpoint.domain);
+        const auto peer=resolve_peer(endpoint,destination);
+        if (!peer) return -FI_EADDRNOTAVAIL;
+        SES::Operation request; request.type=SES::OperationType::Atomic; request.peer=*peer;
+        request.remote_key=key; request.remote_offset=offset;
+        request.atomic_datatype=*atomic_datatype(datatype); request.atomic_operation=*atomic_operation(operation);
+        const size_t bytes=count*limits.size; // count was bounded before multiplying.
+        request.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+bytes);
+        // The native integer-memory model is little endian. The platform used
+        // by this provider is Linux/little endian; SES separately encodes each
+        // operand in network order. Fetching/CAS capabilities remain absent.
+        const auto identifier=endpoint.semantic->submit(std::move(request));
+        endpoint.transmits.emplace(identifier,ApplicationOperation{context,FI_ATOMIC|FI_WRITE,const_cast<void*>(buffer)});
+        return 0;
+    });
+}
+ssize_t write_atomic_vector(fid_ep* endpoint,const fi_ioc* buffers,void**,size_t count,fi_addr_t destination,
+                             uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    if (!buffers || count!=1) return -FI_EINVAL;
+    return write_atomic(endpoint,buffers[0].addr,buffers[0].count,nullptr,destination,offset,key,datatype,operation,context);
+}
+ssize_t write_atomic_message(fid_ep* endpoint,const fi_msg_atomic* message,uint64_t flags) {
+    if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1 ||
+        (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
+    if (message->msg_iov[0].count!=message->rma_iov[0].count) return -FI_EINVAL;
+    return write_atomic_vector(endpoint,message->msg_iov,message->desc,1,message->addr,message->rma_iov[0].addr,
+        message->rma_iov[0].key,message->datatype,message->op,message->context);
+}
+int atomic_valid(fid_ep* handle,fi_datatype datatype,fi_op operation,size_t* count) {
+    if (!count) return -FI_EINVAL;
+    *count=0;
+    if (owner<ProviderEndpoint>(handle).datagram) return -FI_EOPNOTSUPP;
+    fi_atomic_attr attributes{};
+    const auto status=query_atomic(nullptr,datatype,operation,&attributes,0);
+    if (!status) *count=attributes.count;
+    return status;
+}
+int fetching_atomic_unavailable(fid_ep*,fi_datatype,fi_op,size_t* count) {
+    if (count) *count=0;
+    return -FI_EOPNOTSUPP;
 }
 ssize_t send_message(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,void* context) {
     return submit_operation(endpoint,buffer,length,destination,0,0,context,false);
@@ -436,6 +551,7 @@ ssize_t send_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi
 }
 ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
     if (!message || (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
+    if (owner<ProviderEndpoint>(endpoint).datagram && (flags&FI_DELIVERY_COMPLETE)) return -FI_EOPNOTSUPP;
     return send_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
 }
 ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
@@ -501,29 +617,39 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
     return guarded([&]() -> int {
         if (!result) return -FI_EINVAL;
         *result=nullptr;
+        const bool datagram=hints && hints->ep_attr && hints->ep_attr->type==FI_EP_DGRAM;
+        const auto available_caps=datagram?datagram_caps:supported_caps;
         if (version>FI_VERSION(2,0) || (flags&~(FI_SOURCE|FI_NUMERICHOST))) return -FI_ENODATA;
         if (hints) {
             // hints.mode lists modes the application can accommodate. This
             // provider requires none, so any application mode mask is usable.
-            if ((hints->caps&~supported_caps) ||
+            if ((hints->caps&~available_caps) ||
                 (hints->addr_format!=FI_FORMAT_UNSPEC && hints->addr_format!=FI_SOCKADDR_IN)) return -FI_ENODATA;
-            if (hints->ep_attr && hints->ep_attr->type!=FI_EP_UNSPEC && hints->ep_attr->type!=FI_EP_RDM) return -FI_ENODATA;
+            if (hints->ep_attr && hints->ep_attr->type!=FI_EP_UNSPEC &&
+                hints->ep_attr->type!=FI_EP_RDM && hints->ep_attr->type!=FI_EP_DGRAM) return -FI_ENODATA;
             if (hints->domain_attr && ((hints->domain_attr->threading!=FI_THREAD_UNSPEC && hints->domain_attr->threading!=FI_THREAD_DOMAIN) ||
                 hints->domain_attr->data_progress==FI_PROGRESS_AUTO || hints->domain_attr->auth_key_size ||
-                (hints->domain_attr->mr_mode&~FI_MR_PROV_KEY))) return -FI_ENODATA;
+                (hints->domain_attr->mr_mode && !(hints->domain_attr->mr_mode&FI_MR_PROV_KEY)))) return -FI_ENODATA;
+            // MR hints enumerate modes the application can follow (fi_info
+            // passes all current modes). Return our required PROV_KEY subset,
+            // rather than rejecting additional modes the application supports.
             if (hints->tx_attr && (hints->tx_attr->op_flags&~supported_operation_flags)) return -FI_ENODATA;
+            if (hints->tx_attr && ((datagram && (hints->tx_attr->op_flags&FI_DELIVERY_COMPLETE)) ||
+                (hints->tx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS)))) return -FI_ENODATA;
+            if (hints->rx_attr && (hints->rx_attr->msg_order&~(datagram?FI_ORDER_NONE:FI_ORDER_SAS))) return -FI_ENODATA;
         }
         std::unique_ptr<fi_info,decltype(&fi_freeinfo)> information(fi_allocinfo(),fi_freeinfo);
         if (!information) return -FI_ENOMEM;
         auto& info=*information;
-        info.caps=supported_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
-        info.ep_attr->type=FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
-        info.ep_attr->max_msg_size=16*1024*1024; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
-        info.tx_attr->caps=FI_MSG|FI_SEND|FI_RMA|FI_WRITE; info.tx_attr->size=4096;
-        info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1; info.tx_attr->op_flags=FI_DELIVERY_COMPLETE;
-        info.tx_attr->msg_order=FI_ORDER_SAS; info.tx_attr->comp_order=FI_ORDER_NONE;
-        info.rx_attr->caps=FI_MSG|FI_RECV|FI_RMA|FI_REMOTE_WRITE; info.rx_attr->size=4096;
-        info.rx_attr->iov_limit=1; info.rx_attr->msg_order=FI_ORDER_SAS; info.rx_attr->comp_order=FI_ORDER_NONE;
+        info.caps=available_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
+        info.ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
+        info.ep_attr->max_msg_size=datagram?1024:16*1024*1024; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
+        info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
+        info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
+        info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;
+        info.tx_attr->msg_order=datagram?FI_ORDER_NONE:FI_ORDER_SAS; info.tx_attr->comp_order=FI_ORDER_NONE;
+        info.rx_attr->caps=available_caps&~(FI_SEND|FI_WRITE); info.rx_attr->size=4096;
+        info.rx_attr->iov_limit=1; info.rx_attr->msg_order=datagram?FI_ORDER_NONE:FI_ORDER_SAS; info.rx_attr->comp_order=FI_ORDER_NONE;
         auto& attributes=*info.domain_attr;
         attributes.name=::strdup("softue"); attributes.threading=FI_THREAD_DOMAIN;
         attributes.control_progress=FI_PROGRESS_MANUAL; attributes.data_progress=FI_PROGRESS_MANUAL;
@@ -570,7 +696,7 @@ void initialize_operations() {
     domain_ops.size=sizeof(domain_ops); domain_ops.av_open=open_addresses;
     domain_ops.cq_open=open_completion_queue; domain_ops.endpoint=open_endpoint;
     UNSUPPORTED(domain_ops,scalable_ep); UNSUPPORTED(domain_ops,cntr_open); UNSUPPORTED(domain_ops,poll_open);
-    UNSUPPORTED(domain_ops,stx_ctx); UNSUPPORTED(domain_ops,srx_ctx); UNSUPPORTED(domain_ops,query_atomic);
+    UNSUPPORTED(domain_ops,stx_ctx); UNSUPPORTED(domain_ops,srx_ctx); domain_ops.query_atomic=query_atomic;
     UNSUPPORTED(domain_ops,query_collective); UNSUPPORTED(domain_ops,endpoint2);
     memory_ops.size=sizeof(memory_ops); memory_ops.reg=register_memory;
     memory_ops.regv=register_memory_vector; memory_ops.regattr=register_memory_attributes;
@@ -597,6 +723,12 @@ void initialize_operations() {
     rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
     UNSUPPORTED(rma_ops,read); UNSUPPORTED(rma_ops,readv); UNSUPPORTED(rma_ops,readmsg);
     UNSUPPORTED(rma_ops,inject); UNSUPPORTED(rma_ops,injectdata);
+    atomic_ops.size=sizeof(atomic_ops); atomic_ops.write=write_atomic; atomic_ops.writev=write_atomic_vector;
+    atomic_ops.writemsg=write_atomic_message; atomic_ops.writevalid=atomic_valid;
+    atomic_ops.readwritevalid=fetching_atomic_unavailable; atomic_ops.compwritevalid=fetching_atomic_unavailable;
+    UNSUPPORTED(atomic_ops,inject); UNSUPPORTED(atomic_ops,readwrite); UNSUPPORTED(atomic_ops,readwritev);
+    UNSUPPORTED(atomic_ops,readwritemsg); UNSUPPORTED(atomic_ops,compwrite); UNSUPPORTED(atomic_ops,compwritev);
+    UNSUPPORTED(atomic_ops,compwritemsg);
 }
 
 } // namespace
