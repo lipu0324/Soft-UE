@@ -15,7 +15,7 @@ UE 1.1 §3.5.5、§3.5.12.7 和 §3.5.15.3 规定初始 RTO 可配置在 0～8 �
 
 | 状态 | 用途 |
 |---|---|
-| `retry_cnt` | 当前没有启用独立 NACK 上限，故所有 NACK/RTO 重传都计入共同上限。当前上限仍为固定 5，配置完整范围和无限模式待补。 |
+| `retry_cnt` | 当前没有启用独立 NACK 上限，故所有 NACK/RTO 重传都计入共同上限；同时用作本地发送尝试的身份。 |
 | `timeout_retry_count` | 只在真正的 RTO 重传时增加，用于 `initial_rto_ns * 2^timeout_retry_count`。 |
 | `RetryCause` | CMS 或资源不足时，保存该待重传由 Timeout 还是 NegativeAcknowledgment 触发；准入恢复后继续使用原原因。 |
 
@@ -40,4 +40,25 @@ Probe 的独立计时同样使用纳秒；未变化窗口的再次查询至少�
 100 μs 内完成，防止配置被悄悄量化成 1 ms。
 
 按代码分组的 NACK 延迟、ACK 取消与 RUD/ROD 恢复见 [NACK 恢复](NACK-RECOVERY.md)。
-完整重试上限配置、无限重试、所有 NACK/READ/TSS 组合及新 Start_PSN 恢复仍待验收。
+所有 NACK/READ/TSS 组合及新 Start_PSN 恢复仍待验收。
+
+## 重试上限与无限配置
+
+`PdsHost::configure_retry_limit`、`Services::maximum_packet_retries` 和 YAML 顶层
+`max_packet_retries` 使用规范 §3.5.5 的范围：0～14 是有限重传次数，15 表示无限，
+默认5。0允许初始发送，但第一次需要重传时即失败。没有启用可选的独立 NACK
+上限，所以两种重传原因共用预算；它们仍分别决定是否增加 RTO 指数。公共配置在
+建连前完成，拒绝16、256等超范围值，不能先截断成窄整数再验证。
+
+本地计数和 NIC `TransmitIdentity::attempt` 使用64位。配置15不会在第15次重试时
+关闭，也不会在原16位计数边界回到0，破坏旧通知过滤或 Karn RTT 采样规则。
+虚拟时间、指数退避时长或64位身份无法继续表示时，模拟器报告明确的 overflow；
+它不会绕回旧时间/旧身份，也不会把表示上限解释为协议规定的失败次数。
+
+Probe 不占用数据 PSN，当前模拟器策略采用同一个配置控制它自己的重试预算；
+这是显式模拟策略。单独的诊断 Probe 失败不终止已成功的数据，但阻塞的数据若
+一直等不到窗口恢复则会报错。无限设置同时适用于该 Probe 策略。
+
+`retry_limit_test` 覆盖所有有限值0～14、NACK/RTO共同预算、超出15次后继续运行、
+65535→65536边界的旧 NIC 通知过滤、计数表示溢出、Probe 配置，以及配置生命周期。
+场景测试还检查上限0/1时实际 MAC 数据发送次数分别为1/2。

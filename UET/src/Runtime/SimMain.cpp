@@ -34,6 +34,7 @@ int main(int argc,char** argv) {
         uint64_t seed=42,memory_bytes=65536,budget=1000000; Time duration=100000000;
         size_t payload_mtu=1024;
         Time retransmission_timeout_ns=kMillisecond;
+        uint32_t maximum_packet_retries=kDefaultRetryLimit;
         std::optional<std::array<Time,4>> negative_acknowledgment_delays;
         bool enable_nscc=false,enable_trimming=false;
         UET::CMS::NsccConfig congestion;
@@ -50,6 +51,7 @@ int main(int argc,char** argv) {
             else if (key=="budget") row>>budget;
             else if (key=="payload_mtu") row>>payload_mtu;
             else if (key=="rto") row>>retransmission_timeout_ns;
+            else if (key=="max_packet_retries") row>>maximum_packet_retries;
             else if (key=="nack_delays") {
                 std::array<Time,4> delays{};
                 for (auto& delay:delays) row>>delay;
@@ -132,6 +134,7 @@ int main(int argc,char** argv) {
         for (auto node:nodes) {
             hosts[node]=std::make_unique<PdsHost>(node,loop,trace,*ports.at(node),PdsHost::WireFormat::Uet11,network);
             hosts.at(node)->configure_retransmission_timeout(retransmission_timeout_ns);
+            hosts.at(node)->configure_retry_limit(maximum_packet_retries);
             if (negative_acknowledgment_delays)
                 hosts.at(node)->configure_negative_acknowledgment_delays(*negative_acknowledgment_delays);
             if (enable_nscc) hosts.at(node)->enable_nscc(congestion);

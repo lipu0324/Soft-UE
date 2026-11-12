@@ -60,7 +60,7 @@ public:
         uint16_t rto;           ///< Legacy diagnostic/API view: duration rounded up to milliseconds.
         UET::Runtime::Time duration_ns=0; ///< Canonical duration; protocol timing never uses the rounded view.
         UET::Runtime::Time start_time_ns=0; ///< Injected-clock start, meaningful when services are present.
-        uint16_t retry_count;    ///< Retry count
+        uint64_t retry_count;    ///< Retry count
         std::chrono::steady_clock::time_point start_time; ///< Timer start time
         bool active;            ///< Whether timer is active
     };
@@ -86,10 +86,10 @@ public:
      * @param retry_count Current retry count
      * @return Whether successfully started
      */
-    bool startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count = 0);
+    bool startTimer(uint32_t psn, uint16_t base_rto, uint64_t retry_count = 0);
     // Nanosecond API used by the protocol. Zero is a valid immediate timeout;
     // the legacy millisecond API retains its old zero-rejection behavior.
-    bool startTimerNanoseconds(uint32_t psn,uint64_t initial_ns,uint16_t timeout_retries=0);
+    bool startTimerNanoseconds(uint32_t psn,uint64_t initial_ns,uint64_t timeout_retries=0);
 
     /**
      * @brief Stop and remove timer
@@ -149,7 +149,7 @@ private:
     std::map<uint32_t, uint64_t> event_versions_;
     uint64_t revision_ = 0;
     std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
-    bool startDuration(uint32_t psn,uint64_t duration_ns,uint16_t timeout_retries);
+    bool startDuration(uint32_t psn,uint64_t duration_ns,uint64_t timeout_retries);
     void scheduleVirtual(uint32_t psn, uint64_t duration_ns);
     /**
      * @brief Timer monitoring thread function

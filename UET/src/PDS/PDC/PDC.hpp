@@ -316,8 +316,8 @@ struct TX_pkt_meta
 {
     uint16_t tx_pkt_handle=0; /**< Sending packet handle */
     UET::Runtime::Time retransmission_timeout_ns=0;
-    uint16_t retry_cnt=0; /**< All retries, including NACKs when no separate NACK limit is configured. */
-    uint16_t timeout_retry_count=0; /**< Only RTO-triggered retries increase exponential backoff (§3.5.12.7). */
+    uint64_t retry_cnt=0; /**< All retries; also the monotonic local transmit-attempt identity. */
+    uint64_t timeout_retry_count=0; /**< Only RTO-triggered retries increase exponential backoff (§3.5.12.7). */
     UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
     bool transmit_time_valid=false,awaiting_transmission=false;
     uint32_t congestion_nominal_bytes=0;
@@ -498,10 +498,10 @@ protected:
     uint64_t transmit_incarnation_=0;
     bool beginTransmitIncarnation();
     bool waitsForTransmitNotification() const { return runtime_ && runtime_->actual_transmit_notifications && transmit_incarnation_; }
-    void tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,uint16_t attempt,uint16_t opaque=0);
+    void tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,uint64_t attempt,uint16_t opaque=0);
     // Probe has an opaque identifier and its own timer. PSN zero remains
     // available to real data at wrap; Probe never occupies a TX data slot.
-    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint16_t retries=0; bool transmit_time_valid=false,awaiting_transmission=false; };
+    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint64_t retries=0; bool transmit_time_valid=false,awaiting_transmission=false; };
     std::optional<ProbeAttempt> outstanding_probe_;
     UET::Runtime::TimerId probe_timer_=0;
     UET::Runtime::Time next_window_probe_time_=0;
@@ -964,7 +964,7 @@ public:
      * @param psn Packet sequence number Packet sequence number
      * @param retry_count Current retry count Current retry count
      */
-    void startPacketTimer(uint32_t psn, uint16_t retry_count = 0);
+    void startPacketTimer(uint32_t psn, uint64_t retry_count = 0);
     
     /**
      * @brief Stop packet timer Stop packet timer Stop packet timer

@@ -146,14 +146,15 @@
         "retry_timing_test",
         "mac_timing_test",
         "pds_probe_test",
-        "negative_acknowledgment_test"
+        "negative_acknowledgment_test",
+        "retry_limit_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Nanosecond RTO, separate NACK/timeout backoff, delayed retry deduplication/cancellation, reserved-code filtering, CMS event/accounting separation and MAC timers tested. Retry-limit configuration/infinite mode, New_Start_PSN and full READ/TSS/control matrices remain open; see RETRY-TIMING.md and NACK-RECOVERY.md."
+      "evidence_note": "Nanosecond RTO, configurable common retry limit 0..15 (15 infinite), wide attempt identities, separate NACK/timeout backoff, delayed retry deduplication/cancellation and MAC timers tested. New_Start_PSN and full READ/TSS/control matrices remain open; see RETRY-TIMING.md and NACK-RECOVERY.md."
     },
     {
       "id": "PDS-RUD",

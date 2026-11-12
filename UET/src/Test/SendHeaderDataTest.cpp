@@ -98,6 +98,18 @@ void transfer(const SendScenario& scenario) {
         });
         CHECK(fallback_events==(scenario.late_posting?2:1));
     }
+    CHECK(source.leased_message_ids()==0);
+    if (remote_error && scenario.bytes>16) {
+        // §3.4.4.3: repeated tail errors are not guaranteed. The first
+        // error's standalone Clear can precede those tails; a later request
+        // carries the final Clear (§3.5.16.3). Exercise that real protocol
+        // transition before requiring all target message records to retire.
+        Operation noop; noop.type=OperationType::Noop; noop.peer=2; noop.job=0; noop.delivery_mode=scenario.mode;
+        const auto next_operation=source.submit(noop); loop.run(100000);
+        CHECK(source.poll_completion(completion) && completion.operation==next_operation && completion.status==CompletionStatus::Success);
+        CHECK(!source.poll_completion(completion) && !target.poll_completion(completion));
+        CHECK(target.memory().read(0,1,region.key,7,scenario.bytes)==expected);
+    }
     CHECK(source.leased_message_ids()==0 && target.retained_receive_messages()==0);
     if (scenario.mode==UUD) {
         CHECK(fabric.stats(2,1).packets==0);

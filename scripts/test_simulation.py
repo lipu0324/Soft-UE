@@ -48,6 +48,8 @@ def main():
                dict(base, nscc={"enabled": 1}), dict(base, nscc={"enabled": True, "nominal_mtu": 100}),
                dict(base, trimming="true"), dict(base, payload_mtu=0),
                dict(base, rto_ns=True), dict(base, rto_ns=8_000_000_001),
+               dict(base, max_packet_retries=True), dict(base, max_packet_retries=-1),
+               dict(base, max_packet_retries=16), dict(base, max_packet_retries=1.5),
                dict(base, nack_delays_ns=[0, 1]), dict(base, nack_delays_ns=[0, 0, 0, True]),
                dict(base, nack_delays_ns=[0, 0, 0, 8_000_000_001]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 3, "up": False}]),
@@ -153,6 +155,7 @@ def main():
         outage = copy.deepcopy(base)
         outage["nscc"] = {"enabled": True}
         outage["rto_ns"] = 50000
+        outage["max_packet_retries"] = 15
         outage["link_events"] = [{"at_ns": 0, "from": 1, "to": 2, "up": False},
                                  {"at_ns": 40000, "from": 1, "to": 2, "up": True}]
         outage_output, outage_result = run(outage, "temporary-no-route")
@@ -184,6 +187,11 @@ def main():
         metadata = json.loads((lost_output / "metadata.json").read_text())
         check(lost_result["operations"][0]["status"] == 6 and metadata["status_codes"]["6"] == "timeout",
               "runner must label the actual native timeout, not an obsolete enum position")
+        for limit in [0, 1]:
+            _, limited_result = run(dict(lost, max_packet_retries=limit), f"loss-retry-limit-{limit}")
+            check(limited_result["source_data_attempts"] == limit + 1 and
+                  limited_result["source_data_retransmissions"] == limit,
+                  "configured retry budget must control actual MAC departures")
         large = {"version": 1, "seed": 42, "duration_ns": 100_000_000,
                  "hosts": list(range(1, 65)), "switches": list(range(100, 108)) + [200, 201],
                  "links": [], "operations": []}

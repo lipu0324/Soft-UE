@@ -81,7 +81,7 @@ struct NsccConfig {
 
 struct NsccTransmitSample {
     uint64_t transmit_time_ns=0;
-    uint16_t retransmissions=0;
+    uint64_t retransmissions=0; // Karn's rule must not see zero again after counter wrap.
 };
 struct NsccAck {
     uint64_t newly_received_bytes=0;

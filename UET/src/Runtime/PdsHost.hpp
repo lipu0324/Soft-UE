@@ -76,6 +76,11 @@ public:
             throw std::invalid_argument("NACK delay exceeds the eight-second configuration range");
         services_.nack_retransmission_delays_ns=delays_ns;
     }
+    void configure_retry_limit(uint32_t maximum_retries) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure retry limit before opening connections");
+        if (maximum_retries>kInfiniteRetryLimit) throw std::invalid_argument("retry limit must be 0..15");
+        services_.maximum_packet_retries=static_cast<uint8_t>(maximum_retries);
+    }
     void enable_nscc(const CMS::NsccConfig& config) {
         if (stopped_ || format_!=WireFormat::Uet11 || services_.congestion_control || manager_.getPDSStatus().open_cnt)
             throw std::logic_error("configure NSCC once before opening connections");

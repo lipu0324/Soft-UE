@@ -344,6 +344,62 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0253-001 | §3.4.4.7.3.2，耗尽/重启 | BAD_GENERATION 回当前代次；ROD 语义耗尽禁用 index 并返回 DISABLED_GEN；有资源且代次递增后启用。 | native resource lifecycle 和 provider process recovery 有覆盖，代次回绕/异步资源组合仍需验收。 |
 | UE11-p0253-002 | §3.4.4.7.3.2，发起端恢复 | 必须重发；提前增加 generation 时只发最老消息，成功后再继续；指数退避为 SHOULD。 | provider FIFO 重试并等待旧 PDS 操作排空；native 低层错误回报合同与完整多源顺序仍需补全。 |
 
-复核进度为上述 240 个候选的分类与义务拆分；其余 489 个候选、表格/算法的额外
+## 第 241～260 个候选
+
+本批检查 Sync Group、序列示例与错误范围。Sync Group 的跨页 MUST NOT 及 recoverable
+error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcode 的实现和验收。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0253-003 | §3.4.4.7.3.2，代次不匹配 | 重发并使用响应给出的新 generation，允许立即重发。 | provider 已采用返回代次重试；native 低层完成合同仍需补全。 |
+| UE11-p0253-004 | §3.4.4.8，同步组完成 | 每组恰好一个 completing；收到全部 ACK 后才复用 group ID。 | M5 缺失；最多65534个 write 与 completing 的关联及失败释放需测试。 |
+| UE11-p0253-005 | §3.4.4.8，目标同步状态跨页 | 跟踪未完成组并遵守排序；RUD 不得为了排在其他 SYNC_WRITE 后而延迟 payload。 | M5 缺失；Job 关联/校验为 SHOULD，不能误作所有实现 MUST。 |
+| UE11-p0255-001 | §3.4.5.1.1，单包请求 | 无 ID 的紧凑头以 PSN 关联；SES 处理完成后才响应，DC 等到 GO。 | 标准头子集有覆盖；紧凑头和 tagged 扩展缺失。DEFAULT 是 SHOULD，显式 RESPONSE 允许。 |
+| UE11-p0257-001 | §3.4.5.2，标准 READ 序列 | 对数据响应再提供语义响应，可总用 DEFAULT；目标接受错误结果并 Clear 保证响应。 | M5 缺失；请求、反向数据 PDC 和结果缓存生命周期都需验收。 |
+| UE11-p0258-001 | §3.4.5.2，READ 接收能力 | 两种 READ 序列均须保证不依靠再次上线交互就可接受所有响应数据。 | M5 缺失；发 READ 前预留接收容量，不能靠收到数据再发信用解决。 |
+| UE11-p0261-001 | §3.4.5.4，DS 目标缓冲 | restarted 消息到原匹配 buffer；目标记住已缓存前缀 J，重启头不携带 J。 | M5 缺失；重启偏移与原始地址不可混用。 |
+| UE11-p0261-002 | §3.4.5.4，defer 收尾 | 首次 deferred 消息也以 EOM 结束，便于释放该消息状态。 | M5 缺失；RTR 重启不是原消息缺少 EOM 的补救。 |
+| UE11-p0262-001 | §3.4.5.4，未预留 token | 已保留 buffer 不得使用 target token0；未预留可重复 defer。 | M5 缺失；Message ID 可以在不再在途后复用，不能假定第三次重启必换 ID。 |
+| UE11-p0267-001 | §3.4.5.6，语义重试序号 | NO_MATCH 完成原 PDS 事务，重试分配新 PSN；允许换 Message ID。 | provider 先等待旧 transport_pending 排空再提交新操作，实际 ROD/RUD 恢复已有覆盖。 |
+| UE11-p0272-001 | §3.4.6.2，消息错误范围 | 不可恢复的 message error 只影响该消息及事务。 | semantic_error_test 验证错误后同 PDC 可完成新消息；扩展事务尚未实现。 |
+| UE11-p0272-002 | §3.4.6.2，PDC 错误范围 | 不可恢复 PDS error 关闭 PDC，所有尚未成功的在途事务向应用报错。 | context event/source/target completion 及 provider timeout 有覆盖；全部错误矩阵尚未完成。 |
+| UE11-p0272-003 | §3.4.6.3，有限语义重试 | 可限制 recoverable error 重试，超限必须错误结束。 | provider 有有限重试与错误 CQ；和 PDS 单包重传预算是不同层次。 |
+| UE11-p0272-004 | §3.4.6.3.1，选定源端可恢复故障 | 分配 PSN 后可恢复故障 poison FCS，不能设置 IE；分配前本地处理为 SHOULD。 | 此硬件/中间缓冲故障注入尚未实现；payload reader 异常属于当前选择的不可恢复错误，不能混淆。 |
+| UE11-p0272-005 | §3.4.6.3.2，目标可恢复错误跨页 | 使用 DS/发送 unexpected 规定流程；多包进行中可用 MSG_ERROR 提前结束。 | 普通 SEND/provider 重试与 abort 有覆盖；tagged/DS/rendezvous 缺失。 |
+| UE11-p0273-001 | §3.4.6.4.1，IE | 不访问目标内存，消息非 OK；若首错则 INITIATOR_ERROR；提供 CQ 时保留 header data。 | native malformed/乱序 IE、首错和 CQ data 有覆盖；完整 datatype/opcode 扩展仍待验收。 |
+| UE11-p0273-002 | §3.4.6.4.1，MSG_ERROR | 仅一个终止包、EOM=1、有效字段保持原值，payload可缩短；无内存访问；不得依赖 RUD 前包先完成。 | native source 停止 reader/发送 abort、目标提前 EOM 与迟到 SOM 有覆盖；所有头格式仍未完成。 |
+| UE11-p0274-001 | §3.4.6.4.2，目标不可恢复错误 | 消息首错传播并保证传递，不影响 PDC；结合重复错误的单一保证规则。 | 普通 tracked message 已修正首错 gtd，后续消息可继续；无记录容量耗尽拒绝路径待完善。 |
+| UE11-p0274-002 | §3.4.6.4.2，错误数据响应 | 数据响应错误时，不得写入发起端内存。 | M5 READ/fetch 缺失，需要写入前检查 RC。 |
+| UE11-p0274-003 | §3.4.6.5，informational 优先级 | 向应用报告（若请求）；informational 内首错，后续 uncorrectable 覆盖且保证传递。 | 当前整数非取回操作无 informational 类型；浮点/完整优先级未实现。 |
+
+## 第 261～280 个候选
+
+本批检查 opcode/返回码、权限边界、内存模型和 PDS 配置。虚拟化、TSS 或保留 PDC
+等有条件要求仍记录适用条件，不把“当前未启用”当作这些路线已完成。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0276-001 | 表3-23，操作码多义务 | NO_OP 单包；DATAGRAM仅UUD；MSG_ERROR禁用UUD；各 opcode 与格式/操作一致，保留码不可占用。 | native 支持子集且源端拒绝未实现操作；完整接收端非法组合、M5/M8扩展尚未完成。 |
+| UE11-p0278-001 | 表3-25，返回码编码 | 普通无数据响应不得侵占0x38～0x3D响应数据保留空间；各返回码有独立 scope/recovery 含义。 | 当前已实现无数据码属于合法集；完整码表和扩展错误处理仍待完成。 |
+| UE11-p0282-001 | §3.4.8.1，Job 权限 | 最高可达权限上下文插入或验证源 Job，应用只能使用已分配 Job。 | native MR检查与provider固定Job不能代替完整授权配置链；M3/M7管理模型待补。 |
+| UE11-p0282-002 | §3.4.8.1，源 FA 权限 | 最高权限上下文插入或验证源 FA。 | PdsHost校验frame/packet地址一致不等于应用源地址授权；完整管理边界未完成。 |
+| UE11-p0282-003 | §3.4.8.1，虚拟化跨页 | 虚拟化时 Job/FA配置仅HV/VMM可控；OOB provisioning加强隔离是SHOULD。 | 虚拟化行为/管理权限模型未实现，不能由同进程调用者可信假设推广。 |
+| UE11-p0283-001 | §3.4.8.2，SDI/Job 配对 | 应用只能使用已分配SDI，源端支持SDI与允许Job的绑定。 | M6缺失；不能只验证AES-GCM密钥长度。 |
+| UE11-p0283-002 | §3.4.9.1.1，ROD flow | 至少按源PID到目标PID/index的flow提供message processing顺序，可多个flow共享PDC。 | PDS有序交付及native posted/unexpected FIFO有覆盖；完整flow映射/扩展操作待验。 |
+| UE11-p0283-003 | §3.4.9.1.1，目标处理次序 | ROD对目标Job/PID/index按呈现次序处理消息。 | 普通SEND匹配和provider FIFO有覆盖；tagged/rendezvous及跨PDC选择仍未完成。 |
+| UE11-p0283-004 | §3.4.9.1.2，目标完成 | 请求目标CQ时在数据放置后通知，DC还需GO。 | 同步稀疏/应用缓冲写入后CQ已有覆盖；不等同于规范未要求的全局有序CQ。 |
+| UE11-p0284-001 | §3.4.9.2，原子粒度 | 已支持原子需保证datatype单元素的atomicity。 | 单事件内执行受检整数元素；128位/浮点/fetch缺失，不能扩大能力。 |
+| UE11-p0284-002 | §3.4.9.2，并发一致性跨页 | 同地址tuple的并发原子按单元素consistent，包括多源、atomic read/write和fetch。 | 当前整数非取回路径有多操作回归；完整fetch/所有并发组合未完成。 |
+| UE11-p0285-001 | §3.4.9.2，普通访问与原子 | 普通send/write/read与原子的交叉一致性不是必需；需要一致性的调用者使用atomic版本。 | 记录用户使用约束；不把普通WRITE和原子执行恰好同一事件循环当作可移植保证。 |
+| UE11-p0285-002 | §3.4.9.3，源成功完成 | 成功完成等待全部PDS ACK及语义响应，足以实现transmit complete。 | native逐PSN semantic集合与provider完成等级已有覆盖；错误提前完成仍单独保留PDS/ID状态。 |
+| UE11-p0285-003 | §3.4.9.3，DC | DC可明确报不支持，否则语义响应等到目标GO。 | 当前RDM选择GO；ordinary buffered SEND等待posting，完整操作集待验。 |
+| UE11-p0286-001 | §3.4.9.4，恰好一次 | ROD/RUD效果恰好一次；fetch保留旧值应对响应丢失。 | 非取回整数/PDS去重有覆盖；M5 fetching返回值缓存与清理缺失。 |
+| UE11-p0286-002 | §3.4.9.6，sync完成 | completing WRITE CQ在同组所有payload交付后；相对其他CQ没有额外排序保证。 | M5缺失；避免错误实现成全局CQ barrier。 |
+| UE11-p0286-003 | §3.4.9.6，sync atomic | completing ATOMIC在整组WRITE payload交付后执行。 | M5缺失；计数聚合不等于真正延迟执行原子。 |
+| UE11-p0302-001 | §3.5.5，配置集合 | 每FEP至少一套PDS配置；支持reserved pool时另有第二套。 | Runtime Services已分host并支持部分参数，reserved pool未启用；完整配置集合仍缺。 |
+| UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；表3-35/36需逐字段验收，参考默认值不是完整符合性证据。 |
+| UE11-p0305-001 | 表3-35续，MPR/SYN及注释 | MPR0 override 0～127；丢SYN后关闭遵守安全时间；启用加密时设0为SHOULD；native IP协议号可配置。 | MPR override/MAC-time SYN safety已有回归；Syn范围表格与正文位宽有冲突须记录。实验253/254不得当作生产默认分配号，当前研究默认仍为显式符合性缺口。 |
+
+复核进度为上述 280 个候选的分类与义务拆分；其余 449 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

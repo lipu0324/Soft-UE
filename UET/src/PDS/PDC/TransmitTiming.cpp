@@ -5,13 +5,14 @@ bool PDC::beginTransmitIncarnation() {
     transmit_incarnation_=0;
     if (!runtime_) return true;
     if (runtime_->rto_ns>UET::Runtime::kMaximumInitialRtoNs) return false;
+    if (runtime_->maximum_packet_retries>UET::Runtime::kInfiniteRetryLimit) return false;
     if (runtime_->next_pdc_incarnation==UINT64_MAX) return false;
     transmit_incarnation_=++runtime_->next_pdc_incarnation;
     return true;
 }
 
 void PDC::tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,
-                          uint16_t attempt,uint16_t opaque) {
+                          uint64_t attempt,uint16_t opaque) {
     const bool synchronizing=packet.PDS_type==RUOD_req_header?packet.PDS_header.RUOD_req_header.flags.syn:
         packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.flags.syn;
     packet.transmit_identity.reset();

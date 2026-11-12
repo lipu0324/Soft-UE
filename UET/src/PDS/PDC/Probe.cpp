@@ -53,7 +53,7 @@ void PDC::sendProbeAttempt() {
 void PDC::progressProbe() {
     if (outstanding_probe_ && probe_due_) {
         probe_due_=false;
-        if (outstanding_probe_->retries>=Max_RTO_Retx_Cnt) {
+        if (!UET::Runtime::retry_permitted(outstanding_probe_->retries,runtime_->maximum_packet_retries)) {
             resetProbe();
             // A failed diagnostic probe alone does not fail successful data.
             // An unreachable peer that prevents queued data from advancing
@@ -61,7 +61,10 @@ void PDC::progressProbe() {
             if (!tx_req_q.empty() && !peerWindowAllows(tx_cur_psn)) {
                 failure_reason_=UET::Runtime::PdcFailureReason::RetryExhausted; close_error=true;
             }
-        } else { ++outstanding_probe_->retries; sendProbeAttempt(); }
+        } else {
+            outstanding_probe_->retries=UET::Runtime::next_retry_count(outstanding_probe_->retries);
+            sendProbeAttempt();
+        }
     } else if (needsWindowProbe()) requestProbe(clear_psn+1);
 }
 

@@ -612,9 +612,10 @@ void PDC::retryPacket(uint32_t psn,RetryCause cause){
             UET::Runtime::add_time(meta.last_transmit_time,runtime_->syn_retransmission_safety_time));
         if (closing) armCloseSafetyWake();
     }
-    if(meta.retry_cnt < Max_RTO_Retx_Cnt){
-        meta.retry_cnt++;
-        if (cause==RetryCause::Timeout) ++meta.timeout_retry_count;
+    const auto retry_limit=runtime_?runtime_->maximum_packet_retries:Max_RTO_Retx_Cnt;
+    if(UET::Runtime::retry_permitted(meta.retry_cnt,retry_limit)){
+        meta.retry_cnt=UET::Runtime::next_retry_count(meta.retry_cnt);
+        if (cause==RetryCause::Timeout) meta.timeout_retry_count=UET::Runtime::next_retry_count(meta.timeout_retry_count);
         // A NACK still counts toward the common retry limit, but restarts the
         // last timeout duration; it is not a new RTO expiration (§3.5.15.3).
         meta.retransmission_timeout_ns=UET::Runtime::retransmission_timeout_ns(
@@ -1726,7 +1727,7 @@ bool PDC::canSafelyClose(){
  * @param psn 包序列号
  * @param retry_count 当前重试次数
  */
-void PDC::startPacketTimer(uint32_t psn, uint16_t retry_count)
+void PDC::startPacketTimer(uint32_t psn, uint64_t retry_count)
 {
     const bool started=runtime_?rto_timer_.startTimerNanoseconds(psn,runtime_->rto_ns,retry_count):
         rto_timer_.startTimer(psn,Base_RTO,retry_count);

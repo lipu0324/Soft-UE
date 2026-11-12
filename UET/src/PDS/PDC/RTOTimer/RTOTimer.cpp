@@ -97,7 +97,7 @@ void RTOTimer::scheduleVirtual(uint32_t psn, uint64_t duration_ns)
  * @param retry_count Current retry count
  * @return Whether startup was successful
  */
-bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count)
+bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint64_t retry_count)
 {
     if (!base_rto) return false;
     // Preserve the historical cap only at the explicitly millisecond-based
@@ -106,12 +106,12 @@ bool RTOTimer::startTimer(uint32_t psn, uint16_t base_rto, uint16_t retry_count)
     return startDuration(psn,std::min<uint64_t>(10000000000ULL,duration),retry_count);
 }
 
-bool RTOTimer::startTimerNanoseconds(uint32_t psn,uint64_t initial_ns,uint16_t timeout_retries)
+bool RTOTimer::startTimerNanoseconds(uint32_t psn,uint64_t initial_ns,uint64_t timeout_retries)
 {
     return startDuration(psn,UET::Runtime::retransmission_timeout_ns(initial_ns,timeout_retries),timeout_retries);
 }
 
-bool RTOTimer::startDuration(uint32_t psn,uint64_t duration_ns,uint16_t timeout_retries)
+bool RTOTimer::startDuration(uint32_t psn,uint64_t duration_ns,uint64_t timeout_retries)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!running_) return false;

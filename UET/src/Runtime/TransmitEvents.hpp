@@ -10,7 +10,8 @@ struct TransmitIdentity {
     uint32_t connection_start_psn=0;
     uint64_t incarnation=0;
     uint32_t sequence=0;
-    uint16_t attempt=0,opaque=0;
+    uint64_t attempt=0; // Monotonic across retries, including the infinite-retry configuration.
+    uint16_t opaque=0;
     TransmitKind kind=TransmitKind::Request;
     bool synchronizing=false;
 };
