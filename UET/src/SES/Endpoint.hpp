@@ -2,6 +2,7 @@
 #include "MemoryRegistry.hpp"
 #include "SemanticReturnCode.hpp"
 #include "ResourceDirectory.hpp"
+#include "PayloadSource.hpp"
 #include "../Runtime/PdsHost.hpp"
 #include <deque>
 #include <tuple>
@@ -27,6 +28,7 @@ struct Operation {
     std::optional<uint64_t> immediate_data; // Write-with-immediate remote CQ data.
     bool relative_addressing=true;
     uint8_t target_generation=0;
+    std::shared_ptr<const PayloadSource> payload_source; // Optional lazy bytes; cannot accompany a nonempty payload vector.
 };
 struct Completion {
     uint64_t operation;
@@ -57,16 +59,17 @@ class Endpoint {
 public:
     Endpoint(uint32_t node, Runtime::PdsHost& host, Runtime::EventLoop& loop,
              Runtime::Trace& trace, size_t payload_mtu=1024,
-             Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr)
+             Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr,size_t submission_window=8)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
-          memory_(domain_memory?*domain_memory:private_memory_) {
-        if (!mtu_ || mtu_>8192 || !timeout_) throw std::invalid_argument("invalid SES configuration");
+          memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window) {
+        if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_) throw std::invalid_argument("invalid SES configuration");
         host_.set_request_handler([this](const PDC_SES_req& request) { receive(request); });
         host_.set_response_handler([this](const PDC_SES_rsp& response) { respond(response); });
         host_.set_context_event_handler([this](const Runtime::PdcEvent& event) { context_event(event); });
         host_.set_datagram_transmit_handler([this](uint16_t message,Runtime::SendResult result) {
             const auto pending=pending_.find(message);
             if (pending==pending_.end()) return;
+            fragment_transmitted(message);
             // UUD completion establishes only local transmit acceptance. A
             // dropped datagram still completes locally; no remote ACK exists.
             finish(message,result==Runtime::SendResult::Accepted ? CompletionStatus::LocalSuccess
@@ -97,6 +100,10 @@ public:
             operation.type!=OperationType::Write && !is_atomic && !is_datagram) {
             complete_local(CompletionStatus::Unsupported); return id;
         }
+        const uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        if (operation.payload_source && !operation.payload.empty()) {
+            complete_local(CompletionStatus::InvalidRequest); return id;
+        }
         size_t atomic_width=1;
         if (is_atomic) {
             if (static_cast<uint8_t>(operation.atomic_datatype)>7 ||
@@ -105,15 +112,15 @@ public:
                 complete_local(CompletionStatus::Unsupported); return id;
             }
             atomic_width=integer_atomic_width(operation.atomic_datatype);
-            if (operation.payload.empty() || operation.payload.size()%atomic_width ||
+            if (!payload_length || payload_length%atomic_width ||
                 operation.remote_offset%atomic_width || mtu_<atomic_width) {
                 complete_local(CompletionStatus::InvalidRequest); return id;
             }
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.target_pid>0xfff || operation.target_resource>0xfff ||
-            operation.payload.size()>UINT32_MAX || (is_datagram && operation.payload.size()>mtu_) ||
+            payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
             (operation.immediate_data && operation.type!=OperationType::Write) ||
-            (operation.type==OperationType::Noop && !operation.payload.empty())) {
+            (operation.type==OperationType::Noop && payload_length)) {
             complete_local(CompletionStatus::InvalidRequest); return id;
         }
         uint16_t message=0;
@@ -122,50 +129,22 @@ public:
             if (!pending_.count(next_message_) && !message_leases_.count(next_message_)) { message=next_message_; break; }
         }
         if (!message) { complete_local(CompletionStatus::ResourceExhausted); return id; }
-        Pending pending{id,operation.context,static_cast<uint32_t>(operation.payload.size()),0,operation.peer,operation.job};
+        Pending pending{id,operation.context,static_cast<uint32_t>(payload_length),0,operation.peer,operation.job};
         pending.is_datagram=is_datagram;
         pending_.emplace(message,pending);
         try {
-            for (size_t offset=0;;) {
-                const auto fragment_capacity=is_atomic?mtu_-(mtu_%atomic_width):mtu_;
-                const auto count=std::min(fragment_capacity,operation.payload.size()-offset);
-                SES_PDS_req request{};
-                request.src_fep=node_; request.dst_fep=operation.peer;
-                request.mode=is_datagram?UUD:operation.delivery_mode;
-                request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
-                request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
-                auto& semantic_header=request.pkt.bth_header.Standard_Header;
-                semantic_header.opcode=static_cast<uint8_t>(operation.type); semantic_header.version=0;
-                semantic_header.som=offset==0; semantic_header.eom=offset+count==operation.payload.size();
-                semantic_header.dc=!is_datagram; semantic_header.rel=operation.relative_addressing;
-                semantic_header.ri_generation=operation.target_generation;
-                semantic_header.msg_id=is_datagram?0:message; semantic_header.job_id=operation.job; semantic_header.PIDonFEP=operation.target_pid;
-                semantic_header.resource_index=operation.target_resource; semantic_header.buffer_offset=operation.remote_offset;
-                semantic_header.initiator=node_; semantic_header.match_bits=operation.remote_key;
-                semantic_header.request_length=operation.payload.size();
-                if (operation.immediate_data) {
-                    semantic_header.hd=1;
-                    if (!offset) semantic_header.diff.som_true.header_data=*operation.immediate_data;
-                }
-                if (is_atomic) {
-                    request.pkt.eth_type=Atomic_Operation_Extension_Header;
-                    auto& extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
-                    extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
-                    extension.atomic_datatype=static_cast<uint8_t>(operation.atomic_datatype);
-                }
-                if (offset) { semantic_header.diff.som_false.payload_length=count; semantic_header.diff.som_false.message_offset=offset; }
-                request.pkt.payload.assign(operation.payload.begin()+offset,operation.payload.begin()+offset+count);
-                if (is_atomic) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
-                request.pkt_len=static_cast<uint16_t>(44+(is_atomic?4:0)+count);
-                if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation");
-                offset+=count;
-                if (offset==operation.payload.size()) break;
-            }
+            auto source=operation.payload_source;
+            if (!source) source=std::make_shared<VectorPayload>(std::move(operation.payload));
+            operation.payload_source.reset();
+            sources_.emplace(message,SourceMessage{std::move(operation),std::move(source),
+                static_cast<uint32_t>(payload_length),0,0,false});
+            submission_order_.push_back(message);
             std::weak_ptr<int> life=lifetime_;
             pending_.at(message).timer=loop_.after(timeout_,[this,life,message] {
                 if (life.expired()) return;
                 finish(message,CompletionStatus::Timeout,0,0);
             });
+            feed_submissions();
         } catch (...) {
             finish(message,CompletionStatus::ResourceExhausted,0,0);
             throw;
@@ -184,6 +163,12 @@ public:
         completion=completions_.front(); completions_.pop_front(); return true;
     }
     size_t pending() const { return pending_.size(); }
+    size_t queued_fragments() const { return queued_fragments_; }
+    size_t receive_intervals() const {
+        size_t count=0;
+        for (const auto& message:incoming_) count+=message.second.segments.size();
+        return count;
+    }
     size_t retained_receive_messages() const { return incoming_.size(); }
     size_t leased_message_ids() const { return message_leases_.size(); }
     void close() {
@@ -192,10 +177,19 @@ public:
         host_.set_request_handler({}); host_.set_response_handler({});
         host_.set_datagram_transmit_handler({});
         host_.set_context_event_handler({});
+        sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
         incoming_.clear(); posted_.clear(); message_leases_.clear(); peer_cumulative_acks_.clear();
     }
 private:
+    struct SourceMessage {
+        Operation operation;
+        std::shared_ptr<const PayloadSource> source;
+        uint32_t length;
+        uint64_t offset;
+        size_t queued;
+        bool all_submitted;
+    };
     struct Pending {
         uint64_t id,context; uint32_t length; Runtime::TimerId timer; uint32_t peer,job;
         uint16_t local_pdc=UINT16_MAX;
@@ -243,6 +237,76 @@ private:
     std::deque<Posted> posted_;
     std::map<MessageKey,Incoming> incoming_;
     std::deque<Completion> completions_;
+    size_t submission_window_,queued_fragments_=0;
+    std::map<uint16_t,SourceMessage> sources_;
+    std::deque<uint16_t> submission_order_;
+
+    // This is a producer queue bound, not a second PDS window. The real PDC
+    // still owns PSNs, outstanding packets, congestion/recovery and retransmits.
+    // FIFO submission keeps all fragments of an ordered message ahead of the
+    // next message. At most submission_window_ fragments wait to enter PDS TX.
+    void feed_submissions() {
+        while (!closed_ && queued_fragments_<submission_window_ && !submission_order_.empty()) {
+            const auto message=submission_order_.front();
+            auto found=sources_.find(message);
+            if (found==sources_.end()) { submission_order_.pop_front(); continue; }
+            auto& transfer=found->second;
+            const auto& operation=transfer.operation;
+            const bool datagram=operation.type==OperationType::DatagramSend;
+            const bool atomic=operation.type==OperationType::Atomic;
+            const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
+            const auto fragment_capacity=mtu_-(mtu_%atomic_width);
+            const auto count=static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
+            SES_PDS_req request{};
+            request.src_fep=node_; request.dst_fep=operation.peer;
+            request.mode=datagram?UUD:operation.delivery_mode;
+            request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
+            request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
+            auto& header=request.pkt.bth_header.Standard_Header;
+            header.opcode=static_cast<uint8_t>(operation.type); header.version=0;
+            header.som=transfer.offset==0; header.eom=transfer.offset+count==transfer.length;
+            header.dc=!datagram; header.rel=operation.relative_addressing; header.ri_generation=operation.target_generation;
+            header.msg_id=datagram?0:message; header.job_id=operation.job; header.PIDonFEP=operation.target_pid;
+            header.resource_index=operation.target_resource; header.buffer_offset=operation.remote_offset;
+            header.initiator=node_; header.match_bits=operation.remote_key; header.request_length=transfer.length;
+            if (operation.immediate_data) {
+                header.hd=1;
+                if (!transfer.offset) header.diff.som_true.header_data=*operation.immediate_data;
+            }
+            if (atomic) {
+                request.pkt.eth_type=Atomic_Operation_Extension_Header;
+                auto& extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
+                extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
+                extension.atomic_datatype=static_cast<uint8_t>(operation.atomic_datatype);
+            }
+            if (transfer.offset) {
+                header.diff.som_false.payload_length=count;
+                header.diff.som_false.message_offset=static_cast<uint32_t>(transfer.offset);
+            }
+            request.pkt.payload.resize(count);
+            if (count) transfer.source->read(transfer.offset,request.pkt.payload.data(),count);
+            if (atomic) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
+            request.pkt_len=static_cast<uint16_t>(44+(atomic?4:0)+count);
+            if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
+            ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
+            if (header.eom) { transfer.all_submitted=true; submission_order_.pop_front(); }
+        }
+    }
+    void fragment_transmitted(uint16_t message) {
+        const auto found=sources_.find(message);
+        if (found==sources_.end() || !found->second.queued) return;
+        --found->second.queued; --queued_fragments_;
+        if (found->second.all_submitted && !found->second.queued) sources_.erase(found);
+        feed_submissions();
+    }
+    void discard_source(uint16_t message) {
+        if (auto found=sources_.find(message);found!=sources_.end()) {
+            host_.cancel_queued_message(found->second.operation.peer,found->second.operation.job,message);
+            queued_fragments_-=found->second.queued; sources_.erase(found);
+        }
+        submission_order_.erase(std::remove(submission_order_.begin(),submission_order_.end(),message),submission_order_.end());
+    }
+
 
     void finish(uint16_t message, CompletionStatus status, uint32_t length, uint8_t code,uint8_t remote_generation=0) {
         const auto it=pending_.find(message);
@@ -262,12 +326,14 @@ private:
 
     void context_event(const Runtime::PdcEvent& event) {
         if (event.kind==Runtime::PdcEventKind::RequestRejected) {
+            discard_source(event.message_id);
             const auto pending=pending_.find(event.message_id);
             if (pending!=pending_.end() && pending->second.peer==event.peer && pending->second.job==event.job)
                 finish(event.message_id,CompletionStatus::ResourceExhausted,0,0);
             // Rejected requests never acquired a transmit PSN. PDS has removed
             // every queued fragment, so no late packet can use this message ID.
             message_leases_.erase(event.message_id);
+            feed_submissions();
             return;
         }
         const ConnectionKey connection{event.peer,event.local_pdc,event.connection_start_psn};
@@ -281,6 +347,7 @@ private:
             } else if (auto lease=message_leases_.find(event.message_id);lease!=message_leases_.end()) {
                 lease->second={connection,event.sequence,lease->second.end_of_message_transmitted || event.end_of_message};
             }
+            fragment_transmitted(event.message_id);
         } else if (event.kind==Runtime::PdcEventKind::PeerCumulativeAcknowledged) {
             auto previous=peer_cumulative_acks_.find(connection);
             if (previous!=peer_cumulative_acks_.end() && event.sequence-previous->second>=0x80000000u) return;
@@ -305,12 +372,17 @@ private:
                 for (const auto& operation:pending_)
                     if (ConnectionKey{operation.second.peer,operation.second.local_pdc,operation.second.connection_start_psn}==connection)
                         failed_messages.push_back(operation.first);
-                for (const auto message:failed_messages)
+                for (const auto message:failed_messages) {
+                    discard_source(message);
                     finish(message,event.failure==Runtime::PdcFailureReason::RetryExhausted?CompletionStatus::Timeout:
                         CompletionStatus::RemoteError,0,0);
+                }
                 for (auto lease=message_leases_.begin();lease!=message_leases_.end();)
-                    if (lease->second.connection==connection) lease=message_leases_.erase(lease); else ++lease;
+                    if (lease->second.connection==connection) {
+                        discard_source(lease->first); lease=message_leases_.erase(lease);
+                    } else ++lease;
                 peer_cumulative_acks_.erase(connection);
+                feed_submissions();
             }
         }
     }
@@ -458,7 +530,21 @@ private:
                     static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index);
             } else if (semantic_header.opcode!=0) memory_.write(semantic_header.job_id,message.pid,message.key,
                 Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
-            message.segments.emplace(offset,count); message.received+=count;
+            // Keep disjoint received intervals rather than one node per packet.
+            // Ordered multi-gigabyte messages then retain one interval; RUD
+            // retains only its actual holes, bounded by the PDS receive window.
+            uint32_t merged_offset=offset,merged_length=static_cast<uint32_t>(count);
+            if (position!=message.segments.begin()) {
+                auto previous=std::prev(position);
+                if (previous->first+previous->second==offset) {
+                    merged_offset=previous->first; merged_length+=previous->second;
+                    message.segments.erase(previous);
+                }
+            }
+            if (position!=message.segments.end() && offset+count==position->first) {
+                merged_length+=position->second; message.segments.erase(position);
+            }
+            message.segments.emplace(merged_offset,merged_length); message.received+=count;
             if (message.received==message.total) {
                 message.completed=true;
                 message.completion_psn=request.orig_psn;

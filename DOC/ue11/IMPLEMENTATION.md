@@ -108,9 +108,36 @@ independent SEND/tagged/RMA index spaces, generation and disabled-resource check
 Absolute PID selection still uses checked zero-based buffer offsets; it does not
 turn a received number into a host pointer. MRs can authorize one JobID or any
 valid JobID, and can bind a specific resource index (including index zero).
-All required memory-key classes, tagged operations and full Profile message-size
-guarantees remain open. Sparse storage tests at the 4GiB boundary do not establish
-an end-to-end 4GiB operation guarantee.
+All required memory-key classes, tagged operations and full Profile acceptance
+remain open. A streamed native WRITE of 4 GiB−1 has been transmitted and checked
+end to end; this does not establish all large-message operations or Profile conformance.
+
+`Operation::payload_source` accepts a local, shared `PayloadSource` instead of an
+eager vector. The endpoint reads at most its configurable producer window (eight
+fragments by default) ahead of PDS transmission. PDS retains its own outstanding
+packets and retransmits cached bytes without calling the application reader
+again. `StoragePayload` keeps a local storage object alive; borrowed application
+buffers must remain valid and unchanged until completion, and a timeout alone
+does not retire an outstanding transport operation. Generated payload readers
+must be deterministic, nonblocking and nonreentrant. Received adjacent byte
+intervals coalesce; unallocated all-zero sparse pages stay unallocated, while
+writes still clear previously stored bytes.
+
+The full boundary experiment is separate from the fast CTest regression:
+
+```sh
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release --target streaming_payload_test -j2
+build/release/streaming_payload_test --bytes 4294967295
+```
+
+It sends 524,288 actual 8192-byte-or-smaller fragments through the original
+protocol and fabric, then verifies completion length, beginning/middle/end
+markers, cleared old bytes, message retirement and timer cleanup. The observed
+producer peak is eight fragments, the ordered receiver retains one interval,
+and only three sparse pages are allocated. The default regression also tests
+8 MiB, packet-loss recovery, permanent loss and rejection of 4 GiB before reading
+the payload. These are correctness experiments, not hardware throughput results.
 
 PDS publishes local events for transmit PSNs, peer CACKs, receive Clear and
 connection termination. SES uses these to retire completed receive records and

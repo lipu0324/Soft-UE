@@ -57,6 +57,9 @@ public:
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
+    void cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id) {
+        if (!stopped_) manager_.cancelQueuedMessage(peer,job,message_id);
+    }
     bool request_connection_close(uint16_t local_pdc_id) {
         if (stopped_ || !manager_.requestConnectionClose(local_pdc_id)) return false;
         wake();

@@ -49,6 +49,33 @@ class PDS_Manager
 private:
 
 public:
+
+    // Remove unsent fragments after the owning PDC terminates. They must not
+    // accidentally establish a replacement context under a retired message ID.
+    void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
+        const auto matches=[&](const SES_PDS_req& request) {
+            const auto& header=request.pkt.bth_header.Standard_Header;
+            return request.dst_fep==peer && header.job_id==job && header.msg_id==message_id;
+        };
+        std::queue<SES_PDS_req> remaining;
+        while (!SES_tx_req_q.empty()) {
+            auto request=std::move(SES_tx_req_q.front()); SES_tx_req_q.pop();
+            if (!matches(request)) remaining.push(std::move(request));
+        }
+        SES_tx_req_q=std::move(remaining);
+        std::queue<pend_node> retained;
+        while (!pend_q.empty()) {
+            auto node=std::move(pend_q.front()); pend_q.pop();
+            if (!matches(node.tx_req)) retained.push(std::move(node));
+        }
+        pend_q=std::move(retained); pend_cnt=static_cast<int>(pend_q.size()); pause_ses=pendQFull();
+        for (auto& deferred:deferred_close_requests_)
+            deferred.second.erase(std::remove_if(deferred.second.begin(),deferred.second.end(),matches),deferred.second.end());
+        for (auto entry=quiesced_messages_.begin();entry!=quiesced_messages_.end();)
+            if (std::get<0>(*entry)==job && std::get<1>(*entry)==peer && std::get<4>(*entry)==message_id)
+                entry=quiesced_messages_.erase(entry); else ++entry;
+        armPendingDeadline();
+    }
     explicit PDS_Manager(UET::Runtime::Services* runtime = nullptr)
         : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {}
     ~PDS_Manager() {
@@ -236,34 +263,13 @@ public:
     void mainChk()
     {
         resource_check_due_=false;
-        if (!SES_eager_req_q.empty())
-        {
-            // State machine not written, leave it for now
-        }
-        else if (!SES_tx_rsp_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing SES load response");
-            sesTxRsp();
-        }
-        else if (!Net_rx_pkt_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing network layer packet reception");
-            rxPkt();
-        }
-        else if (!SES_tx_req_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing SES load request");
-            SESTxReq();
-        }
-        else if (!PDC_close_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing PDC close request");
-            PDCClose();
-        } /* I feel this part is not needed
-         else if(!PDS_error_q.empty()){
-             LOG_INFO(__FUNCTION__,"PDS error event processing");
-             pdsError();
-        }*/
+        if (!SES_tx_rsp_q.empty()) sesTxRsp();
+        // A terminated instance must be retired before another queued message
+        // can select its ID. Otherwise CLOSED could be mistaken for a fresh SYN
+        // on an instance whose generation has not yet been advanced.
+        else if (!PDC_close_q.empty()) PDCClose();
+        else if (!Net_rx_pkt_q.empty()) rxPkt();
+        else if (!SES_tx_req_q.empty()) SESTxReq();
         resourceCheck();
     }
 

@@ -140,6 +140,10 @@ public:
         return pds_process_info && local_pdc_id<MAX_PDC &&
             pds_process_info->pds_instance->IPDC_Processmanager.sendCloseReq(local_pdc_id);
     }
+    void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (pds_process_info) pds_process_info->pds_instance->cancelQueuedMessage(peer,job,message_id);
+    }
 
     /**
      * @brief Destructor

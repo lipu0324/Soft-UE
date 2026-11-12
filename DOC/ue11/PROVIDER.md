@@ -31,6 +31,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | Endpoint | `FI_EP_RDM` 或 `FI_EP_DGRAM`；每个 domain 一个 endpoint；域间状态独立 |
 | 线程和 progress | `FI_THREAD_DOMAIN`、手动 progress；应用串行调用域内 API；`fi_cq_read/readerr` 推进 socket 和协议定时器 |
 | 消息 | `fi_send/recv`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；接收缓冲区先投递 |
+| 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
 | RMA | `fi_write/writev/writemsg/writedata`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
 | 原子 | 非取回 `fi_atomic/atomicv/atomicmsg`；8/16/32/64 位有符号/无符号整数；逐元素原子性和标准能力查询 |
 | DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；仅本地发送完成，无 PDC/确认/重传 |

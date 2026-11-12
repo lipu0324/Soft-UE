@@ -475,7 +475,7 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
         if (write && endpoint.datagram) return -FI_EOPNOTSUPP;
-        if ((length && !buffer) || length>(endpoint.datagram?1024:16*1024*1024)) return -FI_EMSGSIZE;
+        if ((length && !buffer) || length>(endpoint.datagram?1024:uint64_t{UINT32_MAX})) return -FI_EMSGSIZE;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
@@ -483,7 +483,11 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
         SES::Operation operation; operation.type=write?SES::OperationType::Write:
             (endpoint.datagram?SES::OperationType::DatagramSend:SES::OperationType::Send);
         operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
-        if (length) operation.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+length);
+        // fi_* retains application ownership until completion. SES pulls each
+        // bounded fragment from this local span instead of copying a whole RMA
+        // message (potentially 4 GiB-1) during the API call.
+        auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
+        operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
         const auto identifier=endpoint.semantic->submit(std::move(operation));
         endpoint.transmits.emplace(identifier,ApplicationOperation{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,const_cast<void*>(buffer)});
         return 0;
@@ -643,7 +647,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         auto& info=*information;
         info.caps=available_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
         info.ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
-        info.ep_attr->max_msg_size=datagram?1024:16*1024*1024; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
+        info.ep_attr->max_msg_size=datagram?1024:UINT32_MAX; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
         info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->op_flags=datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE;

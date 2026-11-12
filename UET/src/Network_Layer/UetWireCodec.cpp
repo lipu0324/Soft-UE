@@ -253,11 +253,22 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
 uint32_t UetWireCodec::crc32c(const uint8_t* bytes, size_t length) {
     // §3.5.26 / RFC 3385: reflected Castagnoli polynomial, all-ones initial
     // remainder and final complement. Serialization supplies network byte order.
+    // Precompute each byte's eight polynomial steps. The generated table keeps
+    // the definition auditable and makes large-message experiments practical;
+    // golden vectors and the independent reference CRC check this same result.
+    static const auto byte_remainders=[] {
+        std::array<uint32_t,256> table{};
+        for (size_t byte=0;byte<table.size();++byte) {
+            uint32_t remainder=static_cast<uint32_t>(byte);
+            for (unsigned bit=0;bit<8;++bit)
+                remainder=(remainder>>1)^((remainder&1)?0x82f63b78u:0u);
+            table[byte]=remainder;
+        }
+        return table;
+    }();
     uint32_t crc=0xffffffff;
-    for (size_t i=0; i<length; ++i) {
-        crc ^= bytes[i];
-        for (int bit=0; bit<8; ++bit) crc=(crc>>1)^((crc&1)?0x82f63b78u:0u);
-    }
+    for (size_t position=0;position<length;++position)
+        crc=(crc>>8)^byte_remainders[(crc^bytes[position])&0xffu];
     return ~crc;
 }
 std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const WireOptions& network_options) {

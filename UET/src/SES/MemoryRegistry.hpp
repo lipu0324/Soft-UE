@@ -64,7 +64,13 @@ public:
             const auto page = offset / kPageSize;
             const auto within = static_cast<size_t>(offset % kPageSize);
             const auto count = std::min(length, kPageSize - within);
-            std::memcpy(pages_[page].data() + within, source, count);
+            auto found=pages_.find(page);
+            // An absent page already represents zero. Large zero-filled
+            // transfers must not materialize gigabytes of identical pages.
+            if (found!=pages_.end() || !std::all_of(source,source+count,[](uint8_t byte) { return byte==0; })) {
+                if (found==pages_.end()) found=pages_.emplace(page,std::array<uint8_t,kPageSize>{}).first;
+                std::memcpy(found->second.data()+within,source,count);
+            }
             offset += count; source += count; length -= count;
         }
     }

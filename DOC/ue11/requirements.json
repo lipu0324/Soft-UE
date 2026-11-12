@@ -240,14 +240,16 @@
       "summary": "多包 WRITE 的真实内存效果及语义完成",
       "status": "partial",
       "tests": [
-        "endpoint_test"
+        "endpoint_test",
+        "streaming_payload_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Native streamed WRITE of 4294967295 bytes completes through 524288 original PDS/fabric fragments with verified markers, cleared bytes and retirement; producer queue <=8, ordered receive intervals <=1, sparse pages <=3. Default CTest covers 8 MiB and loss. Full Profile and other operation size guarantees remain open."
     },
     {
       "id": "SES-SEND",
