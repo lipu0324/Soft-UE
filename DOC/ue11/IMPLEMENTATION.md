@@ -16,6 +16,9 @@ NACKs and the original PDS to delayed target notifications and checked integer
 atomic actions. See [synchronized transactions](SYNCHRONIZED-TRANSACTIONS.md)
 for source scheduling, independent target tests, reference differences and the
 remaining reuse/management boundaries.
+RUDI request/response headers have independent8-byte golden vectors and fixed
+reference parser comparisons; the stateless transaction path remains open.
+See [RUDI boundaries](RUDI.md).
 
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).

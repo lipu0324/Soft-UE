@@ -597,11 +597,15 @@
       "id": "PDS-RUDI",
       "reference": "§3.5.23",
       "summary": "RUDI 无连接、逐包响应与幂等限制",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "rudi_header_test",
+        "reference_wire_comparison"
+      ],
       "profiles": [
         "HPC"
-      ]
+      ],
+      "evidence_note": "Figure3-74/Table3-48 wire foundation only:8-byte header includes reserved16 between prologue16 and pkt_id32; no PDC/PSN fields.288 independent request/read/response/data, carrier/IP/CRC/retry/mark/ID/reserved/truncation vectors and48 total independent pinned-parser/CRC fixtures including RUDI. Native per-packet source IDs/timers, stateless checked WRITE/READ target, RTO/NACK/trim recovery, bounds/lifecycle, interoperability and public capability remain unimplemented. No RUDI or Profile capability claim; see RUDI.md."
     },
     {
       "id": "CMS-RCCC",

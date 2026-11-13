@@ -29,7 +29,7 @@ int main(int argument_count, char** arguments)
      * the chosen fabric port without changing the independent parser code. */
     reference_context.uet_udp_port=(uint16_t)udp_destination_port;
     reference_context.max_payload_len=8192;
-    struct uet_parsed_pkt parsed;
+    struct uet_parsed_pkt parsed={0};
     const int result=uet_parse_pkt(&reference_context,frame,frame_length,&parsed);
     if (result) { fprintf(stderr,"reference parser rejected frame: %d\n",result); return 1; }
     /* CRC includes addresses, entropy/UDP, PDS, SES and payload (§3.5.26).
@@ -42,9 +42,9 @@ int main(int argument_count, char** arguments)
     }
     printf("{\"type\":%u,\"psn\":%u,\"clear_psn\":%u,\"cack_psn\":%u,"
            "\"source_pdc\":%u,\"destination_pdc\":%u,\"entropy\":%u,"
-           "\"opcode\":%u,\"message_id\":%u,\"payload_length\":%u}\n",
+           "\"opcode\":%u,\"message_id\":%u,\"payload_length\":%u,\"packet_id\":%u}\n",
            parsed.pds_type,parsed.pds_psn,parsed.pds_clear_psn,parsed.pds_cack_psn,
            parsed.pds_spdcid,parsed.pds_dpdcid,parsed.entropy_val,
-           parsed.ses_opcode,parsed.ses_msg_id,parsed.ses_payload_len);
+           parsed.ses_opcode,parsed.ses_msg_id,parsed.ses_payload_len,parsed.pds_rudi_pkt_id);
     return 0;
 }

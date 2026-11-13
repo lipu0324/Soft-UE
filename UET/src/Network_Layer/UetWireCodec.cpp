@@ -232,6 +232,14 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         put(encoded_bytes,(uint16_t{header.type}<<11)|(next_wire(next)<<7)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
         put(encoded_bytes,header.clear_psn_off,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
         put(encoded_bytes,header.flags.syn ? ((header.pdc_info&1)<<12)|header.psn_off : header.dpdcid,2);
+    } else if (packet.PDS_type == RUDI_header) {
+        const auto& header=packet.PDS_header.RUDI_header;
+        if ((header.type!=RUDI_REQ && header.type!=RUDI_RESP) || header.flags.retx>1 || header.flags.m>1 ||
+            (header.type==RUDI_REQ && header.flags.m)) throw std::invalid_argument("invalid RUDI header");
+        next=header.next_hdr;
+        put(encoded_bytes,(uint16_t{header.type}<<11)|(next_wire(next)<<7)|(header.flags.m<<5)|(header.flags.retx<<4),2);
+        put(encoded_bytes,0,2); // Figure3-74 reserved word precedes pkt_id.
+        put(encoded_bytes,header.pkt_id,4);
     } else if (packet.PDS_type == RUOD_ack_header) {
         const auto& header=packet.PDS_header.RUOD_ack_header;
         if (header.type!=ACK && header.type!=ACK_CC) throw std::invalid_argument("ACK extension not implemented");
@@ -298,6 +306,12 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         const auto destination=reader.take(2);
         if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
         else header.dpdcid=destination;
+    } else if (type==4 || type==5) {
+        packet.PDS_type=RUDI_header; auto& header=packet.PDS_header.RUDI_header;
+        header.type=type==4?RUDI_REQ:RUDI_RESP; header.next_hdr=next;
+        header.flags.retx=(flags>>4)&1; header.flags.m=type==5?(flags>>5)&1:0;
+        reader.take(2); // Reserved bits are ignored after outer integrity validation.
+        header.pkt_id=reader.take(4);
     } else if (type==7 || type==8) {
         packet.PDS_type=RUOD_ack_header; auto& header=packet.PDS_header.RUOD_ack_header;
         header.type=type==7?ACK:ACK_CC; header.next_hdr=next; header.flags.m=(flags>>5)&1; header.flags.retx=(flags>>4)&1;

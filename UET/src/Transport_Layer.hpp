@@ -117,7 +117,8 @@ enum PDS_header_type{
     RUOD_ack_header,    // RUOD acknowledgment header
     RUOD_cp_header,     // RUOD control packet header
     nack_header,        // Negative acknowledgment header
-    UUD_req_header      // Connectionless, unreliable datagram header (§3.5.10.14)
+    UUD_req_header,     // Connectionless, unreliable datagram header (§3.5.10.14)
+    RUDI_header        // Stateless idempotent request/response (§3.5.10.11)
 };
 
 /**
@@ -129,7 +130,7 @@ enum PDS_type {
     TSS,            // UET encryption header
     RUD_REQ,        // RUD request (Reliable Unordered Delivery)
     ROD_REQ,        // ROD request (Reliable Ordered Delivery)
-    RUDI_REQ,       // RUDI request (Reliable Unordered Delivery with Immediate response)
+    RUDI_REQ,       // Reliable Unordered Delivery for Idempotent operations
     RUDI_RESP,      // RUDI response
     UUD_REQ,        // UUD request (Unreliable Unordered Delivery)
     ACK,            // Acknowledgment packet
@@ -159,6 +160,7 @@ enum PDS_next_hdr{
 
 // Delivery modes shared by SES, PDS and runtime adapters. RUD preserves
 // exactly-once packet delivery; ROD additionally preserves packet order.
+// RUDI permits repeated idempotent execution without PDCs; UUD is unreliable.
 enum pdc_mode { RUD, ROD, RUDI, UUD };
 
 /**
@@ -250,6 +252,16 @@ struct PDS_RUOD_req_header
     uint8_t pdc_info : 4;           // 4 bits, PDC information: Bit0=whether to use reserved PDC pool, Bit3:1 reserved
     uint16_t psn_off : 12;          // 12 bits, numerical difference between this packet's PSN and PDC's Start_PSN
 }PACKED;
+
+// Figure3-74: the wire header is8 bytes: prologue16, reserved16, pkt_id32.
+// This local metadata is deliberately NOT a serialized C++ structure. pkt_id
+// is a source-local response association, not a PSN or a PDC identifier.
+struct PDS_RUDI_header {
+    PDS_type type;
+    PDS_next_hdr next_hdr;
+    struct { uint8_t m,retx; } flags; // m echoes request ECN only in responses.
+    uint32_t pkt_id;
+};
 
 /**
  * @brief PDS RUOD acknowledgment header structure
@@ -558,6 +570,7 @@ struct PDStoNET_pkt
             ::PDS_type type;
             PDS_next_hdr next_hdr;
         } UUD_req_header; // Standard wire encoding is four bytes; no C++ serialization.
+        PDS_RUDI_header RUDI_header;
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
     uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
