@@ -264,7 +264,8 @@ void invalid_requests() {
     TaggedProviderHarness harness; uint8_t byte=1; iovec vector{&byte,1};
     fi_msg_tagged message{}; message.msg_iov=&vector; message.iov_count=1; message.addr=FI_ADDR_UNSPEC;
     CHECK(fi_trecvmsg(harness.provider.endpoint,&message,FI_PEEK)==-FI_EOPNOTSUPP);
-    CHECK(fi_trecv(harness.provider.endpoint,&byte,1,nullptr,harness.peer,0,0,nullptr)==-FI_EOPNOTSUPP);
+    // Without the opt-in capability, libfabric requires src_addr to be ignored.
+    CHECK(fi_trecv(harness.provider.endpoint,&byte,1,nullptr,harness.peer,0,0,nullptr)==0);
     CHECK(fi_tsendv(harness.provider.endpoint,&vector,nullptr,2,harness.peer,0,nullptr)==-FI_EINVAL);
     CHECK(fi_tinject(harness.provider.endpoint,&byte,257,harness.peer,0)==-FI_EMSGSIZE);
     message.addr=harness.peer;

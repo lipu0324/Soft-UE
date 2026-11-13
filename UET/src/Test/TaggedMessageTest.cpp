@@ -254,6 +254,37 @@ void absolute_rank_job_scope(pdc_mode mode) {
     fixture.close();
 }
 
+void untagged_source_matching(pdc_mode mode,bool datagram=false) {
+    TaggedFixture fixture(mode);
+    fixture.source.memory().add_job(99); fixture.target.memory().add_job(99);
+    RegionOptions shared_options; shared_options.allow_any_job=true;
+    const auto shared=fixture.target.memory().register_region(1,1,64,7,shared_options);
+    fixture.target.post_receive(1,1,shared.key,0,8,80,1,uint32_t{UINT32_MAX});
+    fixture.target.post_receive(1,1,shared.key,16,8,81);
+    auto operation=fixture.message(0,0x11,1,0);
+    operation.type=datagram?OperationType::DatagramSend:OperationType::Send;
+    const auto completed_status=datagram?CompletionStatus::LocalSuccess:CompletionStatus::Success;
+    const auto completed_code=datagram?0:1;
+    const auto check_receive=[&](uint64_t context) {
+        Completion completion{};
+        CHECK(fixture.target.poll_completion(completion) && completion.context==context && !completion.tag && completion.status==CompletionStatus::Success);
+    };
+    fixture.source.submit(operation); fixture.run(); fixture.source_completion(completed_status,completed_code); check_receive(81);
+    operation.initiator_id=UINT32_MAX; operation.payload={0x22};
+    fixture.source.submit(operation); fixture.run(); fixture.source_completion(completed_status,completed_code); check_receive(80);
+    // Absolute PID selection can authorize any Job, but a directed rank still
+    // belongs to its posting's Job. The wildcard remains eligible across Jobs.
+    fixture.target.post_receive(1,1,shared.key,32,8,82,1,uint32_t{7});
+    fixture.target.post_receive(1,1,shared.key,48,8,83);
+    operation.relative_addressing=false; operation.job=99; operation.initiator_id=7; operation.payload={0x33};
+    fixture.source.submit(operation); fixture.run(); fixture.source_completion(completed_status,completed_code); check_receive(83);
+    operation.job=1; operation.payload={0x44};
+    fixture.source.submit(operation); fixture.run(); fixture.source_completion(completed_status,completed_code); check_receive(82);
+    for (const auto [offset,value]:{std::pair<uint64_t,uint8_t>{0,0x22},{16,0x11},{32,0x44},{48,0x33}})
+        CHECK(fixture.target.memory().read(1,1,shared.key,offset,1)==std::vector<uint8_t>{value});
+    fixture.close();
+}
+
 void faults_and_fragment_identity(pdc_mode mode,bool congestion) {
     TaggedFixture fixture(mode,congestion);
     fixture.post(0,64,{0xface,0,{}},50); fixture.post(64,64,{0xface,0,{}},51);
@@ -277,9 +308,9 @@ int main() {
     try {
         for (const auto mode:{RUD,ROD}) {
             for (const bool congestion:{false,true}) { fifo_and_source_matching(mode,congestion); faults_and_fragment_identity(mode,congestion); }
-            independent_spaces_and_generations(mode); late_posting_and_no_match(mode); zero_truncation_and_snapshot(mode); absolute_rank_job_scope(mode);
+            independent_spaces_and_generations(mode); late_posting_and_no_match(mode); zero_truncation_and_snapshot(mode); absolute_rank_job_scope(mode); untagged_source_matching(mode);
         }
-        zero_storage_and_resource_recovery();
+        zero_storage_and_resource_recovery(); untagged_source_matching(ROD,true);
         std::cout<<"PASS native tagged exact/wildcard FIFO, rank, independent spaces, unexpected, zero/truncation, snapshots and wire faults\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

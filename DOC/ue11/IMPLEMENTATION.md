@@ -41,7 +41,7 @@ resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
 
 Native tagged matching keeps tag, Job-level rank and RMA keys separate. Exact and
 wildcard postings share FIFO selection within their own resource space; see
-[tagged messages](TAGGED-MESSAGES.md). Real-time adapters anchor late callbacks to
+[tagged messages](TAGGED-MESSAGES.md) and [directed receive](DIRECTED-RECEIVE.md). Real-time adapters anchor late callbacks to
 the live injected clock; virtual simulations keep event-time stepping unchanged.
 See [real-time progress](REALTIME-PROGRESS.md).
 

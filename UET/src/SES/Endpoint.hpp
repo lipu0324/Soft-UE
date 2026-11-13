@@ -73,7 +73,7 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
-    bool fetching_atomic=true, compare_atomic=true, tagged_send=true;
+    bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
@@ -254,8 +254,8 @@ public:
         return id;
     }
     void post_receive(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
-                       uint32_t capacity, uint64_t context=0,uint16_t resource_index=1) {
-        post_buffer(job,pid,key,offset,capacity,context,resource_index,{});
+                       uint32_t capacity, uint64_t context=0,uint16_t resource_index=1,std::optional<uint32_t> initiator={}) {
+        post_buffer(job,pid,key,offset,capacity,context,resource_index,{},initiator);
     }
     void post_tagged_receive(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint32_t capacity,
                              TaggedReceiveMatch match,uint64_t context=0,uint16_t resource_index=1) {
@@ -356,6 +356,7 @@ private:
         uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity;
         uint64_t context; uint16_t resource_index; Region registration;
         std::optional<TaggedReceiveMatch> match;
+        std::optional<uint32_t> initiator; // Untagged/UUD source rank; tagged criteria carry their own rank.
     };
     struct Incoming {
         uint8_t opcode;
@@ -889,20 +890,23 @@ private:
                                 bool relative,bool tagged,uint64_t tag,uint32_t initiator) {
         if (receive.match.has_value()!=tagged || (relative && receive.job!=job) ||
             receive.pid!=pid || receive.resource_index!=resource_index) return false;
+        // §3.4.2.3.4: directed matching applies to SEND/UUD as well as tag.
+        // A rank never acquires meaning outside its JobID, even with an
+        // absolute PID. Network FEP identity and this rank are distinct fields.
+        const auto required_initiator=tagged?receive.match->initiator:receive.initiator;
+        if (required_initiator && (receive.job!=job || *required_initiator!=initiator)) return false;
         if (!tagged) return true;
         const auto& match=*receive.match;
         // §3.4.2.3.5: one FIFO among all matching exact/wildcard postings.
-        // A rank never acquires meaning outside its JobID (§3.4.2.3.4).
-        return !((tag^match.tag)&~match.ignore) &&
-            (!match.initiator || (receive.job==job && *match.initiator==initiator));
+        return !((tag^match.tag)&~match.ignore);
     }
     void post_buffer(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint32_t capacity,
-                     uint64_t context,uint16_t resource_index,std::optional<TaggedReceiveMatch> match) {
+                     uint64_t context,uint16_t resource_index,std::optional<TaggedReceiveMatch> match,std::optional<uint32_t> initiator={}) {
         if (closed_) throw std::logic_error("endpoint closed");
         const auto registration=memory_.authorize_local(job,pid,key,offset,capacity,Access::Write,resource_index);
         if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
         const auto space=match?ResourceSpace::Tagged:ResourceSpace::Send;
-        posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration,std::move(match)});
+        posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration,std::move(match),initiator});
         match_unexpected();
         const auto disabled=disabled_generations_.find({pid,resource_index,space});
         if (disabled!=disabled_generations_.end()) {

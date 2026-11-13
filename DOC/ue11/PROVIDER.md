@@ -39,6 +39,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 完成 | CONTEXT/MSG/DATA/TAGGED CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
 | 访问权限 | `FI_REMOTE_READ/WRITE` 分别授予远端读/写；仅 `FI_READ/WRITE` 不授予远端访问；撤销使 key 立即失效 |
 | 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
+| Directed receive | 显式请求 FI_DIRECTED_RECV 后，RDM SEND/tagged 与 DGRAM UUD 按 AV 源匹配；未请求时忽略源参数，见 [源匹配](DIRECTED-RECEIVE.md) |
 | 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、READ/WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
 | 注入 | SEND/WRITE/非取回 ATOMIC inject API 和逐调用 `FI_INJECT`；`inject_size=256` 字节；成功抑制与异步错误按 API 规则分别处理 |
 | 控制事件 | 非阻塞 EQ 的实际 FIFO/PEEK/背压、endpoint 绑定和父子生命周期；见 [EQ](PROVIDER-EQ.md) |
@@ -96,7 +97,7 @@ READ 拒绝 FI_INJECT 和 FI_REMOTE_CQ_DATA，DGRAM 不公布 READ。公开 API 
 FI_REMOTE_CQ_DATA，DGRAM不公布原子能力。`FI_MSWAP` 的掩码与操作数逐字节转换为
 UE公式，详见[公开原子接口](PROVIDER-FETCHING-ATOMICS.md)。
 
-浮点原子、directed receive、
+浮点原子、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时

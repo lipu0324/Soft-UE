@@ -412,14 +412,15 @@
         "libfabric_mode_selection_test",
         "libfabric_unordered_recovery_processes",
         "libfabric_inject_test",
-        "libfabric_event_queue_test"
+        "libfabric_event_queue_test",
+        "libfabric_directed_receive_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open. Public API tests now verify independent SEND/RW mode selection, mixed-mode FIFO, any-JobID MR registration and both explicit ROD and RUD late-receive recovery. Standard UET addressing and full authorization configuration remain incomplete. Injection API/flags use bounded owned copies and preserve success/error CQ rules through semantic retries; RDM completion thresholds use the explicitly stronger globally-observable point; DGRAM thresholds use local transmit acceptance. Basic nonblocking EQ FIFO/binding is tested; standard UET addressing, full authorization and asynchronous control production remain incomplete."
+      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open. Public API tests now verify independent SEND/RW mode selection, mixed-mode FIFO, any-JobID MR registration and both explicit ROD and RUD late-receive recovery. Standard UET addressing and full authorization configuration remain incomplete. Injection API/flags use bounded owned copies and preserve success/error CQ rules through semantic retries; RDM completion thresholds use the explicitly stronger globally-observable point; DGRAM thresholds use local transmit acceptance. Basic nonblocking EQ FIFO/binding is tested; standard UET addressing, full authorization and asynchronous control production remain incomplete. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
     },
     {
       "id": "CMS-NSCC",
@@ -489,13 +490,14 @@
         "tagged_message_test",
         "reference_process_interop",
         "libfabric_tagged_test",
-        "libfabric_provider_processes"
+        "libfabric_provider_processes",
+        "libfabric_directed_receive_test"
       ],
       "profiles": [
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public scalar/vector/msg tagged APIs, inject/data, full tag CQ/error fields and per-space generation recovery are implemented; private automatic tagged receive MRs reject known-key remote WRITE. Public two-provider processes exchange exact64bit tagged messages in both directions. Optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md."
+      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public scalar/vector/msg tagged APIs, inject/data, full tag CQ/error fields and per-space generation recovery are implemented; private automatic tagged receive MRs reject known-key remote WRITE. Public two-provider processes exchange exact64bit tagged messages in both directions. Optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
     },
     {
       "id": "SES-DEFER",
@@ -692,7 +694,8 @@
       "summary": "相对/绝对 PID、独立资源索引、generation 与任意 JobID MR 授权",
       "status": "partial",
       "tests": [
-        "addressing_test"
+        "addressing_test",
+        "libfabric_directed_receive_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -700,7 +703,7 @@
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native address selection and scope checks pass; optimized/local formats and all key classes remain open."
+      "evidence_note": "Native address selection and scope checks pass; optimized/local formats and all key classes remain open. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
     },
     {
       "id": "SES-RETIREMENT",

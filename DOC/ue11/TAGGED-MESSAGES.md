@@ -13,6 +13,7 @@
 接收方调用 `post_tagged_receive(job,pid,key,offset,capacity,match,context,index)`。
 `TaggedReceiveMatch{tag,ignore,initiator}` 中，ignore 为1的位不参与 tag 比较；
 未指定 initiator 表示任意源。匹配条件为 `(received_tag ^ posted_tag) & ~ignore == 0`。
+普通 SEND/UUD 的原生指定源与公开 FI_DIRECTED_RECV 见[源匹配](DIRECTED-RECEIVE.md)。
 指定的 rank 始终在接收投递的 JobID 内解释，即使网络请求使用绝对 PID 寻址，也不能
 让另一个 Job 的同号 rank 消耗该投递。
 

@@ -19,7 +19,7 @@
 
 namespace {
 using namespace UET;
-constexpr uint64_t datagram_caps=FI_MSG|FI_SEND|FI_RECV|FI_REMOTE_CQ_DATA;
+constexpr uint64_t datagram_caps=FI_MSG|FI_SEND|FI_RECV|FI_REMOTE_CQ_DATA|FI_DIRECTED_RECV;
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__
 constexpr bool native_atomic_platform=true;
 #else
@@ -133,6 +133,7 @@ struct ProviderEndpoint {
     sockaddr_in local_address{};
     bool enabled=false;
     bool datagram=false;
+    bool directed_receive=false; // Opt-in fi_getinfo capability; otherwise src_addr is ignored.
     uint64_t next_receive_token=0;
     uint64_t message_ordering=0;
     uint64_t default_operation_flags=0;
@@ -651,7 +652,7 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
             info->tx_attr->inject_size>maximum_inject_bytes) return -FI_EINVAL;
         if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
         auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
-        endpoint->datagram=datagram;
+        endpoint->datagram=datagram; endpoint->directed_receive=info->caps&FI_DIRECTED_RECV;
         endpoint->message_ordering=info->tx_attr->msg_order;
         endpoint->default_operation_flags=info->tx_attr->op_flags;
         endpoint->local_address.sin_family=AF_INET;
@@ -927,7 +928,17 @@ ssize_t post_application_receive(fid_ep* handle,void* buffer,size_t length,fi_ad
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
-        if ((match && endpoint.datagram) || source!=FI_ADDR_UNSPEC) return -FI_EOPNOTSUPP;
+        if (match && endpoint.datagram) return -FI_EOPNOTSUPP;
+        std::optional<uint32_t> required_initiator;
+        if (endpoint.directed_receive && source!=FI_ADDR_UNSPEC) {
+            required_initiator=resolve_peer(endpoint,source);
+            if (!required_initiator) return -FI_EADDRNOTAVAIL;
+        }
+        // This SOCKADDR_IN laboratory provider assigns each endpoint's UDP
+        // node/port as its Job 1 rank proxy. The native interface independently
+        // supports all 32 rank bits. FI_DIRECTED_RECV is explicitly requested;
+        // without it, libfabric says to ignore src_addr rather than filter it.
+        if (match) match->initiator=required_initiator;
         if ((length && !buffer) || length>UINT32_MAX) return -FI_EINVAL;
         if (endpoint.receives.size()>=4096) return -FI_EAGAIN;
         if (endpoint.next_receive_token==UINT64_MAX) return -FI_ENOSPC; // Keep native context zero reserved for RMA CQ data.
@@ -938,7 +949,7 @@ ssize_t post_application_receive(fid_ep* handle,void* buffer,size_t length,fi_ad
         const auto token=++endpoint.next_receive_token;
         try {
             if (match) endpoint.semantic->post_tagged_receive(1,1,region.key,0,static_cast<uint32_t>(length),*match,token);
-            else endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token);
+            else endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token,1,required_initiator);
             endpoint.receives.emplace(token,ApplicationOperation{context,(match?FI_TAGGED:FI_MSG)|FI_RECV,buffer,region.key});
         } catch (...) { endpoint.domain->memory.deregister(region.key); throw; }
         return 0;
@@ -1091,7 +1102,9 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         if (!result) return -FI_EINVAL;
         *result=nullptr;
         const bool datagram=hints && hints->ep_attr && hints->ep_attr->type==FI_EP_DGRAM;
-        const auto available_caps=datagram?datagram_caps:supported_caps;
+        const auto requested_directed=hints && ((hints->caps|(hints->rx_attr?hints->rx_attr->caps:0))&FI_DIRECTED_RECV);
+        const auto available_caps=(datagram?datagram_caps:supported_caps)&
+            ~(requested_directed?uint64_t{0}:FI_DIRECTED_RECV);
         if (version>FI_VERSION(2,0) || (flags&~(FI_SOURCE|FI_NUMERICHOST))) return -FI_ENODATA;
         if (hints) {
             // hints.mode lists modes the application can accommodate. This
@@ -1126,7 +1139,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.ep_attr->max_order_waw_size=datagram?0:UINT32_MAX;
         info.ep_attr->max_order_raw_size=datagram?0:UINT32_MAX;
         info.ep_attr->max_order_war_size=datagram?0:UINT32_MAX;
-        info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_READ|FI_REMOTE_WRITE); info.tx_attr->size=4096;
+        info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_READ|FI_REMOTE_WRITE|FI_DIRECTED_RECV); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->inject_size=maximum_inject_bytes;
         const auto requested_flags=hints && hints->tx_attr?hints->tx_attr->op_flags:uint64_t{0};

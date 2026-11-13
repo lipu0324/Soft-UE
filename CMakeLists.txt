@@ -179,6 +179,12 @@ if(BUILD_TESTING)
     add_dependencies(libfabric_local_registration_test softue_fabric)
     set_tests_properties(libfabric_local_registration_test PROPERTIES TIMEOUT 40
       ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
+    softue_test(libfabric_directed_receive_test LibfabricDirectedReceiveTest.cpp)
+    target_include_directories(libfabric_directed_receive_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_directed_receive_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_dependencies(libfabric_directed_receive_test softue_fabric)
+    set_tests_properties(libfabric_directed_receive_test PROPERTIES TIMEOUT 45
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
     softue_test(libfabric_tagged_test LibfabricTaggedTest.cpp)
     target_include_directories(libfabric_tagged_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
     target_link_libraries(libfabric_tagged_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})

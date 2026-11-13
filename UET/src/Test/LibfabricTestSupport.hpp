@@ -13,10 +13,11 @@
 
 class ProviderFixture {
 public:
-    explicit ProviderFixture(uint64_t ordering,uint64_t operation_flags=FI_FENCE,bool datagram=false,fi_cq_format format=FI_CQ_FORMAT_DATA) :completion_format(format) {
+    explicit ProviderFixture(uint64_t ordering,uint64_t operation_flags=FI_FENCE,bool datagram=false,fi_cq_format format=FI_CQ_FORMAT_DATA,bool directed_receive=false) :completion_format(format) {
         hints=fi_allocinfo(); CHECK(hints);
         hints->fabric_attr->prov_name=::strdup("softue"); hints->ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM;
         hints->addr_format=FI_SOCKADDR_IN; hints->caps=datagram?FI_MSG:FI_MSG|FI_RMA|FI_ATOMIC;
+        if (directed_receive) hints->caps|=FI_DIRECTED_RECV;
         hints->tx_attr->msg_order=hints->rx_attr->msg_order=ordering;
         hints->tx_attr->op_flags=operation_flags;
         const auto result=fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info);

@@ -6,8 +6,8 @@ RDM 端点提供 `fi_tsend/tsendv/tsendmsg`、`fi_trecv/trecvv/trecvmsg`、
 
 接收项由 tag、ignore bits 和应用 context 描述。provider 为应用缓冲区创建仅供本地
 放置的临时注册，不把地址或这个 key 发送给 peer。SEND 和 Tagged 的接收项分别
-消费；精确和通配 tagged 项共同遵守软件投递顺序。公开接口当前接受任意源
-FI_ADDR_UNSPEC；原生 API 的 Job 内 rank 匹配不等于已经提供 FI_DIRECTED_RECV。
+消费；精确和通配 tagged 项共同遵守软件投递顺序。公开接口默认使用任意源；应用可请求 FI_DIRECTED_RECV 并通过 AV 项指定源，见
+[源匹配与协商](DIRECTED-RECEIVE.md)。
 
 ## 完成队列与内存所有权
 
@@ -35,7 +35,7 @@ peer generation 以 `{peer,ResourceSpace}` 保存，Tagged、SEND 和 RMA 三类
 NO_MATCH 隐藏中间尝试，使用新 MID 重试，直到成功或达到现有恢复上限。PDS 负责
 已执行消息的响应重放，重复报文不能再次消耗接收项。
 
-PEEK/CLAIM/DISCARD、multi-receive、FI_DIRECTED_RECV、tagged atomics、rendezvous
+PEEK/CLAIM/DISCARD、multi-receive、tagged atomics、rendezvous
 和优化头需要各自的状态机，当前接口明确拒绝尚未实现的调用，不据此声明 Profile
 完成。
 
