@@ -18,9 +18,9 @@
 using namespace UET::Runtime;
 using namespace UET::SES;
 
-class ObservedNativePort final : public IPacketPort {
+class ObservedProviderPort final : public IPacketPort {
 public:
-    explicit ObservedNativePort(UdpFramePort& lower):lower_(lower) {}
+    explicit ObservedProviderPort(UdpFramePort& lower):lower_(lower) {}
     std::map<unsigned,unsigned> request_modes;
     std::vector<unsigned> first_request_opcodes;
     SendResult try_send(const Frame& frame) override { return lower_.try_send(frame); }
@@ -30,18 +30,22 @@ public:
             // Independent extraction of §3.5.10 type[15:11] and §3.4.3.1
             // opcode[5:0]. This test does not ask the provider's mode helper
             // or its decoder which mode it selected.
-            CHECK(frame.bytes.size()>=50 && frame.bytes[14]==0x45 && frame.bytes[23]==253);
-            const auto type=frame.bytes[38]>>3;
+            constexpr size_t pds_header_offset=14+20+8; // Ethernet + IPv4 + UDP.
+            constexpr size_t ses_header_offset=pds_header_offset+12;
+            CHECK(frame.bytes.size()>=ses_header_offset && frame.bytes[14]==0x45 && frame.bytes[23]==17);
+            CHECK(frame.bytes[36]==0x12 && frame.bytes[37]==0xb9); // Independent UDP/4793 bytes.
+            const auto type=frame.bytes[pds_header_offset]>>3;
             if (type==2 || type==3) {
-                CHECK(frame.bytes.size()>=94);
-                CHECK(frame.bytes[51]&0x20); // The provider explicitly chooses GO for all reliable levels.
-                const unsigned opcode=frame.bytes[50]&0x3f;
+                CHECK(frame.bytes.size()>=ses_header_offset+44);
+                CHECK(frame.bytes[ses_header_offset+1]&0x20); // Provider chooses GO for all reliable levels.
+                const unsigned opcode=frame.bytes[ses_header_offset]&0x3f;
                 const auto previous=request_modes.find(opcode);
                 CHECK(previous==request_modes.end() || previous->second==type);
                 request_modes[opcode]=type;
-                const unsigned local_pdc=(unsigned(frame.bytes[46])<<8)|frame.bytes[47];
+                const unsigned local_pdc=(unsigned(frame.bytes[pds_header_offset+8])<<8)|frame.bytes[pds_header_offset+9];
                 uint32_t sequence=0;
-                for (size_t offset=42;offset<46;++offset) sequence=(sequence<<8)|frame.bytes[offset];
+                for (size_t offset=pds_header_offset+4;offset<pds_header_offset+8;++offset)
+                    sequence=(sequence<<8)|frame.bytes[offset];
                 if (seen_requests_.emplace(local_pdc,sequence).second) first_request_opcodes.push_back(opcode);
             }
             receiver(std::move(frame));
@@ -57,7 +61,7 @@ void check_delivery_modes(uint64_t ordering,bool ordered_send,bool ordered_rma,b
     const bool receive_was_late=late_receive;
     ProviderFixture provider(ordering,FI_FENCE|completion_level);
     RealtimeRuntime runtime; Trace trace(runtime.events(),0); UdpFramePort network(0);
-    ObservedNativePort observed(network);
+    ObservedProviderPort observed(network);
     PdsHost host(network.node(),runtime.events(),trace,observed); host.services().rto_ns=20*kMillisecond;
     Endpoint target(network.node(),host,runtime.events(),trace,1024,5*1000*kMillisecond);
     target.memory().add_job(1);
