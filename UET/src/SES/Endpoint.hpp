@@ -12,15 +12,18 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, Send=5, DatagramSend=7 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
-// A local registered destination for READ results. This descriptor never goes
+// A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
 struct ReadResultBuffer {
     uint64_t key=0,offset=0;
     uint32_t capacity=0;
     uint16_t pid=1,resource_index=1;
 };
+// Both operations use the same local registration descriptor. Their wire
+// response/recovery policies remain different (§3.5.17).
+using AtomicResultBuffer=ReadResultBuffer;
 struct Operation {
     OperationType type = OperationType::Send;
     pdc_mode delivery_mode = ROD; // Reliable ordered by default; RUD permits packet reordering.
@@ -41,6 +44,8 @@ struct Operation {
     std::shared_ptr<const PayloadSource> payload_source; // Optional lazy bytes; cannot accompany a nonempty payload vector.
     uint32_t read_length=0;
     std::optional<ReadResultBuffer> read_result;
+    std::vector<uint8_t> atomic_compare; // One native little-endian compare/mask element, for dual-operand fetching only.
+    std::optional<AtomicResultBuffer> atomic_result;
 };
 struct Completion {
     uint64_t operation;
@@ -58,11 +63,16 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
+    bool fetching_atomic=true, compare_atomic=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
         IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
         IntegerAtomicDatatype::Uint32,IntegerAtomicDatatype::Int64,IntegerAtomicDatatype::Uint64};
+    std::vector<IntegerAtomicDatatype> fetching_atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
+        IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
+        IntegerAtomicDatatype::Uint32,IntegerAtomicDatatype::Int64,IntegerAtomicDatatype::Uint64,
+        IntegerAtomicDatatype::Int128,IntegerAtomicDatatype::Uint128};
     // A feature test is not a complete profile-conformance declaration.
     bool ai_base=false, ai_full=false, hpc=false, unified_local=false;
 };
@@ -116,7 +126,8 @@ public:
         };
         if (pending_.size() >= 4096) { complete_local(CompletionStatus::ResourceExhausted); return id; }
         const bool is_datagram=operation.type==OperationType::DatagramSend;
-        const bool is_atomic=operation.type==OperationType::Atomic;
+        const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic;
+        const bool is_atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
         const bool is_read=operation.type==OperationType::Read;
         if (!is_datagram && operation.delivery_mode!=ROD && operation.delivery_mode!=RUD) {
             complete_local(CompletionStatus::Unsupported); return id;
@@ -125,8 +136,9 @@ public:
             operation.type!=OperationType::Write && !is_atomic && !is_datagram && !is_read) {
             complete_local(CompletionStatus::Unsupported); return id;
         }
-        const uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
         if ((!is_read && (operation.read_length || operation.read_result)) ||
+            (!is_fetching_atomic && (operation.atomic_result || !operation.atomic_compare.empty())) ||
             (is_read && (payload_length || operation.payload_source || operation.immediate_data))) {
             complete_local(CompletionStatus::InvalidRequest); return id;
         }
@@ -147,16 +159,37 @@ public:
         }
         size_t atomic_width=1;
         if (is_atomic) {
-            if (static_cast<uint8_t>(operation.atomic_datatype)>7 ||
-                static_cast<uint8_t>(operation.atomic_operation)>12 ||
-                operation.atomic_operation==IntegerAtomicOperation::Read) {
+            if (static_cast<uint8_t>(operation.atomic_datatype)>(is_fetching_atomic?9:7) ||
+                static_cast<uint8_t>(operation.atomic_operation)>(is_fetching_atomic?0x13:12) ||
+                (!is_fetching_atomic && operation.atomic_operation==IntegerAtomicOperation::Read)) {
                 complete_local(CompletionStatus::Unsupported); return id;
             }
             atomic_width=integer_atomic_width(operation.atomic_datatype);
-            if (!payload_length || payload_length%atomic_width ||
+            if ((!is_fetching_atomic && (!payload_length || payload_length%atomic_width)) ||
                 operation.remote_offset%atomic_width || mtu_<atomic_width) {
                 complete_local(CompletionStatus::InvalidRequest); return id;
             }
+        }
+        std::optional<Region> atomic_registration;
+        if (is_fetching_atomic) {
+            const bool dual_operand=dual_operand_atomic(operation.atomic_operation);
+            if (operation.payload_source || operation.immediate_data || !operation.atomic_result ||
+                operation.atomic_result->capacity<atomic_width || operation.atomic_result->pid>0xfff ||
+                operation.atomic_result->resource_index>0xfff || mtu_<(dual_operand?32:atomic_width)) {
+                complete_local(CompletionStatus::InvalidRequest); return id;
+            }
+            if (operation.atomic_operation==IntegerAtomicOperation::Read && operation.payload.empty())
+                operation.payload.resize(atomic_width); // Atomic READ still carries one element on the wire.
+            try {
+                operation.payload=fetching_atomic_wire_operands(operation.payload,operation.atomic_compare,
+                    operation.atomic_operation,operation.atomic_datatype);
+            } catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return id; }
+            payload_length=operation.payload.size();
+            const auto& destination=*operation.atomic_result;
+            try {
+                atomic_registration=memory_.authorize(operation.job,destination.pid,destination.key,
+                    destination.offset,atomic_width,Access::Write,destination.resource_index);
+            } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
@@ -172,9 +205,16 @@ public:
         if (!message) { complete_local(CompletionStatus::ResourceExhausted); return id; }
         const uint32_t transfer_length=is_read?operation.read_length:static_cast<uint32_t>(payload_length);
         Pending pending{id,operation.context,transfer_length,0,operation.peer,operation.job};
+        // Data ACK has no RI-generation field. Preserve the admitted request's
+        // generation instead of reporting zero after a nonzero-generation READ
+        // or fetching atomic (e.g. following a provider BAD_GENERATION retry).
+        pending.returned_generation=operation.target_generation;
         pending.is_datagram=is_datagram;
         pending.is_read=is_read; pending.read_result=operation.read_result;
         pending.read_registration=std::move(read_registration);
+        pending.is_fetching_atomic=is_fetching_atomic; pending.atomic_result=operation.atomic_result;
+        pending.atomic_registration=std::move(atomic_registration);
+        pending.atomic_result_length=static_cast<uint32_t>(atomic_width);
         pending_.emplace(message,pending);
         try {
             auto source=operation.payload_source;
@@ -272,6 +312,10 @@ private:
         uint32_t connection_start_psn=0,last_transmitted_psn=0;
         bool is_datagram=false;
         bool is_read=false;
+        bool is_fetching_atomic=false,atomic_result_placed=false;
+        uint32_t atomic_result_length=0;
+        std::optional<AtomicResultBuffer> atomic_result;
+        std::optional<Region> atomic_registration;
         std::optional<ReadResultBuffer> read_result;
         std::optional<Region> read_registration;
         ReadCoverage read_results;
@@ -379,7 +423,8 @@ private:
             auto& transfer=found->second;
             const auto& operation=transfer.operation;
             const bool datagram=operation.type==OperationType::DatagramSend;
-            const bool atomic=operation.type==OperationType::Atomic;
+            const bool fetching_atomic=operation.type==OperationType::FetchingAtomic;
+            const bool atomic=operation.type==OperationType::Atomic || fetching_atomic;
             const bool read=operation.type==OperationType::Read && !transfer.aborting;
             if (read && pending_.at(message).read_requests_awaiting_data.size()>=read_result_window_) break;
             const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
@@ -424,7 +469,10 @@ private:
                 count=0; request.pkt.payload.clear(); header.opcode=0x0f; header.eom=1;
                 if (!header.som) header.diff.som_false.payload_length=0;
             }
-            if (atomic && !transfer.aborting) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
+            // Fetching operands were encoded once at submission; dual operand
+            // fields are padded16B slots, not a vector of datatype elements.
+            if (atomic && !fetching_atomic && !transfer.aborting)
+                convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:0)+request.pkt.payload.size());
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
@@ -637,13 +685,38 @@ private:
         message.completed=message.end_seen && !message.read_returns_pending &&
             (message.first_error || message.read_requests.bytes()==message.total);
     }
-    void maybe_complete_read(uint16_t message) {
+    void maybe_complete_returned_data(uint16_t message) {
         const auto found=pending_.find(message);
         if (found==pending_.end()) return;
         const auto& operation=found->second;
         if (operation.is_read && operation.read_results.bytes()==operation.length &&
             operation.end_of_message_transmitted && operation.awaiting_semantic_responses.empty())
             finish(message,CompletionStatus::Success,operation.length,static_cast<uint8_t>(SemanticReturnCode::Ok),operation.returned_generation);
+        else if (operation.is_fetching_atomic && operation.atomic_result_placed &&
+            operation.end_of_message_transmitted && operation.awaiting_semantic_responses.empty())
+            finish(message,CompletionStatus::Success,operation.atomic_result_length,static_cast<uint8_t>(SemanticReturnCode::Ok),operation.returned_generation);
+    }
+    void place_atomic_result(uint16_t message,const SEStoPDS_pkt& packet) {
+        const auto found=pending_.find(message);
+        if (found==pending_.end()) return;
+        auto& operation=found->second;
+        const auto& header=packet.bth_header.Semantic_Response_with_Data_Header;
+        if (!operation.is_fetching_atomic || operation.atomic_result_placed) return;
+        if (header.version || header.opcode!=2 || header.return_code!=1 || header.message_offset ||
+            header.modified_length!=operation.length || header.payload_length!=operation.atomic_result_length ||
+            packet.payload.size()!=operation.atomic_result_length) {
+            finish(message,CompletionStatus::LocalError,0,0); return;
+        }
+        try {
+            auto native_bytes=packet.payload;
+            std::reverse(native_bytes.begin(),native_bytes.end()); // Exactly one network-order element.
+            const auto& destination=*operation.atomic_result;
+            memory_.write_registration(*operation.atomic_registration,operation.job,destination.pid,
+                destination.offset,native_bytes,destination.resource_index);
+        } catch (const MemoryAccessError&) { finish(message,CompletionStatus::LocalError,0,0); return; }
+        operation.atomic_result_placed=true;
+        trace_.record(node_,"atomic_result_placed",operation.atomic_result_length);
+        maybe_complete_returned_data(message);
     }
     void place_read_result(uint16_t message,const SEStoPDS_pkt& packet) {
         const auto found=pending_.find(message);
@@ -677,7 +750,7 @@ private:
             finish(message,CompletionStatus::LocalError,previous_bytes,0); return;
         }
         trace_.record(node_,"read_result_placed",operation.read_results.bytes());
-        maybe_complete_read(message);
+        maybe_complete_returned_data(message);
         feed_submissions();
     }
     void receive_return_data(const PDC_SES_req& request) {
@@ -699,12 +772,13 @@ private:
         if (response.pkt.bth_type==Semantic_Response_with_Data_Header) {
             const auto& header=response.pkt.bth_header.Semantic_Response_with_Data_Header;
             const auto pending=pending_.find(header.read_request_msg_id);
-            if (pending==pending_.end() || !pending->second.is_read) return;
+            if (pending==pending_.end() || (!pending->second.is_read && !pending->second.is_fetching_atomic)) return;
             auto& operation=pending->second;
             if (response.source_fep!=operation.peer || header.job_id!=operation.job ||
                 response.PDCID!=operation.local_pdc || response.connection_start_psn!=operation.connection_start_psn ||
                 !operation.awaiting_semantic_responses.erase(response.original_sequence)) return;
-            place_read_result(header.read_request_msg_id,response.pkt);
+            if (operation.is_fetching_atomic) place_atomic_result(header.read_request_msg_id,response.pkt);
+            else place_read_result(header.read_request_msg_id,response.pkt);
             return;
         }
         if (response.pkt.bth_type!=Semantic_Response_Header) return;
@@ -723,7 +797,7 @@ private:
         }
         // A positive forward READ result accepts the request; success still
         // requires all returned data to be placed (§3.5.20.2.2).
-        if (it->second.is_read) { maybe_complete_read(semantic_header.message_id); return; }
+        if (it->second.is_read || it->second.is_fetching_atomic) { maybe_complete_returned_data(semantic_header.message_id); return; }
         // §3.4.4.3 / §3.5.13: every transmitted packet needs a positive
         // semantic result. An EOM DEFAULT cannot hide an earlier missing
         // packet. PDS supplies inferred defaults only for strictly-later CACK.
@@ -1018,11 +1092,72 @@ private:
             // the initiator's original message ID leased until delivery.
         } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
+    void receive_fetching_atomic(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto found=incoming_.find(receive_message_key(request));
+        if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved fetching atomic");
+        auto& message=found->second;
+        if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
+        if (message.first_error) { reply_error(request,message); return; }
+        // §3.5.17: completed fetching requests are replayed by the PDS unique
+        // response cache. A READ-style re-execution must never reach this code.
+        if (message.completed) { reply(request,SemanticReturnCode::OperationViolation,0); return; }
+        const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
+            reject_message(request,message,code,generation);
+        };
+        if (header.version || !header.som || !header.eom || header.hd) {
+            reject(SemanticReturnCode::AtomicUnsupportedSize); return;
+        }
+        if (header.ie) { reject(SemanticReturnCode::InitiatorError); return; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        const auto& extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
+        if (extension.atomic_datatype>9) { reject(SemanticReturnCode::AtomicUnsupportedDatatype); return; }
+        // Table3-29: CACHEABLE permits caching, rather than requiring it;
+        // CPU_COHERENT is naturally satisfied by this serialized host-memory
+        // event model. Ignore the reserved middle bits, reject unknown vendor
+        // control encodings. Neither flag weakens MR checks or replay caching.
+        if (extension.atomic_opcode>0x13 || (extension.semantic_contol&0xe0) || extension.rsvd) {
+            reject(SemanticReturnCode::AtomicUnsupportedOperation); return;
+        }
+        const auto datatype=static_cast<IntegerAtomicDatatype>(extension.atomic_datatype);
+        const auto operation=static_cast<IntegerAtomicOperation>(extension.atomic_opcode);
+        const auto width=integer_atomic_width(datatype);
+        if (header.request_length!=(dual_operand_atomic(operation)?32:width) ||
+            request.pkt.payload.size()!=header.request_length) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
+        if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
+        ResourceSelection selected{};
+        try {
+            selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                ResourceSpace::Rma,header.ri_generation);
+        } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
+        try {
+            const auto operands=decode_fetching_atomic_operands(request.pkt.payload,operation,datatype);
+            auto previous=memory_.fetch_atomic_element(header.job_id,selected.absolute_pid,header.match_bits,
+                header.buffer_offset,operation,datatype,operands.operand,operands.compare_or_mask,
+                selected.resource_index,header.rel);
+            convert_integer_atomic_byte_order(previous,datatype);
+            SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
+            response.rsp_len=20+width; response.gtd_del=true;
+            response.rsp.bth_type=Semantic_Response_with_Data_Header;
+            auto& result=response.rsp.bth_header.Semantic_Response_with_Data_Header;
+            result.opcode=2; result.return_code=1; result.job_id=header.job_id;
+            result.read_request_msg_id=header.msg_id; result.payload_length=width;
+            result.modified_length=header.request_length; response.rsp.payload=std::move(previous);
+            message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
+            message.initialized=true; message.completed=true; message.completion_reported=true;
+            message.received=header.request_length; message.segments.emplace(0,header.request_length);
+            // PDS retains the old value until Clear, including when the MR is
+            // changed or revoked after execution. SES retains no second copy.
+            if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected fetching atomic result");
+            host_.wake(); trace_.record(node_,"fetching_atomic_executed",width);
+        } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
+    }
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type==Semantic_Response_with_Data_Header) { receive_return_data(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
         if (request.pkt.bth_header.Standard_Header.opcode==2) { receive_read(request); return; }
+        if (request.pkt.bth_header.Standard_Header.opcode==4) { receive_fetching_atomic(request); return; }
         auto interpreted_header=request.pkt.bth_header.Standard_Header;
         // §3.3.5 / §3.4.4.6.1: AI Base accepts DEFERRABLE_SEND (0x08) as SEND.
         // Interpret a copy: restart tokens remain intact in the captured wire

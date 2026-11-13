@@ -34,7 +34,7 @@ int main() {
             // that same configured bound (§3.4.3.3) for multi-packet messages.
             Endpoint endpoint(1,host,loop,trace,1024,5*1000*kMillisecond);
             endpoint.memory().add_job(1);
-            std::vector<uint8_t> receive_buffer(32);
+            std::vector<uint8_t> receive_buffer(64);
             const auto receive_region=endpoint.memory().register_buffer(1,1,receive_buffer.data(),receive_buffer.size(),7);
             endpoint.post_receive(1,1,receive_region.key,0,receive_buffer.size(),77);
             std::cerr<<"READY "<<port.local_port()<<std::endl;
@@ -60,12 +60,21 @@ int main() {
             read.remote_offset=13; read.read_length=16;
             read.read_result=ReadResultBuffer{receive_region.key,16,16,1,1};
             endpoint.submit(read);
+            Operation fetch; fetch.type=OperationType::FetchingAtomic; fetch.peer=2; fetch.remote_key=target_key;
+            fetch.target_pid=target_pid; fetch.target_resource=target_resource; fetch.remote_offset=3072;
+            fetch.payload={1,0,0,0,0,0,0,0};
+            fetch.atomic_result=AtomicResultBuffer{receive_region.key,32,8,1,1};
+            endpoint.submit(fetch); // Reference returns old1 and atomically stores2.
+            Operation compare=fetch; compare.atomic_operation=IntegerAtomicOperation::CompareSwapEqual;
+            compare.atomic_compare={2,0,0,0,0,0,0,0}; compare.payload={9,0,0,0,0,0,0,0};
+            compare.atomic_result=AtomicResultBuffer{receive_region.key,40,8,1,1};
+            endpoint.submit(compare); // Its padded32B request returns old2 and stores9.
             Operation send; send.type=OperationType::Send; send.peer=2; send.target_pid=target_pid;
             send.target_resource=target_resource; send.payload={'a','b','c'};
             endpoint.submit(send);
             size_t sends=0,receives=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
-            while ((sends!=4 || receives!=1 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
+            while ((sends!=6 || receives!=1 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
                 port.progress(); runtime.progress(10000);
                 Completion completion{};
                 while (endpoint.poll_completion(completion)) {
@@ -79,16 +88,19 @@ int main() {
                 }
                 pollfd readiness{port.descriptor(),POLLIN,0}; ::poll(&readiness,1,1);
             }
-            if (sends!=4 || receives!=1 || endpoint.retained_receive_messages()!=0) {
+            if (sends!=6 || receives!=1 || endpoint.retained_receive_messages()!=0) {
                 std::cerr<<"FAIL Soft-UE interop timeout sends="<<sends<<" receives="<<receives<<'\n';
                 for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                 return 1;
             }
             CHECK(receive_buffer[0]==6 && receive_buffer[1]==5 && receive_buffer[2]==4);
             for (size_t byte=0;byte<16;++byte) CHECK(receive_buffer[16+byte]==static_cast<uint8_t>((13+byte)*7));
+            for (size_t byte=0;byte<8;++byte) {
+                CHECK(receive_buffer[32+byte]==(byte?0:1)); CHECK(receive_buffer[40+byte]==(byte?0:2));
+            }
             endpoint.close(); host.close(); port.close(); CHECK(loop.pending()==0);
         }
-        std::cout<<"PASS Soft-UE: WRITE/READ/SEND/AMO completed against the reference stack and results reached registered host memory\n";
+        std::cout<<"PASS Soft-UE: WRITE/READ/SEND/AMO/FETCH/CAS completed against the reference stack with verified registered results\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<"FAIL "<<error.what()<<'\n'; return 1; }
 }

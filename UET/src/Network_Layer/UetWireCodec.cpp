@@ -88,7 +88,7 @@ void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr
         if (header.som) put(encoded_bytes,header.diff.som_true.header_data,8);
         else put(encoded_bytes,(uint64_t{header.diff.som_false.payload_length}<<32)|header.diff.som_false.message_offset,8);
         put(encoded_bytes,header.request_length,4);
-        if (header.opcode==3) {
+        if (header.opcode==3 || header.opcode==4) {
             const auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
             if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
             put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
@@ -145,7 +145,7 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
             header.diff.som_false.message_offset=data&0xffffffff;
         }
         header.request_length=reader.take(4);
-        if (header.opcode==3) {
+        if (header.opcode==3 || header.opcode==4) {
             packet.SESpkt.eth_type=Atomic_Operation_Extension_Header;
             auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
             atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);

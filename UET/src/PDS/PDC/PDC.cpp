@@ -298,15 +298,19 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     // §3.5.12.5: deliver the explicit semantic result before inferring defaults.
     // This preserves a guaranteed error when the same ACK advances CACK.
     const auto explicit_request=tx_pkt_buffer.find(explicit_sequence);
-    if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && requiresReadReissue(explicit_sequence) &&
+    if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && requiresDataAcknowledgment(explicit_sequence) &&
         acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA && packet.SESpkt.bth_type==Semantic_Response_with_Data_Header) {
         const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
         const auto& result=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
-        const uint32_t offset=request.som?0:request.diff.som_false.message_offset;
+        const bool fetching_atomic=request.opcode==4;
+        const uint32_t offset=fetching_atomic || request.som?0:request.diff.som_false.message_offset;
         const bool valid_offset=offset<=request.request_length;
-        const uint32_t count=valid_offset?std::min(read_response_payload_mtu_,request.request_length-offset):0;
+        const auto datatype=fetching_atomic?
+            explicit_request->second.SESpkt.eth_header.Atomic_Operation_Extension_Header.atomic_datatype:0;
+        const uint32_t count=fetching_atomic?(datatype<=9?uint32_t{1}<<(datatype/2):0):
+            valid_offset?std::min(read_response_payload_mtu_,request.request_length-offset):0;
         if (!result.version && result.opcode==2 && result.return_code==1 && result.job_id==request.job_id &&
-            result.read_request_msg_id==request.msg_id && valid_offset && result.message_offset==offset &&
+            result.read_request_msg_id==request.msg_id && valid_offset && (!fetching_atomic || count) && result.message_offset==offset &&
             result.modified_length==request.request_length && result.payload_length==count && packet.SESpkt.payload.size()==count) {
             auto response=packet.SESpkt;
             if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);
@@ -321,7 +325,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         auto& semantic=response.bth_header.Semantic_Response_Header;
         const bool query_default=semantic.opcode==0 && semantic.job_id==0 && !semantic.modified_length;
         if (semantic.version==0 && semantic.opcode<=1 && semantic.message_id==request.message_id &&
-            (!requiresReadReissue(explicit_sequence) || semantic.return_code!=1) &&
+            (!requiresDataAcknowledgment(explicit_sequence) || semantic.return_code!=1) &&
             (semantic.job_id==request.job_id || query_default)) {
             // Table 3-69 deliberately omits JobID/generation from an ACK
             // Request's DEFAULT. Recover them from this exact PDC/PSN, never
@@ -336,7 +340,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     for (const auto& cached:tx_pkt_buffer) {
         if (cached.second.PDS_type!=RUOD_req_header ||
             (cached.second.SESpkt.bth_type!=Standard_Header && cached.second.SESpkt.bth_type!=Semantic_Response_with_Data_Header) ||
-            semantic_completed_tx_.count(cached.first) || requiresReadReissue(cached.first)) continue;
+            semantic_completed_tx_.count(cached.first) || requiresDataAcknowledgment(cached.first)) continue;
         const uint32_t advance=acknowledgment.cack_psn-cached.first;
         // §3.5.13: equality is insufficient. SACK bits never enter this test.
         if (!advance || advance>=0x80000000u) continue;

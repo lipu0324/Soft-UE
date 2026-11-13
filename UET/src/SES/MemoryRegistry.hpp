@@ -1,5 +1,6 @@
 #pragma once
 #include "IntegerAtomics.hpp"
+#include "FetchingAtomics.hpp"
 #include "MemoryKey.hpp"
 #include <algorithm>
 #include <array>
@@ -313,6 +314,22 @@ public:
         }
         for (size_t i=0; i<8; ++i) bytes[i] = static_cast<uint8_t>(next >> (8*i));
         region.storage->write(offset,bytes.data(),bytes.size());
+        return previous;
+    }
+    std::vector<uint8_t> fetch_atomic_element(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operand,const std::vector<uint8_t>& compare_or_mask={},
+                         std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
+        const auto width=integer_atomic_width(datatype);
+        if (offset%width) throw MemoryAccessError(MemoryError::Alignment);
+        const auto& region=authorize(job,pid,key,offset,width,Access::Atomic,resource_index,relative_addressing);
+        if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
+        std::vector<uint8_t> previous(width);
+        region.storage->read(offset,previous.data(),width);
+        const auto next=fetching_atomic_update(previous,operand,compare_or_mask,operation,datatype);
+        // One runtime callback contains authorization, load and update. READ
+        // returns the old value without an unnecessary write to the storage.
+        if (operation!=IntegerAtomicOperation::Read) region.storage->write(offset,next.data(),width);
         return previous;
     }
     void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,

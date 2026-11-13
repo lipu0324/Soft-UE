@@ -681,6 +681,16 @@ protected:
         return header.opcode==2 && (header.request_length<=read_ack_data_limit_ ||
             read_ack_data_limit_>=read_response_payload_mtu_);
     }
+    bool requiresDataAcknowledgment(uint32_t sequence) const {
+        if (requiresReadReissue(sequence)) return true;
+        const auto request=tx_pkt_buffer.find(sequence);
+        // §3.5.17: fetching atomics always return their unique result in an
+        // ACK, independent of the READ threshold. Never infer its data from
+        // DEFAULT/CACK, and never use READ's uncached re-execution policy.
+        return runtime_ && runtime_->standard_wire && request!=tx_pkt_buffer.end() &&
+            request->second.PDS_type==RUOD_req_header && request->second.SESpkt.bth_type==Standard_Header &&
+            request->second.SESpkt.bth_header.Standard_Header.opcode==4;
+    }
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();
     UET::Runtime::Services* runtime_ = nullptr;

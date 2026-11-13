@@ -508,13 +508,18 @@
       "id": "SES-FETCH",
       "reference": "Table 3-1",
       "summary": "取回原子操作、CAS、数据类型与异常",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "fetching_atomic_value_test",
+        "native_fetching_atomic_test",
+        "reference_process_interop"
+      ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Provider mapping, optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md."
     },
     {
       "id": "SES-SYNC",

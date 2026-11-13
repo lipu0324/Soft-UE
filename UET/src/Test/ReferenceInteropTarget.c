@@ -142,7 +142,7 @@ int main(void) {
                 fprintf(stderr,"FAIL reference target memory at %zu: %u\n",byte,memory[byte]); return 1;
             }
             if (memcmp(receive_buffer,"abc",3)) return 1;
-            for (size_t byte=0;byte<8;++byte) if (memory[3072+byte]!=(byte==0?1:0)) {
+            for (size_t byte=0;byte<8;++byte) if (memory[3072+byte]!=(byte==0?9:0)) {
                 fprintf(stderr,"FAIL reference atomic byte %zu: %u\n",byte,memory[3072+byte]); return 1;
             }
             REQUIRE_SUCCESS((int)uet_send(endpoint,1,reply,sizeof(reply),NULL,peer,(void*)2));
@@ -160,6 +160,6 @@ int main(void) {
     REQUIRE_SUCCESS(uet_cq_close(receive_cq)); REQUIRE_SUCCESS(uet_mr_close(region));
     REQUIRE_SUCCESS(uet_domain_close(domain)); REQUIRE_SUCCESS(uet_finalize(instance));
     fi_freeinfo(info); fi_freeinfo(hints);
-    puts("PASS reference: unchanged SES/PDS received WRITE/SEND/AMO and sent a verified reply");
+    puts("PASS reference: unchanged SES/PDS received WRITE/READ/SEND/AMO/FETCH/CAS and sent a verified reply");
     return 0;
 }
