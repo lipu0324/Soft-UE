@@ -1,7 +1,8 @@
 # 原生 READ 的请求、返回与完成
 
 READ 复用原 SES → PDS → CMS → 网络路径，入口为 `OperationType::Read`。
-完整 Profile 验收、optimized headers、provider `fi_read` 和 RODL 仍独立推进。
+完整 Profile 验收、optimized headers 和 RODL 仍独立推进。provider 的
+`fi_read/readv/readmsg` 复用此路径，接口约束见 [provider](PROVIDER.md)。
 
 ## 原生接口
 

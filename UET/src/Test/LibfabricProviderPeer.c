@@ -28,7 +28,8 @@ int main(int argc,char** argv) {
     hints->domain_attr->mr_mode=~3; // fi_info's supported-mode mask, not required modes.
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && !strcmp(info->fabric_attr->prov_name,"softue"));
-    CHECK(!(info->caps&(FI_READ|FI_REMOTE_READ|FI_TAGGED)) && (info->caps&FI_ATOMIC));
+    CHECK(!(info->caps&FI_TAGGED) && (info->caps&FI_ATOMIC));
+    CHECK((info->caps&(FI_READ|FI_REMOTE_READ))==(FI_READ|FI_REMOTE_READ));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
     CHECK(info->domain_attr->mr_key_size==6); // RKEY bytes; fi_mr_key still returns all 64 metadata/key bits.
@@ -94,7 +95,6 @@ int main(int argc,char** argv) {
     CHECK(fi_av_insert(addresses,&peer_address,1,&peer,0,NULL)==1);
     struct sockaddr_in looked_up={0}; size_t lookup_size=sizeof(looked_up);
     SUCCESS(fi_av_lookup(addresses,peer,&looked_up,&lookup_size)); CHECK(looked_up.sin_port==peer_address.sin_port);
-    CHECK(fi_read(endpoint,buffer,1,NULL,peer,0,peer_key,NULL)==-FI_ENOSYS);
     uint8_t oversized_message[1025]; memset(oversized_message,0xaa,sizeof(oversized_message));
     if (!server) {
         for (size_t byte=0;byte<4097;++byte) buffer[16+byte]=(uint8_t)(byte*7);
@@ -106,7 +106,8 @@ int main(int argc,char** argv) {
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
     }
     size_t send_completions=0,errors=0,receives=0,remote_writes=0;
-    int reply_started=0,done_started=0,done_received=0,finished=0;
+    int reply_started=0,read_started=0,done_started=0,done_received=0,finished=0;
+    uint64_t read_result=0;
     const time_t deadline=time(NULL)+10;
     while (!finished && time(NULL)<deadline) {
         struct fi_cq_data_entry entries[8]; ssize_t count=fi_cq_read(completions,entries,8);
@@ -132,7 +133,12 @@ int main(int argc,char** argv) {
                     CHECK(entry->flags&FI_REMOTE_CQ_DATA);
                     if (server && entry->op_context==(void*)78) { CHECK(entry->data==0); done_received=1; }
                     else { CHECK(entry->op_context==(void*)77 && entry->data==(server?456:789)); ++receives; }
-                } else { CHECK(entry->flags&(FI_SEND|FI_WRITE)); ++send_completions; }
+                } else {
+                    CHECK(entry->flags&(FI_SEND|FI_WRITE|FI_READ));
+                    if (entry->flags&FI_READ) CHECK(!server && entry->op_context==(void*)19 &&
+                        entry->flags==(FI_RMA|FI_READ) && entry->len==8 && entry->buf==&read_result);
+                    ++send_completions;
+                }
             }
         } else CHECK(count==-FI_EAGAIN);
         if (server && receives==1 && remote_writes==1 && errors==1 && !reply_started) {
@@ -144,11 +150,16 @@ int main(int argc,char** argv) {
             reply_message.addr=peer; reply_message.context=(void*)14; reply_message.data=789;
             SUCCESS(fi_sendmsg(endpoint,&reply_message,FI_REMOTE_CQ_DATA)); reply_started=1;
         }
-        if (!server && send_completions==3 && errors==3 && receives==1 && !done_started) {
+        if (!server && send_completions==3 && errors==3 && receives==1 && !read_started) {
             CHECK(!memcmp(buffer,"reply",5));
+            SUCCESS(fi_read(endpoint,&read_result,sizeof(read_result),NULL,peer,0,peer_atomic_key,(void*)19));
+            read_started=1;
+        }
+        if (!server && send_completions==4 && read_started && !done_started) {
+            CHECK(read_result==1);
             SUCCESS(fi_senddata(endpoint,"done",4,NULL,0,peer,(void*)15)); done_started=1;
         }
-        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==4);
+        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==5);
         if (!finished) poll(NULL,0,1); // Application wait; fi_cq_read owns manual progress.
     }
     if (!finished) fprintf(stderr,"incomplete server=%d sends=%zu errors=%zu receives=%zu remote_writes=%zu\n",
@@ -160,6 +171,6 @@ int main(int argc,char** argv) {
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&completions->fid));
     SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints);
-    printf("PASS libfabric %s: SEND/WRITE IMM, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
+    printf("PASS libfabric %s: SEND/WRITE IMM/READ, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
     return 0;
 }

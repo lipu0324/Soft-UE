@@ -32,13 +32,13 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 线程和 progress | `FI_THREAD_DOMAIN`、手动 progress；应用串行调用域内 API；`fi_cq_read/readerr` 推进 socket 和协议定时器 |
 | 消息 | `fi_send/recv/senddata`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；SENDMSG 支持逐调用 `FI_REMOTE_CQ_DATA`；ROD 允许后投递接收缓冲区 |
 | 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
-| RMA | `fi_write/writev/writemsg/writedata`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
+| RMA | `fi_write/writev/writemsg/writedata` 和 `fi_read/readv/readmsg`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
 | 原子 | 非取回 `fi_atomic/atomicv/atomicmsg`；8/16/32/64 位有符号/无符号整数；逐元素原子性和标准能力查询 |
 | DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；支持 SEND CQ data；仅本地发送完成，无 PDC/确认/重传 |
 | 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
-| 访问权限 | 仅 `FI_WRITE` 不授予远端写；`FI_REMOTE_WRITE` 才授予相应 MR 权限；撤销使 key 立即失效 |
+| 访问权限 | `FI_REMOTE_READ/WRITE` 分别授予远端读/写；仅 `FI_READ/WRITE` 不授予远端访问；撤销使 key 立即失效 |
 | 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
-| 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
+| 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、READ/WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
 | 注入 | SEND/WRITE/非取回 ATOMIC inject API 和逐调用 `FI_INJECT`；`inject_size=256` 字节；成功抑制与异步错误按 API 规则分别处理 |
 | 控制事件 | 非阻塞 EQ 的实际 FIFO/PEEK/背压、endpoint 绑定和父子生命周期；见 [EQ](PROVIDER-EQ.md) |
 | 资源生命周期 | 父对象仍有子对象、AV/CQ 仍被 endpoint 绑定、endpoint 仍有未完成发送时，关闭返回 `FI_EBUSY` |
@@ -55,9 +55,11 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 `fi_getinfo` 保留调用者请求的已支持排序 flags；显式零排序使用 RUD。没有提供
 排序 hints 时保留 SAS 默认。SEND 排序 flags 为 RAS/SAR/SAS/SAW/WAS；R/W
 排序 flags 按 §2.2.6 的单独列表解释，交叉排序 flag 可以同时参与两种判断。
-可用的 WRITE/非取回 ATOMIC 提供完整消息范围的 WAW，`max_order_waw_size` 为
-UINT32_MAX。READ 仍未公布，RAW/WAR 大小保持零。源端应用队列串行等待前操作的
-语义完成，为跨模式的混合操作提供保守的 fence。`sendmsg`、`writemsg`、
+可用的 READ/WRITE/非取回 ATOMIC 通过源端应用 FIFO 提供整消息的 RAW/WAR/WAW，
+三个 `max_order_*_size` 均为 UINT32_MAX。后续 WRITE 必须等待前序 READ 的实际
+结果放置及全部正向语义结果，避免丢失数据 ACK 后重执行 READ 读到这个后序 WRITE
+的值（§3.4.2.7.1.2）。这不为其他端点的并发写提供整消息快照。源端应用队列串行
+等待前操作的语义完成，为跨模式的混合操作提供保守的 fence。`sendmsg`、`readmsg`、`writemsg`、
 `atomicmsg` 支持逐调用 `FI_FENCE`，能力查询保留默认 fence flags；DGRAM 的
 fence 等待先前的本地发送完成。该队列也等待其他 peer 的在先操作，属于更强的
 串行策略，会限制并发度。
@@ -75,7 +77,14 @@ fence 等待先前的本地发送完成。该队列也等待其他 peer 的在�
 端口号必须唯一；相同 ID 映射到不同 socket 地址会被拒绝。通过 `fi_getname` 获取
 实际分配的地址，再加入对端 AV。实验不要求 root 或 raw socket。
 
-READ、取回原子/CAS、浮点原子、tagged、directed receive、
+READ 使用[原生 READ](READ.md)的两条返回路径。当前 provider 无 FI_MR_LOCAL 要求，
+为每个非零结果缓冲区建立私有本地注册，完成/错误时撤销；该 key 不上线，应用仍须
+保持缓冲区有效直到 CQ。单 iovec 的 `readv/readmsg` 与 `read` 使用相同入口。
+READ 拒绝 FI_INJECT 和 FI_REMOTE_CQ_DATA，DGRAM 不公布 READ。公开 API 回归
+`libfabric_read_test` 覆盖 RAW/WAR 链、两种返回载体的丢失恢复、长度边界、远端权限
+和边界错误、错误后继续 READ，以及 CQ flags/context/buffer/length。
+
+取回原子/CAS、浮点原子、tagged、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时

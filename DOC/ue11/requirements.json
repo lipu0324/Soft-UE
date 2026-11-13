@@ -461,14 +461,17 @@
         "return_data_transport_test",
         "native_read_test",
         "read_early_acceptance_test",
-        "read_large_ack_test"
+        "read_large_ack_test",
+        "streaming_read_test",
+        "libfabric_read_test",
+        "reference_process_interop"
       ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native RUD/ROD fragmented READ up to 32-bit message length with both reverse-request and large-ACK-threshold multi-packet carriers, exact registered result authority, per-fragment reauthorization, bounded target packet credits/response tokens and coalesced placement. ACK-data re-execution and same-PDC return data tested with loss, ordering, revocation, cancellation, context-pressure rollback and token-direction isolation. Independent early-ACKing SES policy is tested with per-operation source result windows, partial READ MID retirement through graceful connection close, pre-transmit cancellation and unassigned-PDC rejection. Fresh 4GiB READ boundary run, optimized headers, provider mapping, TSS and RODL remain open; see READ.md."
+      "evidence_note": "Native RUD/ROD fragmented READ up to 32-bit message length with both reverse-request and large-ACK-threshold multi-packet carriers, exact registered result authority, per-fragment reauthorization, bounded target packet credits/response tokens and coalesced placement. ACK-data re-execution and same-PDC return data tested with loss, ordering, revocation, cancellation, context-pressure rollback and token-direction isolation. Independent early-ACKing SES policy is tested with per-operation source result windows, partial READ MID retirement through graceful connection close, pre-transmit cancellation and unassigned-PDC rejection. Public fi_read/readv/readmsg with private registered local placement, RAW/WAR FIFO ordering, both result-carrier loss paths and CQ/error validation are tested, including independent provider processes. A standard ACK-data READ interoperates with the unchanged pinned reference SES/PDS. Fresh 4GiB READ boundary run, optimized headers, TSS and RODL remain open; see READ.md."
     },
     {
       "id": "SES-TAG",

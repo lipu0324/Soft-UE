@@ -24,7 +24,8 @@ constexpr bool native_atomic_platform=true;
 #else
 constexpr bool native_atomic_platform=false;
 #endif
-constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_WRITE|FI_REMOTE_WRITE|(native_atomic_platform?FI_ATOMIC:0);
+constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE|
+    (native_atomic_platform?FI_ATOMIC:0);
 // The single application FIFO waits for final completion before initiating
 // its successor, including while a recoverable semantic error is retried.
 // It therefore enforces FI_FENCE for every transmit (§3.4.2.7.1.1), even
@@ -818,6 +819,57 @@ ssize_t write_memory(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_
                       uint64_t offset,uint64_t key,void* context) {
     return submit_operation(endpoint,buffer,length,destination,offset,key,context,true);
 }
+ssize_t submit_read(fid_ep* handle,void* buffer,size_t length,fi_addr_t destination,
+                    uint64_t offset,uint64_t key,void* context,std::optional<uint64_t> flags={}) {
+    return guarded([&]() -> ssize_t {
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (!endpoint.enabled) return -FI_EOPBADSTATE;
+        if (endpoint.datagram) return -FI_EOPNOTSUPP;
+        const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
+        // fi_readmsg(3): READ has no injection or remote CQ-data operation.
+        if (operation_flags&~(supported_operation_flags&~FI_INJECT)) return -FI_EOPNOTSUPP;
+        if ((length && !buffer) || length>UINT32_MAX) return -FI_EMSGSIZE;
+        if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
+        progress(*endpoint.domain);
+        const auto peer=resolve_peer(endpoint,destination);
+        if (!peer) return -FI_EADDRNOTAVAIL;
+        SES::Operation request; request.type=SES::OperationType::Read;
+        request.peer=*peer; request.remote_key=key; request.remote_offset=offset;
+        request.read_length=static_cast<uint32_t>(length);
+        ApplicationOperation application{context,FI_RMA|FI_READ,buffer};
+        if (length) {
+            // No FI_MR_LOCAL mode is required. Create a private, bounded local
+            // placement registration, just as receive postings do. Its key
+            // never appears on the wire; SES rechecks its exact identity for
+            // every returned fragment (§3.4.5.2). The application keeps this
+            // buffer valid until CQ completion, including semantic retries.
+            const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
+                static_cast<uint8_t>(SES::Access::Write));
+            application.temporary_key=region.key;
+            request.read_result=SES::ReadResultBuffer{region.key,0,static_cast<uint32_t>(length),1,1};
+        }
+        const auto temporary_key=application.temporary_key;
+        try { enqueue_transmission(endpoint,std::move(request),std::move(application)); }
+        catch (...) { if (temporary_key) endpoint.domain->memory.deregister(temporary_key); throw; }
+        return 0;
+    });
+}
+ssize_t read_memory(fid_ep* endpoint,void* buffer,size_t length,void*,fi_addr_t destination,
+                     uint64_t offset,uint64_t key,void* context) {
+    return submit_read(endpoint,buffer,length,destination,offset,key,context);
+}
+ssize_t read_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,
+                     uint64_t offset,uint64_t key,void* context) {
+    if (!buffers || count!=1) return -FI_EINVAL;
+    return read_memory(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,offset,key,context);
+}
+ssize_t read_message_flags(fid_ep* endpoint,const fi_msg_rma* message,uint64_t flags) {
+    if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1)
+        return -FI_EINVAL;
+    const auto& local=message->msg_iov[0]; const auto& remote=message->rma_iov[0];
+    if (local.iov_len!=remote.len) return -FI_EINVAL;
+    return submit_read(endpoint,local.iov_base,local.iov_len,message->addr,remote.addr,remote.key,message->context,flags);
+}
 ssize_t write_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,
                       uint64_t offset,uint64_t key,void* context) {
     if (count!=1 || !buffers) return -FI_EINVAL;
@@ -886,11 +938,14 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         info.caps=available_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
         info.ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
         info.ep_attr->max_msg_size=datagram?1024:UINT32_MAX; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
-        // Available RDM operations are WRITE and non-fetching ATOMIC. Their
-        // global completion plus source FIFO supports full-message WAW.
-        // READ/RAW/WAR sizes remain zero while READ is not advertised.
+        // The source FIFO waits for actual READ placement and all forward
+        // semantic results before initiating a following WRITE (§3.4.2.7.1.2).
+        // Thus even a lost data ACK cannot make a READ observe that later
+        // WRITE on re-execution. These are whole-message local guarantees.
         info.ep_attr->max_order_waw_size=datagram?0:UINT32_MAX;
-        info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_WRITE); info.tx_attr->size=4096;
+        info.ep_attr->max_order_raw_size=datagram?0:UINT32_MAX;
+        info.ep_attr->max_order_war_size=datagram?0:UINT32_MAX;
+        info.tx_attr->caps=available_caps&~(FI_RECV|FI_REMOTE_READ|FI_REMOTE_WRITE); info.tx_attr->size=4096;
         info.tx_attr->iov_limit=1; info.tx_attr->rma_iov_limit=1;
         info.tx_attr->inject_size=maximum_inject_bytes;
         const auto requested_flags=hints && hints->tx_attr?hints->tx_attr->op_flags:uint64_t{0};
@@ -899,7 +954,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
             (requested_level?requested_level:datagram?FI_TRANSMIT_COMPLETE:FI_DELIVERY_COMPLETE);
         info.tx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->tx_attr?hints->tx_attr->msg_order:uint64_t{FI_ORDER_SAS});
         info.tx_attr->comp_order=FI_ORDER_NONE;
-        info.rx_attr->caps=available_caps&~(FI_SEND|FI_WRITE); info.rx_attr->size=4096;
+        info.rx_attr->caps=available_caps&~(FI_SEND|FI_READ|FI_WRITE); info.rx_attr->size=4096;
         info.rx_attr->iov_limit=1;
         info.rx_attr->msg_order=datagram?uint64_t{0}:(hints && hints->rx_attr?hints->rx_attr->msg_order:uint64_t{FI_ORDER_SAS});
         info.rx_attr->comp_order=FI_ORDER_NONE;
@@ -977,7 +1032,7 @@ void initialize_operations() {
     message_ops.inject=inject_message; message_ops.injectdata=inject_message_data;
     rma_ops.size=sizeof(rma_ops); rma_ops.write=write_memory; rma_ops.writev=write_vector;
     rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
-    UNSUPPORTED(rma_ops,read); UNSUPPORTED(rma_ops,readv); UNSUPPORTED(rma_ops,readmsg);
+    rma_ops.read=read_memory; rma_ops.readv=read_vector; rma_ops.readmsg=read_message_flags;
     rma_ops.inject=inject_write; rma_ops.injectdata=inject_write_data;
     atomic_ops.size=sizeof(atomic_ops); atomic_ops.write=write_atomic; atomic_ops.writev=write_atomic_vector;
     atomic_ops.writemsg=write_atomic_message; atomic_ops.writevalid=atomic_valid;
