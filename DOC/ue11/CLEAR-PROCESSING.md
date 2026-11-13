@@ -28,3 +28,9 @@ ASan/UBSan/泄漏检查（8.09s）。日志分别为
 `/tmp/softue-clear-processing-after-tests.log`、
 `/tmp/softue-clear-processing-asan-tests.log`。完整版本回归另行记录；该修正不构成
 Profile验收声明。
+
+009ca6b的完整CI run43516970768中，普通作业有101/102通过，旧rud_window_test在Clear
+断言处失败。该fixture手动调用响应计数辅助函数，却保留RX句柄。修正后通过真实txRsp
+发送响应并核对句柄消费，保留所有窗口、保证响应和回绕断言。窗口/新Clear两项普通及
+消毒器回归另行通过；原失败保留在
+`/tmp/softue-clear-processing-ci-off-failure.log`。

@@ -27,8 +27,15 @@ int main() {
             const auto handle=target.processRxReq(&packet);
             auto metadata=target.rx_pkt_map.at(handle);
             target.updateRxPsnTracker(&metadata);
-            target.updateRxPsnTracker(&metadata,guaranteed_response);
-            if (guaranteed_response) target.sendAck(UET_HDR_NONE,0,0,sequence,nullptr,true);
+            // Use the actual SES response entry point: completing only its
+            // accounting helper would leave an unresponded RX handle behind.
+            SES_PDC_rsp response{}; response.rx_pkt_handle=handle;
+            response.gtd_del=guaranteed_response; response.rep_len=12;
+            response.pkt.bth_type=Semantic_Response_Header;
+            auto& semantic=response.pkt.bth_header.Semantic_Response_Header;
+            semantic.opcode=0; semantic.return_code=1;
+            target.txRsp(&response);
+            CHECK(!target.rx_pkt_map.count(handle));
             return packet;
         };
         auto last=receive(0,false); // Arrives first, after the sequence-number wrap.
