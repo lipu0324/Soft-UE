@@ -59,3 +59,11 @@ provider 没有 FI_MR_LOCAL 要求。它为大消息创建受限的临时源注�
 这些测试需要在没有编译器或其他CPU实验竞争时顺序运行，避免把调度延迟混成
 协议错误。原生事务的两种 READ carrier、故障与内存边界见 [RENDEZVOUS.md](RENDEZVOUS.md)。
 本功能不声明完整 Profile、完整安全路径或4 GiB公开 rendezvous传输已验收。
+
+冻结的整合版本 b76e340 在干净工作树中重新配置和构建，开启公开provider及固定参考
+实现后，顺序通过全部113项普通回归（123.74s）及全部113项ASan/UBSan/泄漏检查
+（565.27s）。两轮运行期间没有编译器或其他CPU实验竞争。日志分别为
+`/tmp/softue-provider-rendezvous-clean-normal-tests.log` 和
+`/tmp/softue-provider-rendezvous-clean-asan-tests.log`；GitHub run43494936490三项作业成功。
+先前2c57040的ASan全套曾在旧60s预算内超时；该失败仍保留在RENDEZVOUS.md，
+不能用本轮结果抹去原记录。

@@ -76,7 +76,9 @@ PDS支持typed NoSynchronizationState，两个准入入口分别发0x1B；普通
 semantic_admission_request现在拷贝固定extension元数据，仍不拷贝payload，否则SES不能
 在接受PSN前看到sync_group/count。SynchronizationAdmissionTest有I/T直测与真实PDS的
 新建/已建立、RUD/ROD、NSCC、两种sync扩展恢复。CMake三项普通通过0.12s，日志
-/tmp/softue-sync-state-cmake-tests2.log。消毒器状态层检查单独进行；未声明原生同步功能。
+/tmp/softue-sync-state-cmake-tests2.log。冻结的28d138e在ASan/UBSan与泄漏检查下通过
+状态层、同步准入、普通准入和同步线头4/4，0.90s；日志
+/tmp/softue-sync-state-asan-cmake-tests.log。未声明原生同步功能。
 
 ## 接入前需保持的区别
 
