@@ -139,7 +139,8 @@ void probe_reopens_a_peer_window_without_clear_ack(bool lose_probe_ack,bool cong
     ProbeObservation observation; observation.lose_first=lose_probe_ack; observation.lose_all=permanent;
     ProbeAuditPort source_port(forward,observation),target_port(reverse,observation);
     PdsHost source_host(1,loop,trace,source_port),target_host(2,loop,trace,target_port);
-    source_host.services().mpr_zero_override=4;
+    UET::PDS::PsnRangeConfiguration small_window; small_window.advertised_mpr=0;
+    source_host.configure_psn_ranges(small_window,4); target_host.configure_psn_ranges(small_window,4);
     source_host.services().next_probe_opaque=0x7fff; // Exercise a signed wire offset with an unsigned opaque.
 
     if (congestion) {

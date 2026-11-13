@@ -107,6 +107,12 @@ public:
         services_.congestion_control=congestion_.get();
     }
     const CMS::NsccEngine* nscc() const { return congestion_.get(); }
+    void configure_psn_ranges(const PDS::PsnRangeConfiguration& configured,uint32_t zero_override=0) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt)
+            throw std::logic_error("configure PSN ranges before opening connections");
+        configured.validate(zero_override);
+        services_.psn_ranges=configured; services_.mpr_zero_override=zero_override;
+    }
     void configure_trimming(const NetworkLayer::TrimmingOptions& options) {
         options.validate();
         if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)

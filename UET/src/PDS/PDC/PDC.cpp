@@ -56,7 +56,7 @@ PDC::PDC(UET::Runtime::Services* services)
       allACK(true),                 
       open_msg(0),                  
       SYN(false),                   
-      MPR(Default_MPR),             
+      local_packet_capacity(Default_MPR),
       ACK_GEN_COUNT(0),             
       start_psn(1000),              
       tx_cur_psn(start_psn),        
@@ -197,6 +197,26 @@ void PDC::bindCongestionContext(pdc_mode delivery_mode) {
         runtime_->congestion_control->opened(congestionConnection());
 }
 
+void PDC::initializePsnRanges() {
+    local_packet_capacity=Default_MPR;
+    initial_psn_range_=receive_psn_range_=Default_MPR;
+    advertised_mpr_=0;
+    if (runtime_ && runtime_->standard_wire) {
+        const auto& configured=runtime_->psn_ranges;
+        configured.validate(runtime_->mpr_zero_override);
+        local_packet_capacity=static_cast<int>(configured.local_packet_capacity);
+        initial_psn_range_=configured.initial_range();
+        receive_psn_range_=configured.receive_range(runtime_->mpr_zero_override);
+        advertised_mpr_=configured.receive_encoding();
+    }
+}
+
+void PDC::resetPeerSequenceWindow() {
+    peer_sequence_window_.reset();
+    if (runtime_ && runtime_->standard_wire)
+        peer_sequence_window_.emplace(start_psn,runtime_->mpr_zero_override,initial_psn_range_/128);
+}
+
 void PDC::rejectTrimmed(const PDStoNET_pkt& packet) {
     auto reply=UET::PDS::trimmed_negative_ack(packet,SPDCID,rx_cur_psn+1);
     if (public_net_queue) public_net_queue->push(reply); else tx_pkt_q.push(std::move(reply));
@@ -296,6 +316,7 @@ void PDC::decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt
     auto& acknowledgment=packet.PDS_header.RUOD_ack_header;
     if (mode==RUD) acknowledgment.type=ACK_CC;
     if (acknowledgment.type!=ACK_CC) return;
+    packet.congestion_ack.mpr=advertised_mpr_;
     // A per-packet SACK is anchored on the triggering packet (§3.5.12.4.3).
     // §3.5.12 requires eight-PSN alignment; bit zero is the least significant
     // bit. The inconsistent, unaligned example in Figure 3-81 is documented.
@@ -361,7 +382,8 @@ void PDC::processPeerAcknowledgment(const PDStoNET_pkt& packet) {
     if (!ack.flags.p) ordered_recovery_.acknowledged();
     if (!peer_sequence_window_) {
         if (ack.cack_psn-(start_psn-1)>tx_cur_psn-start_psn) return;
-        peer_sequence_window_.emplace(start_psn,runtime_?runtime_->mpr_zero_override:0);
+        peer_sequence_window_.emplace(start_psn,runtime_?runtime_->mpr_zero_override:0,
+            runtime_ && runtime_->standard_wire?initial_psn_range_/128:8);
     }
     const auto encoding=ack.type==ACK_CC?std::optional<uint8_t>{packet.congestion_ack.mpr}:std::nullopt;
     peer_sequence_window_->observe(ack.cack_psn,encoding);
@@ -378,7 +400,7 @@ void PDC::updateTxPsnTracker(){
     std::stringstream before_state;
     before_state << "Before update state - tx_cur_psn: " << tx_cur_psn
                 << ", unack_cnt: " << unack_cnt
-                << ", MPR: " << MPR
+                << ", local_packet_capacity: " << local_packet_capacity
                 << ", pause_pdc: " << (pause_pdc ? "true" : "false");
     LOG_DEBUG(__FUNCTION__, before_state.str());
 
@@ -390,12 +412,12 @@ void PDC::updateTxPsnTracker(){
     diagnostics() << getCurrentTimestamp() << "I_PDC update TX PSN - tx_cur_psn: " << tx_cur_psn
             << ", unack_cnt: " << unack_cnt << std::endl;
 
-    if ((tx_cur_psn - clear_psn) >= (unsigned)(MPR / 2) && state == ESTABLISHED)
+    if ((tx_cur_psn - clear_psn) >= (unsigned)(local_packet_capacity / 2) && state == ESTABLISHED)
     {
         gen_cm = ACK_REQ; 
         diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Need to send ACK Request, current psn: " << tx_cur_psn << ", clear_psn: " << clear_psn << std::endl;
     }
-    else if ((unack_cnt >= MPR) && !SYN)
+    else if ((unack_cnt >= local_packet_capacity) && !SYN)
     {
         gen_cm = ACK_REQ;
         pause_pdc = true;
@@ -403,7 +425,7 @@ void PDC::updateTxPsnTracker(){
     // Window backpressure is independent of ACK-request heuristics.
     // §3.5.12.6: selective ACKs free packet buffers, but cannot authorize a
     // new PSN beyond the still-open sequence window at the receiver.
-    pause_pdc = nack_traffic_paused_ || unack_cnt >= MPR || tx_cur_psn-clear_psn > MPR;
+    pause_pdc = nack_traffic_paused_ || unack_cnt >= local_packet_capacity || tx_cur_psn-clear_psn > local_packet_capacity;
 
     
     std::stringstream after_state;
@@ -471,7 +493,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
             gen_cm=CLR_CMD; requested=peer_clear_requests_.erase(requested);
         } else ++requested;
     }
-    pause_pdc = nack_traffic_paused_ || unack_cnt >= MPR || tx_cur_psn-clear_psn > MPR;
+    pause_pdc = nack_traffic_paused_ || unack_cnt >= local_packet_capacity || tx_cur_psn-clear_psn > local_packet_capacity;
     if ((ack_req_flag & 1u) && (valid_explicit || valid_cumulative)) gen_cm = CLR_CMD;
     // Selective ACKs are remembered, so a repeated ACK cannot decrement the
     // count twice or cause an endless ACK_REQ/cache-reply exchange.
@@ -718,7 +740,7 @@ void PDC::resumeNackTraffic() {
     if (runtime_ && nack_retry_wake_) runtime_->timers.cancel(nack_retry_wake_);
     nack_retry_wake_=0;
     nack_traffic_paused_=false;
-    pause_pdc=unack_cnt>=MPR || tx_cur_psn-clear_psn>MPR;
+    pause_pdc=unack_cnt>=local_packet_capacity || tx_cur_psn-clear_psn>local_packet_capacity;
     for (const auto& deferred:deferred_nack_retransmits_)
         if (tx_pkt_buffer.count(deferred.first)) admission_deferred_retries_.emplace(deferred.first,deferred.second);
     deferred_nack_retransmits_.clear();
@@ -983,21 +1005,20 @@ void PDC::chkRxError(PDStoNET_pkt* packet)
     if ((header.type==RUD_REQ)!=(mode==RUD)) {
         error_chk=INV_SYN;
     } else if (header.flags.syn && (sequence-header.psn_off!=start_psn ||
-                                   sequence-start_psn>static_cast<uint32_t>(MPR))) {
+                                   sequence-start_psn>initial_psn_range_)) {
         // §3.5.8.2: even a consistent SYN start cannot extend past the
         // initial receive range after establishment. Report INVALID_SYN
         // before duplicate/out-of-order/general-window handling.
         error_chk=INV_SYN;
     } else if (!distance_from_clear || distance_from_clear>=0x80000000u) {
         error_chk=DROP;
+    } else if (!receiveWindowAllows(sequence)) {
+        error_chk=DROP;
     } else if (received_rx_psns_.count(sequence) || !distance_from_contiguous ||
                distance_from_contiguous>=0x80000000u) {
         error_chk=header.flags.retx?ACK_ERROR:DROP; // §3.5.8.2: unmarked network duplicates are discarded.
     } else if (mode==ROD && distance_from_contiguous>1) {
         error_chk=OOO;
-    } else if (mode==RUD && distance_from_contiguous>MPR) {
-        // Bounded receive state is the simulator's configured packet window.
-        error_chk=DROP;
     } else error_chk=OPEN;
 }
 
@@ -1014,7 +1035,7 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
         sendNack(header.flags.retx,header.psn,UET_PDC_MODE_MISMATCH,0,nullptr,packet); return false;
     }
     if (header.flags.syn && (header.psn-header.psn_off!=start_psn ||
-                            header.psn-start_psn>static_cast<uint32_t>(MPR))) {
+                            header.psn-start_psn>initial_psn_range_)) {
         // Numbered NOOP/Negotiation share data's established-SYN limit.
         sendNack(header.flags.retx,header.psn,UET_INVALID_SYN,0,nullptr,packet); return false;
     }
@@ -1023,6 +1044,7 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     const auto distance=header.psn-rx_cur_psn;
     const auto since_clear=header.psn-rx_clear_psn;
     if (!since_clear || since_clear>=0x80000000u) return false;
+    if (!receiveWindowAllows(header.psn)) return false;
     const bool duplicate=!distance || distance>=0x80000000u || received_rx_psns_.count(header.psn);
     if (duplicate) {
         if (header.flags.retx) sendAck(UET_HDR_NONE,0,0,header.psn,nullptr,false,packet);
@@ -1031,7 +1053,6 @@ bool PDC::acknowledgeNumberedControl(PDStoNET_pkt* packet)
     if (mode==ROD && distance!=1) {
         sendNack(header.flags.retx,header.psn,UET_ROD_OOO,rx_cur_psn+1,nullptr,packet); return false;
     }
-    if (mode==RUD && distance>MPR) return false;
     received_rx_psns_.insert(header.psn); completed_rx_psns_.insert(header.psn);
     while (received_rx_psns_.count(rx_cur_psn+1)) ++rx_cur_psn;
     advanceCumulativeAck();

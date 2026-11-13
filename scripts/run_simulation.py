@@ -55,7 +55,7 @@ def identifiers(value, name, maximum, minimum=1):
 
 def validate(config):
     mapping(config, {"version", "profile", "seed", "duration_ns", "event_budget", "memory_bytes", "wire",
-                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events", "rto_ns", "nack_delays_ns", "max_packet_retries"}, "scenario")
+                     "hosts", "switches", "jobs", "links", "operations", "nscc", "trimming", "payload_mtu", "link_events", "rto_ns", "nack_delays_ns", "max_packet_retries", "pds"}, "scenario")
     if config.get("version") != 1 or type(config.get("version")) is not int:
         raise ValueError("scenario version must be 1")
     if config.get("profile", "experimental") != "experimental":
@@ -91,6 +91,16 @@ def validate(config):
                f"max_packet_retries {max_packet_retries}", f"trimming {int(trimming)}",
                "wire " + " ".join(str(int(x)) for x in flags),
                f"udp_destination_port {udp_destination_port}"]
+    pds = mapping(config.get("pds", {}),
+                  {"default_mpr", "local_packet_capacity", "advertised_mpr", "mpr_zero_override"}, "pds")
+    default_mpr = integer(pds.get("default_mpr", 8), 0, 255, "pds.default_mpr")
+    packet_capacity = integer(pds.get("local_packet_capacity", 8), 1, 32640, "pds.local_packet_capacity")
+    zero_override = integer(pds.get("mpr_zero_override", 0), 0, 32640, "pds.mpr_zero_override")
+    advertisement = integer(pds.get("advertised_mpr", max(1, default_mpr)), 0, 255, "pds.advertised_mpr")
+    if "advertised_mpr" in pds and advertisement == 0 and zero_override == 0:
+        raise ValueError("bounded zero-MPR receive policy requires pds.mpr_zero_override")
+    records.append(f"psn_ranges {default_mpr} {packet_capacity} {zero_override} "
+                   f"{int('advertised_mpr' in pds)} {advertisement}")
     if "native_ip_protocol" in wire:
         protocol = integer(wire["native_ip_protocol"], 0, 255, "wire.native_ip_protocol")
         records.append(f"native_ip_protocol {protocol}")

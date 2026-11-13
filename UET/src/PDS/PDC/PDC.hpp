@@ -382,7 +382,7 @@ public:
     bool allACK;           /**< Full acknowledgment flag / Full acknowledgment flag */
     int open_msg;          /**< Open message count / Open message count */
     bool SYN;              /**< Synchronization flag / Synchronization flag */
-    int MPR;               /**< Local outstanding-packet capacity, distinct from the encoded peer MP_RANGE. */
+    int local_packet_capacity; /**< Local transmit-cache bound in packets; never the wire MPR encoding. */
     int ACK_GEN_COUNT;     /**< ACK generation counter (determines when to send ACK) / Used for cumulative ACK to determine if ACK packet needs to be sent */
 
     uint32_t start_psn;     /**< Initial packet sequence number / Initial packet sequence number */
@@ -527,7 +527,26 @@ protected:
     std::map<uint32_t,RetryCause> admission_deferred_retries_;
     void retryPacket(uint32_t sequence,RetryCause cause);
     std::optional<UET::PDS::PeerSequenceWindow> peer_sequence_window_;
+    uint32_t initial_psn_range_=Default_MPR;
+    uint32_t receive_psn_range_=Default_MPR;
+    uint8_t advertised_mpr_=0;
+    void initializePsnRanges();
+    void resetPeerSequenceWindow();
+    bool receiveWindowAllows(uint32_t sequence) const {
+        if (!runtime_ || !runtime_->standard_wire) {
+            const uint32_t legacy_distance=sequence-rx_cur_psn;
+            return mode!=RUD || legacy_distance>=0x80000000u || legacy_distance<=static_cast<uint32_t>(local_packet_capacity);
+        }
+        // §3.5.12.6: CACK is the anchor, including while a guaranteed SES
+        // response pins it behind contiguous packet receipt. Older packets
+        // above Clear retain their explicit replay exception.
+        const uint32_t distance=sequence-cack_psn;
+        return distance>=0x80000000u || distance<=receive_psn_range_;
+    }
     bool peerWindowAllows(uint32_t sequence) const {
+        // SYN carries a 12-bit offset, not a second full PSN. Wait for peer
+        // establishment rather than silently truncating an excessive offset.
+        if (SYN && sequence-start_psn<0x80000000u && sequence-start_psn>0xfff) return false;
         return !peer_sequence_window_ || peer_sequence_window_->allows(sequence);
     }
     UET::CMS::Connection congestionConnection() const {
@@ -1035,7 +1054,7 @@ public:
 
 // Default parameter definitions (using macro definitions to avoid duplicate definition errors) Default parameter definitions (using macro definitions to avoid duplicate definition errors)
 #ifndef Default_MPR
-#define Default_MPR 16               /**< Default maximum unacknowledged packet count 默认最大Number of unacknowledged packets */
+#define Default_MPR 8 // Legacy local packet bound, not the encoded wire MPR.
 #endif
 
 #ifndef Max_RTO_Retx_Cnt

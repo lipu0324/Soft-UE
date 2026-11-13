@@ -45,7 +45,7 @@ int main() {
         CHECK(target.cack_psn==0 && target.tx_ack_buffer.empty());
         target.clearReceivedPacketsThrough(0);
         target.chkRxError(&last); CHECK(target.error_chk==DROP);
-        last.PDS_header.RUOD_req_header.psn=100;
+        last.PDS_header.RUOD_req_header.psn=1025;
         target.chkRxError(&last); CHECK(target.error_chk==DROP); // Receive-window bound.
         target.freePDC(); CHECK(event_loop.pending()==0);
         std::cout<<"PASS: RUD receive window, holes, duplicates, guaranteed-response clear and 32-bit wrap\n";

@@ -26,7 +26,7 @@ int main() {
     for (unsigned packet=0;packet<8;++packet) { semantic.msg_id=packet+1; sender.sesTxReq(&request); }
     while (!sender.tx_pkt_q.empty()) sender.tx_pkt_q.pop(); sender.gen_cm=NONE;
     auto first=acknowledgment(1000,1000,0); sender.rxAck(&first);
-    CHECK(sender.MPR==Default_MPR); // A received peer limit must not resize local receive resources.
+    CHECK(sender.local_packet_capacity==Default_MPR); // A received peer limit must not resize the local transmit cache.
     CHECK(sender.unack_cnt==7);
     const auto active_timers=sender.rto_timer_.getActiveTimerCount();
     sender.txRto(1007);
@@ -56,7 +56,7 @@ int main() {
     auto newer=acknowledgment(1005,1005,0); sender.rxAck(&newer); sender.gen_cm=NONE;
     CHECK(sender.hasPendingWork()); sender.openChk();
     CHECK(sender.tx_pkt_q.size()==1 && sender.tx_pkt_q.front().PDS_header.RUOD_req_header.psn==1009);
-    CHECK(sender.MPR==Default_MPR);
+    CHECK(sender.local_packet_capacity==Default_MPR);
     sender.freePDC(); CHECK(loop.pending()==0);
     std::cout<<"PASS original PDS peer-range admission, delayed retransmit timers and independent receive capacity\n";
 }

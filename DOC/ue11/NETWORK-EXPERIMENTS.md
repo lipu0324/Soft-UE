@@ -18,6 +18,9 @@ python3 scripts/run_simulation.py examples/simulation/nscc-incast-trim.yaml \
 |---|---|
 | `wire.udp`、`wire.udp_destination_port` | 默认使用UDP/4793；目的端口范围0～65535。 |
 | `wire.native_ip_protocol` | `wire.udp: false`时必填，范围0～255；没有隐含的实验协议号。详见[默认封装](NETWORK-DEFAULTS.md)。 |
+| `pds.default_mpr` | 初始MPR编码0～255，0按1；参考默认8表示1024 PSN。 |
+| `pds.local_packet_capacity` | 本地发送缓存上限，1～32640个包，默认8；独立于线上MPR。 |
+| `pds.advertised_mpr`、`pds.mpr_zero_override` | 可选固定接收通告和共同零值解释，见[三个窗口](PDS-WINDOWS.md)。 |
 | `payload_mtu` | SES 单包 payload 上限，默认 1024 字节，范围 1～8192；不等于完整链路帧 MTU。 |
 | `rto_ns` | 初始重传超时，0～8000000000 ns，默认 1000000；零值表示立即到期。NACK 与 RTO 的退避区别见 [重试计时](RETRY-TIMING.md)。 |
 | `max_packet_retries` | 0～14 为共同 NACK/RTO 重试上限，15 为无限，默认5；不计初次发送。 |

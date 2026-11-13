@@ -395,11 +395,12 @@ public:
                     received_packet.PDS_header.RUOD_cp_header.flags.pdc_type==1;
                 const auto initial_offset=is_request?received_packet.PDS_header.RUOD_req_header.psn_off:
                     received_packet.PDS_header.RUOD_cp_header.psn_off;
+                const auto initial_range=runtime_ && runtime_->standard_wire?runtime_->psn_ranges.initial_range():Default_MPR;
                 // A new RUD receive window starts at Start_PSN-1. Reject a
                 // packet beyond that window before allocating a PDC: ordinary
                 // NACKs cannot create one (§3.5.8.2). ROD gaps are the explicit
                 // exception and are handled by the newly allocated T_PDC.
-                if (!ordered && initial_offset>=Default_MPR) {
+                if (!ordered && initial_offset>=initial_range) {
                     ++event_cnt; sendNack(&received_packet,UET_PSN_OOR_WINDOW); return;
                 }
                 std::optional<PDC_SES_req> reserved_message;
@@ -409,7 +410,7 @@ public:
                     // A ROD gap may allocate a PDC and return ROD_OOO, but it
                     // does not deliver a message. Reserve SES state only for
                     // a first packet that can enter the new receive window.
-                    const bool can_deliver=mode==RUD?header.psn_off<Default_MPR:header.psn_off==0;
+                    const bool can_deliver=mode==RUD?header.psn_off<initial_range:header.psn_off==0;
                     if (can_deliver) {
                         const auto request=UET::PDS::semantic_admission_request(received_packet,local_pdc_id,
                             received_packet.src_fep,mode,header.psn-header.psn_off);

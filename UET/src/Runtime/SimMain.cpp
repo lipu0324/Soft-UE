@@ -39,6 +39,8 @@ int main(int argc,char** argv) {
         bool enable_nscc=false,enable_trimming=false;
         UET::CMS::NsccConfig congestion;
         UET::NetworkLayer::WireOptions network;
+        UET::PDS::PsnRangeConfiguration psn_ranges;
+        uint32_t mpr_zero_override=0;
         std::vector<uint32_t> nodes,switches,jobs;
         std::vector<Link> links; std::vector<Flow> flows; std::vector<LinkEvent> link_events;
         while (std::getline(input,line)) {
@@ -52,6 +54,14 @@ int main(int argc,char** argv) {
             else if (key=="payload_mtu") row>>payload_mtu;
             else if (key=="rto") row>>retransmission_timeout_ns;
             else if (key=="max_packet_retries") row>>maximum_packet_retries;
+            else if (key=="psn_ranges") {
+                uint32_t has_advertisement=0,advertisement=0;
+                row>>psn_ranges.default_mpr>>psn_ranges.local_packet_capacity>>mpr_zero_override
+                   >>has_advertisement>>advertisement;
+                if (!row || has_advertisement>1) throw std::invalid_argument("invalid PSN range record");
+                if (has_advertisement) psn_ranges.advertised_mpr=advertisement;
+                psn_ranges.validate(mpr_zero_override);
+            }
             else if (key=="nack_delays") {
                 std::array<Time,4> delays{};
                 for (auto& delay:delays) row>>delay;
@@ -147,6 +157,7 @@ int main(int argc,char** argv) {
             hosts.at(node)->configure_initial_sequence_seed(seed);
             hosts.at(node)->configure_retransmission_timeout(retransmission_timeout_ns);
             hosts.at(node)->configure_retry_limit(maximum_packet_retries);
+            hosts.at(node)->configure_psn_ranges(psn_ranges,mpr_zero_override);
             if (negative_acknowledgment_delays)
                 hosts.at(node)->configure_negative_acknowledgment_delays(*negative_acknowledgment_delays);
             if (enable_nscc) hosts.at(node)->enable_nscc(congestion);

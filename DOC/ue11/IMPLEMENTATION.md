@@ -8,6 +8,8 @@ disabled.
 
 See [the baseline audit](BASELINE-AUDIT.md) for the actual protocol paths exercised
 by each regression, concrete remaining placeholders and the next gated work.
+The [PDS configuration field audit](PDS-CONFIGURATION.md) supplements the
+normative-paragraph review with Table 3-35/3-36 obligations.
 
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).

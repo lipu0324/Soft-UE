@@ -397,7 +397,7 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0286-002 | §3.4.9.6，sync完成 | completing WRITE CQ在同组所有payload交付后；相对其他CQ没有额外排序保证。 | M5缺失；避免错误实现成全局CQ barrier。 |
 | UE11-p0286-003 | §3.4.9.6，sync atomic | completing ATOMIC在整组WRITE payload交付后执行。 | M5缺失；计数聚合不等于真正延迟执行原子。 |
 | UE11-p0302-001 | §3.5.5，配置集合 | 每FEP至少一套PDS配置；支持reserved pool时另有第二套。 | Runtime Services已分host并支持部分参数，reserved pool未启用；完整配置集合仍缺。 |
-| UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；新增UDP目的端口4793参考默认与0～65535配置/错端口/trim/stamp回归；表3-35/36仍需逐字段验收。 |
+| UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；新增UDP目的端口4793参考默认与0～65535配置/错端口/trim/stamp回归；表3-35的24个配置字段及表3-36状态已另列PDS-CONFIGURATION.md；Default_MPR编码与本地缓存已拆分，其余条件字段继续验收。 |
 | UE11-p0305-001 | 表3-35续，MPR/SYN及注释 | MPR0 override 0～127；丢SYN后关闭遵守安全时间；启用加密时设0为SHOULD；native IP协议号可配置。 | MPR override/MAC-time SYN safety已有回归；Syn范围表格与正文位宽有冲突须记录。已改默认UDP/4793，原生协议号必须显式配置；network_defaults_test覆盖全部256值、缺失配置拒绝、0/17等端到端路径，见NETWORK-DEFAULTS.md。实验253/254只保留在显式测试配置。 |
 
 ## 第 281～300 个候选
@@ -473,7 +473,7 @@ REQ_CLEAR 位解释：§3.5.11.4.3 和 PDS_Clear_Time 的定义还要求空闲�
 | UE11-p0349-004 | §3.5.11.4.4，CACK初始化 | 创建PDC时为Start_PSN−1。 | 明文随机起点、双向控制及回绕已测试；TSS/RODL仍缺。 |
 | UE11-p0351-001 | §3.5.11.8.4，RETX | 重传请求设置RETX并触发ACK；优先接收为建议。 | RUD/ROD重传、trigger反馈和资源重试覆盖，RODL未完成。 |
 | UE11-p0351-002 | §3.5.11.8.5，ECN回显 | 当且仅当触发响应的包被ECN标记时设置M。 | PDS feedback、MAC时间戳和trim回归检查对应触发包；其他CMS/安全路径待补。 |
-| UE11-p0355-001 | §3.5.11.13，MPR解释跨页 | 非零mpr乘128更新发送区间；零按override选择忽略/替代；缩窗不再发区间外新包。 | 独立peer window与local receive容量、边界/缩窗已有覆盖。 |
+| UE11-p0355-001 | §3.5.11.13，MPR解释跨页 | 非零mpr乘128更新发送区间；零按override选择忽略/替代；缩窗不再发区间外新包。 | 初始窗口按Default_MPR×128建立，独立于local_packet_capacity；零override下收到零MPR取消range限制；边界/缩窗和配置见PDS-WINDOWS.md。 |
 | UE11-p0355-002 | §3.5.11.13，MPR新鲜度 | 仅严格更新的CACK可更新MPR；override0时一旦非零后不可再发零。 | stale/equal CACK拒绝、非零本地MPR及override有回归；完整动态接收端配置仍待完成。 |
 | UE11-p0355-003 | §3.5.11.14，SACK零位 | 零位表示未知，不能推断丢失。 | 当前SACK只标记肯定收据，不直接把零位当丢包；所有早期丢失检测算法仍非完整。 |
 | UE11-p0356-001 | §3.5.12.1，返回方向限制 | 非RODL返回方向只支持READ/原子响应数据；SEND/WRITE/READ新请求及RTR走独立发起方向。 | 当前应用操作仅从initiator提交；完整READ返回与非法方向接收检查仍需M5补全，泛型PDS准入单测不构成语义能力声明。 |
@@ -510,7 +510,7 @@ Close/Negotiation 的有效载荷。第 352 个候选的 stateful response 位�
 | UE11-p0365-003 | §3.5.12.4.4，RODL空闲推进 | 无SES业务但Clear/CACK待更新时必须发ACK或控制包。 | M8缺失；当前RUD/ROD空闲Clear不构成RODL证据。 |
 | UE11-p0365-004 | §3.5.12.5，保证响应阻挡 | 保证响应未Clear前CACK不得推进到或越过该PSN。 | 保证错误缓存、Clear、SACK及回绕已有测试；新READ/fetch模式仍需验收。 |
 | UE11-p0365-005 | §3.5.12.5，显式结果优先 | 先处理ACK_PSN携带的非DEFAULT响应，再为允许的其余PSN推断DEFAULT并标记完成。 | processSemanticAcknowledgment先显式后累计，防止错误被后续成功覆盖；对应测试已覆盖。 |
-| UE11-p0366-001 | §3.5.12.6，目的ACK窗口 | 仅在允许窗口或Clear到CACK例外区间ACK，≤Clear不再ACK。 | RUD窗口/缩窗/重复与Clear部分覆盖；动态本地MPR和全CP边界还需补强。 |
+| UE11-p0366-001 | §3.5.12.6，目的ACK窗口 | 仅在允许窗口或Clear到CACK例外区间ACK，≤Clear不再ACK。 | 数据与编号CP按CACK锚点检查窗口，保留Clear..CACK重放例外；静态接收通告、Probe和回绕有定向测试；运行中动态MPR策略仍未选择。 |
 | UE11-p0366-002 | §3.5.12.6，源窗口 | 不发高于CACK+MP_RANGE的新包；缩窗后允许重传。 | PeerSequenceWindow独立于本地容量，MPR边界/缩窗/重传已有回归。 |
 | UE11-p0367-001 | §3.5.12.7，NACK生成 | 按表3-66；回显触发包RETX与entropy。 | 全码分类、RUD/ROD恢复及反馈触发测试部分覆盖；完整表3-66仍需逐行映射。 |
 

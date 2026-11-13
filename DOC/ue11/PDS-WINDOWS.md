@@ -5,25 +5,42 @@ PDS 可以有可发送的包，但仍须等待本地资源、对端序号范围�
 
 | 状态 | 单位 | 当前代码与职责 |
 |---|---|---|
-| 本地包资源上限 | 包 / 本地序号跨度 | 原内核的 `MPR`，生效默认值为 8，约束本地 outstanding 与接收跟踪容量 |
-| 对端 MP_RANGE | PSN 距离 | `PeerSequenceWindow`，以对端最新 CACK 为锚，限制新的数据包及数据重传 |
-| NSCC cwnd | 名义字节 | `NsccController`，按网络/接收反馈限制在途数据；见 [NSCC](NSCC.md) |
+| 本地发送缓存上限 | 包 / 本地序号跨度 | `local_packet_capacity`，默认8，约束本地outstanding和缓存，不是线上MPR。 |
+| 初始及对端MP_RANGE | PSN距离 | `PeerSequenceWindow`，创建时按`Default_MPR × 128`初始化，随后以对端最新CACK和通告限制发送。 |
+| NSCC cwnd | 名义字节 | `NsccController`，按网络/接收反馈限制在途数据；见[NSCC](NSCC.md)。 |
 
-旧内核仍为本地发送缓存和接收跟踪使用同一个本地资源配置值。本次拆分的是**收到的
-对端通告**：它不再有可能覆盖本地接收容量。本地物理资源的进一步配置属于管理模型。
-默认值来自 `Transport_Layer.hpp` 的宏；`PDC.hpp` 内的 16 只是该宏未定义时的后备值，
-正常构建不会使用它。当前 ACK_CC 的 `mpr` 默认编码为零，并不通告本地容量等于 8。
+旧内核把值为8的本地缓存上限同时当成初始接收PSN范围，因而错误拒绝了部分合法
+SYN，也没有在首次ACK之前建立规范要求的初始对端窗口。现在标准路径使用
+`PsnRangeConfiguration`：`default_mpr`为8位编码，默认8表示1024个PSN；设置为0
+按表3-35使用编码1。`local_packet_capacity`是独立的软件资源策略，不能覆盖接收范围。
+旧`Default_MPR`宏只保留给显式legacy路径，本地成员已改为描述性名称。
 
-## 线上 MPR 如何解码
+每个PDC保存创建时的配置快照，避免修改主机默认值改变活跃连接。默认接收通告与
+初始编码相同；可通过`advertised_mpr`选择另一个固定接收范围。当前不实现运行中
+动态调整接收资源的策略。所有ACK_CC（包括Probe ACK）带相同的本地通告。
 
-ACK_CC 的八位 `mpr` 非零时，MP_RANGE = mpr × 128，最大 32640。
-零值由源端已配置的 `Services::mpr_zero_override` 解释：
+## 线上MPR如何解码
 
-- 该配置为零时，忽略收到的零 MPR；原来的本地发送约束继续适用。
-- 配置为非零时，将零 MPR 解码成该范围；可配置 1～32640。
+ACK_CC的八位`mpr`非零时，MP_RANGE = mpr × 128，最大32640。零值由共同配置
+`mpr_zero_override`解释：
 
-这个配置是实验的已知网络参数，应在建立连接前设置。它不表示网络自动协商了该值。
-接收端动态 MPR 通告策略与统一资源管理接口仍待实现。
+- override非零时，用该PSN数量作为范围。
+- override为零时，收到零编码后不再施加MP_RANGE限制；本地缓存和CMS限制仍生效。
+  这不是简单忽略这条通告而保留初始窗口。
+- override为零且目标已发送非零MPR后，规范禁止该目标再次发送零。对于这种违规
+  输入，源端采用保守策略保留非零限制。
+
+表3-35要求至少支持0～127；软件显式支持到32640，属于该表允许的更大配置范围。
+当前有界接收策略若选择零通告，要求共同的非零override，不提供无限接收跟踪策略。
+这些参数应在建连前配置：
+
+```yaml
+pds:
+  default_mpr: 8                 # 初始1024 PSN，不是8个包。
+  local_packet_capacity: 8       # 软件发送缓存上限。
+  advertised_mpr: 0             # 小窗口实验的接收端通告。
+  mpr_zero_override: 4           # 两端共同解释为4 PSN。
+```
 
 `PeerSequenceWindow` 分开保存最新 CACK 与上一次 MPR 更新所用的 CACK。普通 ACK
 也能前移锚点；只有 CACK 严格晚于上一次 MPR 更新时，新的 MPR 才被采用。旧 ACK
@@ -56,5 +73,22 @@ ctest --test-dir build/cmake -R 'peer_sequence_window|pds_mpr' --output-on-failu
 
 纯状态测试检查零编码、最大范围、严格更新顺序和回绕；原 PDC 内核测试检查缩窗后的
 真实发送/重传阻塞、定时器与重试计数、较新 CACK 唤醒、错误未来 CACK 拒绝，以及
-本地接收容量不会随对端通告变化。更广泛的网络资源和控制包组合仍不等于已完成
+本地发送缓存上限不会随对端通告变化。更广泛的网络资源和控制包组合仍不等于已完成
 Profile 验收。
+
+## 接收窗口的锚点
+
+接收窗口同样使用CACK而非连续收到的最高PSN。保证语义响应可能阻挡CACK，即使
+`rx_cur_psn`已经前进，仍不能接收CACK+MP_RANGE之外的新包。Clear到CACK之间保留
+响应重放的例外；小于等于Clear的包不再ACK。数据与编号控制包使用同一检查。
+
+`psn_range_configuration_test`覆盖全部默认编码、0按1处理、缓存独立性、首次ACK前
+的发送限制、无数据时伪造ACK拒绝、CACK阻挡、编号控制/Probe通告、创建后的配置
+快照、配置拒绝及回绕。`syn_range_test`用显式编码1检查128-PSN边界，并保留
+首个ROD缺口优先返回ROD_OOO、初始RUD范围外不建连的规则。它还检查offset=8
+这个旧缓存上限附近的合法输入，避免把旧实现错误写回测试预期。
+
+固定接收通告可以比初始Default_MPR更小。首个RUD包在初始建连范围内、但超出
+当前接收窗口时，保留已建立的PDC并静默丢弃，随后窗口内的恢复包仍可推进。
+该情况不能返回只适用于ROD缺口的ROD_OOO。对应的初始RUD范围外拒绝仍发生在
+分配PDC之前，两种原因各有独立测试。

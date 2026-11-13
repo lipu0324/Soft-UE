@@ -53,13 +53,13 @@ bool T_PDC::initPDC(uint16_t id)
     // ==================== Basic Parameter Initialization
     SPDCID = id;       // Set source PDC ID
     DPDCID = 0;        // Initialize destination PDC ID to 0
-    MPR = Default_MPR; // Set maximum unacknowledged packets
+    initializePsnRanges();
     mode = ROD;        // Set to reliable ordered delivery mode
     state = CLOSED;    // Initial state is closed
 
     // ==================== PSN Related Initialization
     start_psn = 1000;   // Set starting PSN, actually not used
-    peer_sequence_window_.reset();
+    resetPeerSequenceWindow();
     tx_cur_psn = 0;     // Initialize transmit PSN
     clear_psn = 0;      // Initialize clear PSN
     rx_cur_psn = 0;     // Initialize receive PSN
@@ -107,7 +107,7 @@ bool T_PDC::initPDC(uint16_t id)
     std::stringstream init_state;
     init_state << "PDC initialization complete - SPDCID: " << SPDCID
                 << ", DPDCID: " << DPDCID
-                << ", MPR: " << MPR
+                << ", local_packet_capacity: " << local_packet_capacity
                 << ", mode: " << MODE_STR(mode)
                 << ", state: " << STATE_STR(state)
                 << ", tx_cur_psn: " << tx_cur_psn
@@ -152,7 +152,7 @@ void T_PDC::establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_m
 {
     DPDCID=remote_pdc; start_psn=initial_sequence; mode=delivery_mode;
     resetAcknowledgmentOrdering();
-    peer_sequence_window_.reset();
+    resetPeerSequenceWindow();
     rx_cur_psn=start_psn-1; cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
     tx_cur_psn=start_psn; clear_psn=start_psn-1;
     bad_psn=false; state=ESTABLISHED;
@@ -205,12 +205,14 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
             sendAck(PDS_next_hdr::UET_HDR_NONE, 0, 0, meta.psn, nullptr, false,pkt);
         LOG_INFO(__FUNCTION__, formatLogMessage("Send ACK - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", PSN: " + std::to_string(meta.psn)));
     }
-    else
-    { // Packet has error, send NACK and close
+    else if (error_chk==OOO)
+    {
         sendNack(0, pkt->PDS_header.RUOD_req_header.psn, UET_ROD_OOO, rx_cur_psn + 1,nullptr,pkt);
         // A later SYN packet may arrive before the starting packet. Keep the
         // newly allocated context so the missing PSN can establish it (§3.5.8.1).
     }
+    // DROP is a receive-window refusal, including a locally reduced MPR.
+    // It must not be mislabeled as ROD_OOO on a newly created RUD PDC.
 }
 
 void T_PDC::openChk()
@@ -642,7 +644,7 @@ void T_PDC::rxAck(PDStoNET_pkt *pkt)
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
     if (runtime_ && runtime_->standard_wire) {
-        if (tx_cur_psn==start_psn && !peer_sequence_window_) return;
+        if (tx_cur_psn==start_psn) return;
         const uint32_t lowest=peer_sequence_window_?peer_sequence_window_->cumulative_ack():start_psn-1;
         const uint32_t span=(tx_cur_psn-1)-lowest;
         if (span>=0x80000000u || ack_psn-lowest>span || (tx_cur_psn-1)-cack_psn>=0x80000000u) return;

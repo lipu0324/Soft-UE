@@ -109,6 +109,7 @@ void PDC::receiveProbe(const PDStoNET_pkt& packet) {
     if (offset>INT16_MAX) return; // Cannot represent this request in ACK_CC's signed offset.
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->decorate_ack(congestionConnection(),0,response);
+    response.congestion_ack.mpr=advertised_mpr_;
     response.congestion_ack.sack_psn_offset=static_cast<int16_t>(offset);
     const auto include=[&](uint32_t sequence) {
         const uint32_t bit=sequence-selective_base;

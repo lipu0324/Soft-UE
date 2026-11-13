@@ -2,6 +2,7 @@
 #include "PdcEvents.hpp"
 #include "RetryTiming.hpp"
 #include "../PDS/ReceiveDiagnostics.hpp"
+#include "../PDS/PsnRangeConfiguration.hpp"
 
 #include <chrono>
 #include <array>
@@ -78,6 +79,7 @@ struct Services {
     std::ostream* diagnostic_output=nullptr; // Structured Trace is independent of textual diagnostics.
     CMS::ICongestionControl* congestion_control=nullptr; // Optional explicit CMS configuration.
     uint32_t mpr_zero_override=0; // §3.5.11.13: zero means ignore received MPR=0.
+    PDS::PsnRangeConfiguration psn_ranges;
     uint16_t next_probe_opaque=0; // Host-scoped identifier persists across PDC reuse.
     bool enable_automatic_window_probes=true; // May be disabled for isolated admission experiments.
     bool actual_transmit_notifications=false; // Set by a port with a first-bit departure boundary.

@@ -57,6 +57,12 @@ def main():
     invalid.append(dict(base, wire={"udp": False}))
     for protocol in [-1, 256, True, 1.5]:
         invalid.append(dict(base, wire={"udp": False, "native_ip_protocol": protocol}))
+    for key, values in {"default_mpr": [-1, 256, True, 1.5],
+                        "local_packet_capacity": [0, 32641, True, 1.5],
+                        "advertised_mpr": [-1, 256, True, 1.5],
+                        "mpr_zero_override": [-1, 32641, True, 1.5]}.items():
+        invalid.extend(dict(base, pds={key: value}) for value in values)
+    invalid.append(dict(base, pds={"advertised_mpr": 0}))
     for port in [-1, 65536, True, 1.5]:
         invalid.append(dict(base, wire={"udp": True, "udp_destination_port": port}))
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
@@ -201,6 +207,17 @@ def main():
                 for _, frame in read_pcap(native_output / "packets.pcap"):
                     check(frame[20 if ipv6 else 23] == protocol,
                           "explicit native protocol missing from independent PCAP bytes")
+        for initial_encoding in [0, 1, 8, 255]:
+            configured = dict(base, pds={"default_mpr": initial_encoding, "local_packet_capacity": 3})
+            range_output, _ = run(configured, f"mpr-encoding-{initial_encoding}")
+            # Default operation is ROD; NSCC makes the receive advertisement visible in ACK_CC.
+            configured["nscc"] = {"enabled": True}
+            range_output, _ = run(configured, f"mpr-advertisement-{initial_encoding}")
+            advertisements = [frame[55] for _, frame in read_pcap(range_output / "packets.pcap")
+                              if frame[42] >> 3 == 8]
+            check(advertisements and all(value == max(1, initial_encoding) for value in advertisements),
+                  "configured MPR encoding missing from independent ACK_CC bytes")
+        run(dict(base, pds={"advertised_mpr": 0, "mpr_zero_override": 4}), "small-override-window")
         job_zero = dict(base, jobs=[0], operations=[dict(operation, job=0) for operation in base["operations"]])
         run(job_zero, "job-zero")
         lost = {"version": 1, "hosts": [1, 2], "duration_ns": 100_000_000,

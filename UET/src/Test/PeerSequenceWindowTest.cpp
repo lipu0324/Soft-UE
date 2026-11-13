@@ -5,8 +5,10 @@ using UET::PDS::PeerSequenceWindow;
 
 int main() {
     PeerSequenceWindow window(1000);
-    CHECK(window.allows(5000) && !window.advertised_range());
-    CHECK(!window.observe(999,uint8_t{0})); // Zero encoding ignored without an override.
+    CHECK(window.effective_range()==1024 && !window.advertised_range());
+    CHECK(window.allows(2023) && !window.allows(2024)); // Default_MPR=8, before any ACK.
+    CHECK(window.observe(999,uint8_t{0}) && !window.effective_range());
+    CHECK(window.allows(5000)); // Zero override disables MP_RANGE after receiving MPR=0.
     CHECK(window.observe(1000,uint8_t{4}) && *window.advertised_range()==512);
     CHECK(window.allows(1512) && !window.allows(1513));
     CHECK(window.allows(999) && window.allows(1000));

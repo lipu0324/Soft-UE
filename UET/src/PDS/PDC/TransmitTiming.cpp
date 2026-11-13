@@ -6,6 +6,10 @@ bool PDC::beginTransmitIncarnation() {
     if (!runtime_) return true;
     if (runtime_->rto_ns>UET::Runtime::kMaximumInitialRtoNs) return false;
     if (runtime_->maximum_packet_retries>UET::Runtime::kInfiniteRetryLimit) return false;
+    if (runtime_->standard_wire) {
+        try { runtime_->psn_ranges.validate(runtime_->mpr_zero_override); }
+        catch (const std::invalid_argument&) { return false; }
+    }
     if (runtime_->next_pdc_incarnation==UINT64_MAX) return false;
     transmit_incarnation_=++runtime_->next_pdc_incarnation;
     return true;

@@ -57,13 +57,13 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     // ==================== Basic Parameter Initialization ====================
     SPDCID = id;                    // Set source PDC ID
     DPDCID = 0;                     // Initialize destination PDC ID to 0
-    MPR = Default_MPR;              // Set maximum unacknowledged packets
+    initializePsnRanges();
     mode = ROD;                     // Set to reliable ordered delivery mode
     state = CLOSED;                 // Initial state is closed
 
     // ==================== PSN Related Initialization ====================
     start_psn = initial_psn;         // Retained per local PDC ID across reuse (§3.5.8.2).
-    peer_sequence_window_.reset();
+    resetPeerSequenceWindow();
     tx_cur_psn = start_psn;         // Initialize transmit PSN
     clear_psn = start_psn - 1;      // Initialize clear PSN
     rx_cur_psn = start_psn - 1;     // Initialize receive PSN
@@ -112,7 +112,7 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     std::stringstream init_state;
     init_state << "PDC initialization complete - SPDCID: " << SPDCID
                 << ", DPDCID: " << DPDCID
-                << ", MPR: " << MPR
+                << ", local_packet_capacity: " << local_packet_capacity
                 << ", mode: " << MODE_STR(mode)
                 << ", state: " << STATE_STR(state)
                 << ", start_psn: " << start_psn
@@ -414,7 +414,7 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
     if (runtime_ && runtime_->standard_wire) {
         // §3.5.12.2: an ACK_PSN outside the source's delivery interval must
         // not update any state, even if its CACK/MPR happen to look plausible.
-        if (tx_cur_psn==start_psn && !peer_sequence_window_) return;
+        if (tx_cur_psn==start_psn) return;
         const uint32_t lowest=peer_sequence_window_?peer_sequence_window_->cumulative_ack():start_psn-1;
         const uint32_t span=(tx_cur_psn-1)-lowest;
         if (span>=0x80000000u || ack_psn-lowest>span || (tx_cur_psn-1)-cack_psn>=0x80000000u) return;

@@ -99,6 +99,29 @@
       ]
     },
     {
+      "id": "PDS-CONFIG",
+      "reference": "§3.5.5; Tables 3-35/3-36; §3.5.11.13",
+      "summary": "PDS配置范围、MPR编码与状态管理",
+      "status": "partial",
+      "tests": [
+        "psn_range_configuration_test",
+        "peer_sequence_window_test",
+        "syn_range_test",
+        "pds_mpr_test",
+        "pds_probe_test",
+        "retry_timing_test",
+        "udp_encapsulation_test",
+        "network_defaults_test",
+        "pds_invalid_type_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Field audit in PDS-CONFIGURATION.md separates required ranges, optional/coalescing conditions and TSS/READ dependencies. Encoded Default_MPR, initial/receive PSN windows and local transmit cache are distinct. Full management/status, reserved pools and remaining conditional fields remain open."
+    },
+    {
       "id": "PDS-ACK",
       "reference": "§3.5.12",
       "summary": "选择 ACK、累计 ACK、重复 ACK 与 PSN 回绕",
@@ -109,7 +132,8 @@
         "pds_mpr_test",
         "pds_reserved_fields_test",
         "selective_acknowledgment_test",
-        "ordered_acknowledgment_test"
+        "ordered_acknowledgment_test",
+        "psn_range_configuration_test"
       ],
       "profiles": [
         "AI_BASE",

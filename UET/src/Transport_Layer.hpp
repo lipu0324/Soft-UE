@@ -79,7 +79,7 @@
 #define IP_Proto_Nxt_Hdr    0                      // Protocol number when UET runs directly over IP, can use experimental numbers (253-254) before official protocol number assignment
 #define UET_Data_Protect    0                      // Global data protection configuration: 0=no CRC and TSS, 1=enable CRC, 2=enable TSS, 3=reserved
 #define Limit_PSN_Range     1                      // When set, PDC closes when PSN reaches Start_PSN + 2^31 (optional security feature)
-#define Default_MPR         8                      // Default MPR value assumed when creating PDC, 0 is invalid, if set to 0 then use 1
+#define Default_MPR         8                      // Legacy local packet bound. Standard wire uses PsnRangeConfiguration.
 
 // ACK related configuration parameters
 #define Max_ACK_Data_Size   16 * 8                 // Maximum return data that can be carried in PDS ACK (bytes)
