@@ -10,7 +10,7 @@
 ```sh
 cmake -S . -B build/provider -DSOFTUE_ENABLE_LIBFABRIC=ON \
   -DSOFTUE_PROVIDER_LIBFABRIC_ROOT=/path/to/libfabric-2.0-prefix
-cmake --build build/provider --target libfabric_mode_selection_test libfabric_inject_test libfabric_event_queue_test libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer -j2
+cmake --build build/provider --target libfabric_atomic_return_test libfabric_read_test libfabric_mode_selection_test libfabric_inject_test libfabric_event_queue_test libfabric_provider_peer libfabric_datagram_peer libfabric_recovery_peer -j2
 ctest --test-dir build/provider -R 'libfabric_' --output-on-failure
 FI_PROVIDER_PATH="$PWD/build/provider" FI_PROVIDER=softue fi_info -p softue
 ```
@@ -20,7 +20,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 
 `libfabric_provider_peer.c` 只包含公开 libfabric 头文件，没有链接原生 SES API。
 两进程测试覆盖插件发现、在 endpoint 创建前注册 MR、实际应用缓冲区写入、
-多包 WRITE IMM、SEND 往返、512 元素的批量整数 SUM、原子能力查询、远端 CQ data、
+多包 WRITE IMM、SEND 往返、READ、取回 SUM/CAS、512 元素的批量整数 SUM、原子能力查询、远端 CQ data、
 非法 key 和仅允许本地写的 MR 拒绝远端写。独立的 DGRAM 应用验证 UUD、1 MTU
 边界和本地发送完成；不由发送完成推断远端收到。
 
@@ -33,7 +33,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 消息 | `fi_send/recv/senddata`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；SENDMSG 支持逐调用 `FI_REMOTE_CQ_DATA`；ROD 允许后投递接收缓冲区 |
 | 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
 | RMA | `fi_write/writev/writemsg/writedata` 和 `fi_read/readv/readmsg`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
-| 原子 | 非取回 `fi_atomic/atomicv/atomicmsg`；8/16/32/64 位有符号/无符号整数；逐元素原子性和标准能力查询 |
+| 原子 | 非取回 `fi_atomic/atomicv/atomicmsg` 支持8～64位整数；`fi_fetch_atomic`、`fi_compare_atomic` 及单 iovec 的v/msg入口支持8～128位整数，限一个元素；查询返回各自上限 |
 | DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；支持 SEND CQ data；仅本地发送完成，无 PDC/确认/重传 |
 | 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
 | 访问权限 | `FI_REMOTE_READ/WRITE` 分别授予远端读/写；仅 `FI_READ/WRITE` 不授予远端访问；撤销使 key 立即失效 |
@@ -55,7 +55,7 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 `fi_getinfo` 保留调用者请求的已支持排序 flags；显式零排序使用 RUD。没有提供
 排序 hints 时保留 SAS 默认。SEND 排序 flags 为 RAS/SAR/SAS/SAW/WAS；R/W
 排序 flags 按 §2.2.6 的单独列表解释，交叉排序 flag 可以同时参与两种判断。
-可用的 READ/WRITE/非取回 ATOMIC 通过源端应用 FIFO 提供整消息的 RAW/WAR/WAW，
+可用的 READ/WRITE/取回与非取回 ATOMIC 通过源端应用 FIFO 提供整消息的 RAW/WAR/WAW，
 三个 `max_order_*_size` 均为 UINT32_MAX。后续 WRITE 必须等待前序 READ 的实际
 结果放置及全部正向语义结果，避免丢失数据 ACK 后重执行 READ 读到这个后序 WRITE
 的值（§3.4.2.7.1.2）。这不为其他端点的并发写提供整消息快照。源端应用队列串行
@@ -84,7 +84,14 @@ READ 拒绝 FI_INJECT 和 FI_REMOTE_CQ_DATA，DGRAM 不公布 READ。公开 API 
 `libfabric_read_test` 覆盖 RAW/WAR 链、两种返回载体的丢失恢复、长度边界、远端权限
 和边界错误、错误后继续 READ，以及 CQ flags/context/buffer/length。
 
-取回原子/CAS、浮点原子、tagged、directed receive、
+取回/CAS 使用[缓存原结果的原生路径](FETCHING-ATOMICS.md)。结果缓冲区采用与 READ
+相同的私有本地注册与精确身份校验，完成 CQ 为 `FI_ATOMIC|FI_READ`，`buf` 是结果
+指针、`len` 是 datatype字节数。CAS的32 B请求不增加本地结果长度。`FI_ATOMIC_READ`
+忽略输入 buffer；v/msg入口也允许省略该输入向量。取回与比较拒绝 FI_INJECT及
+FI_REMOTE_CQ_DATA，DGRAM不公布原子能力。`FI_MSWAP` 的掩码与操作数逐字节转换为
+UE公式，详见[公开原子接口](PROVIDER-FETCHING-ATOMICS.md)。
+
+浮点原子、tagged、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时

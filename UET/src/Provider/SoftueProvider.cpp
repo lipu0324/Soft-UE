@@ -174,6 +174,8 @@ std::optional<SES::IntegerAtomicDatatype> atomic_datatype(fi_datatype datatype) 
     case FI_UINT32: return SES::IntegerAtomicDatatype::Uint32;
     case FI_INT64: return SES::IntegerAtomicDatatype::Int64;
     case FI_UINT64: return SES::IntegerAtomicDatatype::Uint64;
+    case FI_INT128: return SES::IntegerAtomicDatatype::Int128;
+    case FI_UINT128: return SES::IntegerAtomicDatatype::Uint128;
     default: return {};
     }
 }
@@ -192,6 +194,20 @@ std::optional<SES::IntegerAtomicOperation> atomic_operation(fi_op operation) {
     case FI_LXOR: return Operation::LogicalXor;
     case FI_BXOR: return Operation::BitwiseXor;
     case FI_ATOMIC_WRITE: return Operation::Write;
+    case FI_ATOMIC_READ: return Operation::Read;
+    default: return {};
+    }
+}
+std::optional<SES::IntegerAtomicOperation> compare_atomic_operation(fi_op operation) {
+    using Operation=SES::IntegerAtomicOperation;
+    switch (operation) {
+    case FI_CSWAP: return Operation::CompareSwapEqual;
+    case FI_CSWAP_NE: return Operation::CompareSwapNotEqual;
+    case FI_CSWAP_LE: return Operation::CompareSwapLessEqual;
+    case FI_CSWAP_LT: return Operation::CompareSwapLess;
+    case FI_CSWAP_GE: return Operation::CompareSwapGreaterEqual;
+    case FI_CSWAP_GT: return Operation::CompareSwapGreater;
+    case FI_MSWAP: return Operation::MaskedSwap;
     default: return {};
     }
 }
@@ -199,10 +215,14 @@ int query_atomic(fid_domain* domain,fi_datatype datatype,fi_op operation,fi_atom
     if (!attributes) return -FI_EINVAL;
     *attributes={0,0};
     const auto native_type=atomic_datatype(datatype);
+    const bool fetching=flags==FI_FETCH_ATOMIC,comparing=flags==FI_COMPARE_ATOMIC;
+    const auto native_operation=comparing?compare_atomic_operation(operation):atomic_operation(operation);
     if (!native_atomic_platform || (domain && owner<ProviderDomain>(domain).datagram) ||
-        flags || !native_type || !atomic_operation(operation)) return -FI_EOPNOTSUPP;
+        (flags && !fetching && !comparing) || !native_type || !native_operation ||
+        (!flags && (*native_operation==SES::IntegerAtomicOperation::Read || SES::integer_atomic_width(*native_type)>8)))
+        return -FI_EOPNOTSUPP;
     attributes->size=SES::integer_atomic_width(*native_type);
-    attributes->count=16*1024*1024/attributes->size;
+    attributes->count=flags?1:16*1024*1024/attributes->size;
     return 0;
 }
 
@@ -761,9 +781,107 @@ int atomic_valid(fid_ep* handle,fi_datatype datatype,fi_op operation,size_t* cou
     if (!status) *count=attributes.count;
     return status;
 }
-int fetching_atomic_unavailable(fid_ep*,fi_datatype,fi_op,size_t* count) {
-    if (count) *count=0;
-    return -FI_EOPNOTSUPP;
+ssize_t submit_fetching_atomic(fid_ep* handle,const void* buffer,size_t count,const void* compare,
+                void* result,fi_addr_t destination,uint64_t offset,uint64_t key,fi_datatype datatype,
+                fi_op operation,void* context,bool comparing,std::optional<uint64_t> flags={}) {
+    return guarded([&]() -> ssize_t {
+        auto& endpoint=owner<ProviderEndpoint>(handle);
+        if (!endpoint.enabled) return -FI_EOPBADSTATE;
+        if (endpoint.datagram) return -FI_EOPNOTSUPP;
+        const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
+        if (operation_flags&~(supported_operation_flags&~FI_INJECT)) return -FI_EOPNOTSUPP;
+        fi_atomic_attr limits{};
+        const auto supported=query_atomic(nullptr,datatype,operation,&limits,comparing?FI_COMPARE_ATOMIC:FI_FETCH_ATOMIC);
+        if (supported) return supported;
+        if (count!=1 || !result || (operation!=FI_ATOMIC_READ && !buffer) ||
+            (comparing && !compare) || offset%limits.size) return -FI_EINVAL;
+        if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
+        progress(*endpoint.domain);
+        const auto peer=resolve_peer(endpoint,destination);
+        if (!peer) return -FI_EADDRNOTAVAIL;
+        SES::Operation request; request.type=SES::OperationType::FetchingAtomic;
+        request.peer=*peer; request.remote_key=key; request.remote_offset=offset;
+        request.atomic_datatype=*atomic_datatype(datatype);
+        request.atomic_operation=comparing?*compare_atomic_operation(operation):*atomic_operation(operation);
+        request.payload.resize(limits.size);
+        if (operation!=FI_ATOMIC_READ) std::memcpy(request.payload.data(),buffer,limits.size);
+        if (comparing) {
+            request.atomic_compare.resize(limits.size); std::memcpy(request.atomic_compare.data(),compare,limits.size);
+            if (operation==FI_MSWAP) {
+                // fi_atomic(3): new=(input & mask)|(old & ~mask).
+                // UE Table3-27: new=(old & ue_mask)^ue_operand.
+                // The two terms are disjoint after this per-byte conversion.
+                for (size_t byte=0;byte<limits.size;++byte) {
+                    request.payload[byte]&=request.atomic_compare[byte];
+                    request.atomic_compare[byte]=static_cast<uint8_t>(~request.atomic_compare[byte]);
+                }
+            }
+        }
+        const auto registration=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(result),limits.size,
+            static_cast<uint8_t>(SES::Access::Write));
+        request.atomic_result=SES::AtomicResultBuffer{registration.key,0,static_cast<uint32_t>(limits.size),1,1};
+        ApplicationOperation application{context,FI_ATOMIC|FI_READ,result,registration.key};
+        try { enqueue_transmission(endpoint,std::move(request),std::move(application)); }
+        catch (...) { endpoint.domain->memory.deregister(registration.key); throw; }
+        return 0;
+    });
+}
+ssize_t fetch_atomic(fid_ep* endpoint,const void* buffer,size_t count,void*,void* result,void*,
+                fi_addr_t destination,uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    return submit_fetching_atomic(endpoint,buffer,count,nullptr,result,destination,offset,key,datatype,operation,context,false);
+}
+ssize_t compare_atomic(fid_ep* endpoint,const void* buffer,size_t count,void*,const void* compare,void*,
+                void* result,void*,fi_addr_t destination,uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    return submit_fetching_atomic(endpoint,buffer,count,compare,result,destination,offset,key,datatype,operation,context,true);
+}
+ssize_t fetch_atomic_vector(fid_ep* endpoint,const fi_ioc* buffers,void**,size_t buffer_count,
+                fi_ioc* results,void**,size_t result_count,fi_addr_t destination,uint64_t offset,uint64_t key,
+                fi_datatype datatype,fi_op operation,void* context) {
+    if (!results || result_count!=1 || results[0].count!=1 || buffer_count>1 ||
+        (operation!=FI_ATOMIC_READ && (!buffers || buffer_count!=1 || buffers[0].count!=1))) return -FI_EINVAL;
+    return fetch_atomic(endpoint,operation==FI_ATOMIC_READ?nullptr:buffers[0].addr,1,nullptr,results[0].addr,nullptr,
+        destination,offset,key,datatype,operation,context);
+}
+ssize_t compare_atomic_vector(fid_ep* endpoint,const fi_ioc* buffers,void**,size_t buffer_count,
+                const fi_ioc* comparisons,void**,size_t comparison_count,fi_ioc* results,void**,size_t result_count,
+                fi_addr_t destination,uint64_t offset,uint64_t key,fi_datatype datatype,fi_op operation,void* context) {
+    if (!buffers || buffer_count!=1 || buffers[0].count!=1 || !comparisons || comparison_count!=1 ||
+        comparisons[0].count!=1 || !results || result_count!=1 || results[0].count!=1) return -FI_EINVAL;
+    return compare_atomic(endpoint,buffers[0].addr,1,nullptr,comparisons[0].addr,nullptr,results[0].addr,nullptr,
+        destination,offset,key,datatype,operation,context);
+}
+ssize_t fetch_atomic_message(fid_ep* endpoint,const fi_msg_atomic* message,fi_ioc* results,void**,
+                size_t result_count,uint64_t flags) {
+    if (!message || !message->rma_iov || message->rma_iov_count!=1 || message->rma_iov[0].count!=1 ||
+        !results || result_count!=1 || results[0].count!=1 || message->iov_count>1 ||
+        (message->op!=FI_ATOMIC_READ && (!message->msg_iov || message->iov_count!=1 || message->msg_iov[0].count!=1)))
+        return -FI_EINVAL;
+    return submit_fetching_atomic(endpoint,message->op==FI_ATOMIC_READ?nullptr:message->msg_iov[0].addr,1,nullptr,
+        results[0].addr,message->addr,message->rma_iov[0].addr,message->rma_iov[0].key,message->datatype,message->op,
+        message->context,false,flags);
+}
+ssize_t compare_atomic_message(fid_ep* endpoint,const fi_msg_atomic* message,const fi_ioc* comparisons,void**,
+                size_t comparison_count,fi_ioc* results,void**,size_t result_count,uint64_t flags) {
+    if (!message || !message->msg_iov || message->iov_count!=1 || message->msg_iov[0].count!=1 ||
+        !message->rma_iov || message->rma_iov_count!=1 || message->rma_iov[0].count!=1 ||
+        !comparisons || comparison_count!=1 || comparisons[0].count!=1 || !results || result_count!=1 || results[0].count!=1)
+        return -FI_EINVAL;
+    return submit_fetching_atomic(endpoint,message->msg_iov[0].addr,1,comparisons[0].addr,results[0].addr,
+        message->addr,message->rma_iov[0].addr,message->rma_iov[0].key,message->datatype,message->op,message->context,true,flags);
+}
+int returned_atomic_valid(fid_ep* handle,fi_datatype datatype,fi_op operation,size_t* count,uint64_t flags) {
+    if (!count) return -FI_EINVAL;
+    *count=0;
+    if (owner<ProviderEndpoint>(handle).datagram) return -FI_EOPNOTSUPP;
+    fi_atomic_attr limits{}; const auto supported=query_atomic(nullptr,datatype,operation,&limits,flags);
+    if (!supported) *count=limits.count;
+    return supported;
+}
+int fetch_atomic_valid(fid_ep* endpoint,fi_datatype datatype,fi_op operation,size_t* count) {
+    return returned_atomic_valid(endpoint,datatype,operation,count,FI_FETCH_ATOMIC);
+}
+int compare_atomic_valid(fid_ep* endpoint,fi_datatype datatype,fi_op operation,size_t* count) {
+    return returned_atomic_valid(endpoint,datatype,operation,count,FI_COMPARE_ATOMIC);
 }
 ssize_t send_message(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,void* context) {
     return submit_operation(endpoint,buffer,length,destination,0,0,context,false);
@@ -1036,10 +1154,10 @@ void initialize_operations() {
     rma_ops.inject=inject_write; rma_ops.injectdata=inject_write_data;
     atomic_ops.size=sizeof(atomic_ops); atomic_ops.write=write_atomic; atomic_ops.writev=write_atomic_vector;
     atomic_ops.writemsg=write_atomic_message; atomic_ops.writevalid=atomic_valid;
-    atomic_ops.readwritevalid=fetching_atomic_unavailable; atomic_ops.compwritevalid=fetching_atomic_unavailable;
-    atomic_ops.inject=inject_atomic; UNSUPPORTED(atomic_ops,readwrite); UNSUPPORTED(atomic_ops,readwritev);
-    UNSUPPORTED(atomic_ops,readwritemsg); UNSUPPORTED(atomic_ops,compwrite); UNSUPPORTED(atomic_ops,compwritev);
-    UNSUPPORTED(atomic_ops,compwritemsg);
+    atomic_ops.readwritevalid=fetch_atomic_valid; atomic_ops.compwritevalid=compare_atomic_valid;
+    atomic_ops.inject=inject_atomic; atomic_ops.readwrite=fetch_atomic; atomic_ops.readwritev=fetch_atomic_vector;
+    atomic_ops.readwritemsg=fetch_atomic_message; atomic_ops.compwrite=compare_atomic;
+    atomic_ops.compwritev=compare_atomic_vector; atomic_ops.compwritemsg=compare_atomic_message;
 }
 
 } // namespace

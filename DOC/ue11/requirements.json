@@ -512,14 +512,16 @@
       "tests": [
         "fetching_atomic_value_test",
         "native_fetching_atomic_test",
-        "reference_process_interop"
+        "reference_process_interop",
+        "libfabric_atomic_return_test",
+        "libfabric_provider_processes"
       ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Provider mapping, optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md."
+      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Public libfabric scalar/vector/message fetching and compare APIs support a single8–128bit integer element; all queries, masked-swap translation, result CQ fields, bad-generation retries with preserved nonzero generation, cached-loss recovery and independent provider processes are tested. Optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md."
     },
     {
       "id": "SES-SYNC",

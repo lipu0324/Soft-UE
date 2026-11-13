@@ -60,7 +60,8 @@ int main(int argc,char** argv) {
     struct fi_atomic_attr atomic_limits;
     SUCCESS(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,0));
     CHECK(atomic_limits.size==8 && atomic_limits.count>=512);
-    CHECK(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,FI_FETCH_ATOMIC)==-FI_EOPNOTSUPP);
+    SUCCESS(fi_query_atomic(domain,FI_UINT64,FI_SUM,&atomic_limits,FI_FETCH_ATOMIC));
+    CHECK(atomic_limits.size==8 && atomic_limits.count==1);
     CHECK(fi_mr_key(region)!=fi_mr_key(local_only));
     CHECK(fi_mr_key(region)&(1ULL<<48));
     struct fi_cq_attr queue_attributes={0}; queue_attributes.format=FI_CQ_FORMAT_DATA;
@@ -75,7 +76,7 @@ int main(int argc,char** argv) {
     size_t atomic_count=0;
     SUCCESS(fi_atomicvalid(endpoint,FI_UINT64,FI_SUM,&atomic_count)); CHECK(atomic_count>=512);
     CHECK(fi_atomicvalid(endpoint,FI_FLOAT,FI_SUM,&atomic_count)==-FI_EOPNOTSUPP && atomic_count==0);
-    CHECK(fi_fetch_atomicvalid(endpoint,FI_UINT64,FI_SUM,&atomic_count)==-FI_EOPNOTSUPP && atomic_count==0);
+    SUCCESS(fi_fetch_atomicvalid(endpoint,FI_UINT64,FI_SUM,&atomic_count)); CHECK(atomic_count==1);
     CHECK(fi_close(&addresses->fid)==-FI_EBUSY && fi_close(&completions->fid)==-FI_EBUSY);
     struct sockaddr_in local={0}; size_t local_size=sizeof(local);
     SUCCESS(fi_getname(&endpoint->fid,&local,&local_size));
@@ -106,8 +107,9 @@ int main(int argc,char** argv) {
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
     }
     size_t send_completions=0,errors=0,receives=0,remote_writes=0;
-    int reply_started=0,read_started=0,done_started=0,done_received=0,finished=0;
+    int reply_started=0,read_started=0,fetch_started=0,compare_started=0,done_started=0,done_received=0,finished=0;
     uint64_t read_result=0;
+    uint64_t fetch_result=0,compare_result=0,compare_value=2,swap_value=9;
     const time_t deadline=time(NULL)+10;
     while (!finished && time(NULL)<deadline) {
         struct fi_cq_data_entry entries[8]; ssize_t count=fi_cq_read(completions,entries,8);
@@ -135,8 +137,13 @@ int main(int argc,char** argv) {
                     else { CHECK(entry->op_context==(void*)77 && entry->data==(server?456:789)); ++receives; }
                 } else {
                     CHECK(entry->flags&(FI_SEND|FI_WRITE|FI_READ));
-                    if (entry->flags&FI_READ) CHECK(!server && entry->op_context==(void*)19 &&
-                        entry->flags==(FI_RMA|FI_READ) && entry->len==8 && entry->buf==&read_result);
+                    if (entry->flags&FI_READ) {
+                        CHECK(!server && entry->len==8);
+                        if (entry->flags&FI_ATOMIC) CHECK(entry->flags==(FI_ATOMIC|FI_READ) &&
+                            ((entry->op_context==(void*)20 && entry->buf==&fetch_result) ||
+                             (entry->op_context==(void*)21 && entry->buf==&compare_result)));
+                        else CHECK(entry->op_context==(void*)19 && entry->flags==(FI_RMA|FI_READ) && entry->buf==&read_result);
+                    }
                     ++send_completions;
                 }
             }
@@ -155,11 +162,21 @@ int main(int argc,char** argv) {
             SUCCESS(fi_read(endpoint,&read_result,sizeof(read_result),NULL,peer,0,peer_atomic_key,(void*)19));
             read_started=1;
         }
-        if (!server && send_completions==4 && read_started && !done_started) {
+        if (!server && send_completions==4 && read_started && !fetch_started) {
             CHECK(read_result==1);
+            SUCCESS(fi_fetch_atomic(endpoint,increments,1,NULL,&fetch_result,NULL,peer,0,peer_atomic_key,FI_UINT64,FI_SUM,(void*)20));
+            fetch_started=1;
+        }
+        if (!server && send_completions==5 && fetch_started && !compare_started) {
+            CHECK(fetch_result==1);
+            SUCCESS(fi_compare_atomic(endpoint,&swap_value,1,NULL,&compare_value,NULL,&compare_result,NULL,
+                peer,0,peer_atomic_key,FI_UINT64,FI_CSWAP,(void*)21)); compare_started=1;
+        }
+        if (!server && send_completions==6 && compare_started && !done_started) {
+            CHECK(compare_result==2);
             SUCCESS(fi_senddata(endpoint,"done",4,NULL,0,peer,(void*)15)); done_started=1;
         }
-        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==5);
+        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==7);
         if (!finished) poll(NULL,0,1); // Application wait; fi_cq_read owns manual progress.
     }
     if (!finished) fprintf(stderr,"incomplete server=%d sends=%zu errors=%zu receives=%zu remote_writes=%zu\n",
@@ -171,6 +188,6 @@ int main(int argc,char** argv) {
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&completions->fid));
     SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints);
-    printf("PASS libfabric %s: SEND/WRITE IMM/READ, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
+    printf("PASS libfabric %s: SEND/WRITE IMM/READ/FETCH/CAS, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
     return 0;
 }

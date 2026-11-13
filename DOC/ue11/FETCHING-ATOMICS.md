@@ -61,5 +61,6 @@ NSCC、READ ACK阈值为零、各整数宽度、普通取回/CAS/掩码交换、
 CAS返回旧值2并把目标变9。参考 SES/PDS/CRC实现未修改，仅使用现有测试 NIC适配器；
 128位及更宽操作矩阵不计入这个部分参考实现的互通覆盖。
 
-provider取回/CAS映射、优化头、浮点与复数、tagged原子、RUDI、
+provider的公开取回/CAS映射与掩码转换见[接口说明](PROVIDER-FETCHING-ATOMICS.md)。
+优化头、浮点与复数、tagged原子、RUDI、
 TSS及RODL仍需后续各自验收；此接口不代表 AI Full/HPC 已完成。
