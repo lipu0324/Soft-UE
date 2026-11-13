@@ -762,6 +762,7 @@ void PDC::freePDC()
     ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
+    resetAcknowledgmentOrdering();
     closing = false;
     close_error = false;
     failure_reason_=UET::Runtime::PdcFailureReason::None;
@@ -1519,11 +1520,7 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
             << ", ACK_PSN_OFF: " << (psn - cack_psn);
     LOG_INFO(__FUNCTION__, formatLogMessage(ack_info.str()));
 
-    if (public_net_queue) {
-        public_net_queue->push(p);
-    } else {
-        tx_pkt_q.push(p);
-    }
+    queueAcknowledgment(psn,p);
     LOG_DEBUG(__FUNCTION__, formatLogMessage("ACK包已加入发送队列"));
 
     if (gtd_del)

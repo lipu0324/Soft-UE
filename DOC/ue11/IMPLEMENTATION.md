@@ -15,6 +15,9 @@ with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
 Numbered ROD controls share the request traffic class using a non-trimmable
 DSCP; see [control traffic classes](CONTROL-TRAFFIC-CLASSES.md).
 
+ROD first acknowledgments wait for earlier asynchronous SES responses while
+historical ACKs remain replayable; see [ROD ACK order](ROD-ACK-ORDER.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating

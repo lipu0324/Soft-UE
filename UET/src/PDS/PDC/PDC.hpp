@@ -489,12 +489,19 @@ public:
             runtime_->congestion_control->decorate_ack(congestionConnection(),psn,ack);
         decorateSelectiveAcknowledgment(psn,ack);
         decorateAcknowledgmentNetwork(psn,trigger,ack);
-        if (public_net_queue) return public_net_queue->push(ack);
-        tx_pkt_q.push(std::move(ack));
-        return true;
+        return queueAcknowledgment(psn,std::move(ack));
     }
 
 protected:
+    // §3.5.21.1: SES may finish asynchronously, but the first ACK for each
+    // ROD PSN must leave in request order. Already emitted ACKs can still be
+    // replayed for duplicate/query recovery, independent of this frontier.
+    std::optional<uint32_t> next_ordered_ack_psn_;
+    std::map<uint32_t,PDStoNET_pkt> pending_ordered_acknowledgments_;
+    bool queueAcknowledgment(uint32_t sequence,PDStoNET_pkt acknowledgment);
+    void resetAcknowledgmentOrdering() {
+        next_ordered_ack_psn_.reset(); pending_ordered_acknowledgments_.clear();
+    }
     bool admitSemanticRequest(const PDStoNET_pkt& packet);
     uint64_t transmit_incarnation_=0;
     bool beginTransmitIncarnation();

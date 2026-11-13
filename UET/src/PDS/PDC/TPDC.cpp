@@ -42,6 +42,7 @@ bool T_PDC::initPDC(uint16_t id)
     ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
+    resetAcknowledgmentOrdering();
     // FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -150,6 +151,7 @@ void T_PDC::processOpen1(PDStoNET_pkt *pkt)
 void T_PDC::establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_mode delivery_mode)
 {
     DPDCID=remote_pdc; start_psn=initial_sequence; mode=delivery_mode;
+    resetAcknowledgmentOrdering();
     peer_sequence_window_.reset();
     rx_cur_psn=start_psn-1; cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
     tx_cur_psn=start_psn; clear_psn=start_psn-1;

@@ -96,16 +96,19 @@ void exhaustion_generation_and_manual_retry() {
     Fixture test(32);
     const auto region=test.target.memory().register_region(1,1,128,7);
     Operation first; first.type=OperationType::Send; first.peer=2; first.payload.assign(32,1);
-    test.source.submit(first); test.loop.run_until(kMillisecond); CHECK(test.target.unexpected_bytes()==32);
+    const auto buffered=test.source.submit(first); test.loop.run_until(kMillisecond); CHECK(test.target.unexpected_bytes()==32);
     Operation second=first; second.payload.assign(48,2);
     const auto rejected=test.source.submit(second); test.loop.run_until(2*kMillisecond);
     Completion completion{};
-    CHECK(test.source.poll_completion(completion) && completion.operation==rejected && completion.remote_code==4 && completion.remote_generation==0);
-    CHECK(test.source.transport_pending(rejected)); // The earlier buffered EOM still blocks cumulative retirement.
+    // §3.5.21.1: the later message's error is ready, but its first ACK
+    // cannot pass the earlier SEND's delivery-complete EOM response.
+    CHECK(!test.source.poll_completion(completion));
+    CHECK(test.source.transport_pending(rejected));
     CHECK(test.target.unexpected_bytes()==32);
     test.target.post_receive(1,1,region.key,0,32,1); test.loop.run_until(3*kMillisecond);
     CHECK(!test.source.transport_pending(rejected));
-    CHECK(test.source.poll_completion(completion) && completion.status==CompletionStatus::Success);
+    CHECK(test.source.poll_completion(completion) && completion.operation==buffered && completion.status==CompletionStatus::Success);
+    CHECK(test.source.poll_completion(completion) && completion.operation==rejected && completion.remote_code==4 && completion.remote_generation==0);
     CHECK(test.target.poll_completion(completion) && completion.context==1);
     test.source.submit(second); test.loop.run_until(4*kMillisecond);
     CHECK(test.source.poll_completion(completion) && completion.remote_code==2 && completion.remote_generation==1);

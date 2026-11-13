@@ -23,6 +23,7 @@ add_library(softue_protocol STATIC
   ${CORE}/PDS/PDC/PDC.cpp
   ${CORE}/PDS/PDC/Probe.cpp
   ${CORE}/PDS/PDC/TransmitTiming.cpp
+  ${CORE}/PDS/PDC/OrderedAcknowledgment.cpp
   ${CORE}/PDS/PDC/NegativeAcknowledgment.cpp
   ${CORE}/PDS/PDC/IPDC.cpp
   ${CORE}/PDS/PDC/TPDC.cpp
@@ -95,6 +96,7 @@ if(BUILD_TESTING)
   softue_test(pds_reserved_fields_test PdsReservedFieldsTest.cpp)
   softue_test(pds_invalid_type_test PdsInvalidTypeTest.cpp)
   softue_test(pds_traffic_class_test PdsTrafficClassTest.cpp)
+  softue_test(ordered_acknowledgment_test OrderedAcknowledgmentTest.cpp)
   softue_test(pdc_ack_test PdcAckTest.cpp)
   softue_test(peer_sequence_window_test PeerSequenceWindowTest.cpp)
   softue_test(pds_mpr_test PdsMprTest.cpp)

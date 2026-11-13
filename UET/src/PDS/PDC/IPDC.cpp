@@ -46,6 +46,7 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
+    resetAcknowledgmentOrdering();
     //FUNCTION_LOG_ENTRY();
 
     // Record input parameters
