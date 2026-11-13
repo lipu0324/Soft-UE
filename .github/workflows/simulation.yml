@@ -6,7 +6,10 @@ on:
 jobs:
   simulation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Sanitizer compilation plus the complete suite exceeded the old15min
+    # job budget even with81/81 tests passing (run43460972612). Leave room
+    # for the required post-test inventory check and evidence upload too.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
