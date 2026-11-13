@@ -92,7 +92,8 @@ def validate(config):
                "wire " + " ".join(str(int(x)) for x in flags),
                f"udp_destination_port {udp_destination_port}"]
     pds = mapping(config.get("pds", {}),
-                  {"default_mpr", "local_packet_capacity", "advertised_mpr", "mpr_zero_override"}, "pds")
+                  {"default_mpr", "local_packet_capacity", "advertised_mpr", "mpr_zero_override",
+                   "rud_mapping", "rod_mapping"}, "pds")
     default_mpr = integer(pds.get("default_mpr", 8), 0, 255, "pds.default_mpr")
     packet_capacity = integer(pds.get("local_packet_capacity", 8), 1, 32640, "pds.local_packet_capacity")
     zero_override = integer(pds.get("mpr_zero_override", 0), 0, 32640, "pds.mpr_zero_override")
@@ -101,6 +102,17 @@ def validate(config):
         raise ValueError("bounded zero-MPR receive policy requires pds.mpr_zero_override")
     records.append(f"psn_ranges {default_mpr} {packet_capacity} {zero_override} "
                    f"{int('advertised_mpr' in pds)} {advertisement}")
+    mapping_flags = []
+    for mode in ["rud", "rod"]:
+        selected = mapping(pds.get(f"{mode}_mapping", {}),
+                           {"include_job_id", "include_source_pid", "include_target_pid", "include_resource_index"},
+                           f"pds.{mode}_mapping")
+        for field in ["include_job_id", "include_source_pid", "include_target_pid", "include_resource_index"]:
+            enabled = selected.get(field, field == "include_job_id")
+            if type(enabled) is not bool:
+                raise ValueError(f"pds.{mode}_mapping.{field} must be boolean")
+            mapping_flags.append(int(enabled))
+    records.append("pdc_mapping " + " ".join(map(str, mapping_flags)))
     if "native_ip_protocol" in wire:
         protocol = integer(wire["native_ip_protocol"], 0, 255, "wire.native_ip_protocol")
         records.append(f"native_ip_protocol {protocol}")

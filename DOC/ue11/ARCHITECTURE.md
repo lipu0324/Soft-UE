@@ -28,7 +28,8 @@ flowchart LR
 | 原生 SES | 操作 ID、消息分片、接收缓冲区、内存授权、应用完成 | `UET/src/SES/Endpoint.hpp` |
 | 内存注册表 | JobID、PID、key、访问权限、边界、撤销、稀疏存储 | `UET/src/SES/MemoryRegistry.hpp` |
 | 资源目录 | 相对 PID 映射、节点范围 PID、独立索引空间、generation 与启用状态 | `UET/src/SES/ResourceDirectory.hpp` |
-| PDS Manager | 将报文分发到正确的端点/PDC 元组；分配和回收上下文 | `UET/src/PDS/PDS_Manager/PDSManager.hpp` |
+| PDS Manager | 将报文分发到正确的端点/PDC元组；按可配置字段选择连接，分配和回收上下文 | `UET/src/PDS/PDS_Manager/PDSManager.hpp` |
+| PDC选择策略 | 独立RUD/ROD字段组合、必需FA/TC/mode及碰撞安全的key | `UET/src/PDS/PdcMapping.hpp` |
 | Initiator/Target PDC | 建连、PSN、ACK/NACK、重复消除、RTO、Clear/Close | `UET/src/PDS/PDC/` |
 | Wire codec | 显式位宽、网络字节序、保留位、长度和 CRC；不决定重传 | `UET/src/Network_Layer/UetWireCodec.cpp` |
 | PacketPort | 非阻塞发送结果、接收回调、背压解除通知 | `UET/src/Runtime/PacketPort.hpp` |

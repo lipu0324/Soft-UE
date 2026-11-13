@@ -99,6 +99,23 @@
       ]
     },
     {
+      "id": "PDS-MAPPING",
+      "reference": "§3.5.8.1",
+      "summary": "PDC基础元组及Job/PID/资源索引组合配置",
+      "status": "partial",
+      "tests": [
+        "pdc_mapping_test",
+        "pds_allocation_test",
+        "simulation_scenarios"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Native host configuration supports independent RUD/ROD policies, the base FA/TC/mode tuple and all combinations of JobID, source PID, target PID and resource index. Source PID is local metadata, distinct from the SES matching rank. Full traffic-class groups, reserved resources and conditional SDI mapping remain open; see PDC-MAPPING.md."
+    },
+    {
       "id": "PDS-CONFIG",
       "reference": "§3.5.5; Tables 3-35/3-36; §3.5.11.13",
       "summary": "PDS配置范围、MPR编码与状态管理",

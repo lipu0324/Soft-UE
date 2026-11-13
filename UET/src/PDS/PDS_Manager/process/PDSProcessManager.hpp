@@ -158,9 +158,10 @@ public:
         std::lock_guard<std::mutex> lock(manager_mutex);
         if (pds_process_info) pds_process_info->pds_instance->cancelQueuedMessage(peer,job,message_id);
     }
-    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation) {
+    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
+                             UET::PDS::PdcMappingIdentity identity={}) {
         std::lock_guard<std::mutex> lock(manager_mutex);
-        return pds_process_info?pds_process_info->pds_instance->openWithControl(local_node,peer,job,mode,negotiation):UINT16_MAX;
+        return pds_process_info?pds_process_info->pds_instance->openWithControl(local_node,peer,job,mode,negotiation,identity):UINT16_MAX;
     }
 
     /**

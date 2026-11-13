@@ -1,0 +1,34 @@
+# Removing JobID from the RUD tuple lets these two jobs share one PDC.
+# MR authorization remains scoped independently to each JobID.
+version: 1
+profile: experimental
+seed: 42
+duration_ns: 100000000
+hosts: [1, 2]
+jobs: [1, 2]
+payload_mtu: 64
+nscc:
+  enabled: true
+pds:
+  rud_mapping:
+    include_job_id: false
+links:
+  - from: 1
+    to: 2
+    rate_bps: 100000000000
+    delay_ns: 1000
+operations:
+  - type: write
+    source: 1
+    target: 2
+    delivery_mode: rud
+    job: 1
+    bytes: 257
+    context: 1
+  - type: write
+    source: 1
+    target: 2
+    delivery_mode: rud
+    job: 2
+    bytes: 257
+    context: 2

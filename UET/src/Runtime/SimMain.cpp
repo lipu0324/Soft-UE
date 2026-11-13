@@ -40,6 +40,7 @@ int main(int argc,char** argv) {
         UET::CMS::NsccConfig congestion;
         UET::NetworkLayer::WireOptions network;
         UET::PDS::PsnRangeConfiguration psn_ranges;
+        UET::PDS::PdcMappingConfiguration pdc_mapping;
         uint32_t mpr_zero_override=0;
         std::vector<uint32_t> nodes,switches,jobs;
         std::vector<Link> links; std::vector<Flow> flows; std::vector<LinkEvent> link_events;
@@ -54,6 +55,16 @@ int main(int argc,char** argv) {
             else if (key=="payload_mtu") row>>payload_mtu;
             else if (key=="rto") row>>retransmission_timeout_ns;
             else if (key=="max_packet_retries") row>>maximum_packet_retries;
+            else if (key=="pdc_mapping") {
+                for (auto* fields:{&pdc_mapping.rud,&pdc_mapping.rod}) {
+                    std::array<uint32_t,4> selected{};
+                    for (auto& value:selected) row>>value;
+                    if (!row || std::any_of(selected.begin(),selected.end(),[](uint32_t value) { return value>1; }))
+                        throw std::invalid_argument("invalid PDC mapping flags");
+                    fields->include_job_id=selected[0]; fields->include_source_pid=selected[1];
+                    fields->include_target_pid=selected[2]; fields->include_resource_index=selected[3];
+                }
+            }
             else if (key=="psn_ranges") {
                 uint32_t has_advertisement=0,advertisement=0;
                 row>>psn_ranges.default_mpr>>psn_ranges.local_packet_capacity>>mpr_zero_override
@@ -158,6 +169,7 @@ int main(int argc,char** argv) {
             hosts.at(node)->configure_retransmission_timeout(retransmission_timeout_ns);
             hosts.at(node)->configure_retry_limit(maximum_packet_retries);
             hosts.at(node)->configure_psn_ranges(psn_ranges,mpr_zero_override);
+            hosts.at(node)->configure_pdc_mapping(pdc_mapping);
             if (negative_acknowledgment_delays)
                 hosts.at(node)->configure_negative_acknowledgment_delays(*negative_acknowledgment_delays);
             if (enable_nscc) hosts.at(node)->enable_nscc(congestion);

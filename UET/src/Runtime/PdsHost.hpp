@@ -113,6 +113,11 @@ public:
         configured.validate(zero_override);
         services_.psn_ranges=configured; services_.mpr_zero_override=zero_override;
     }
+    void configure_pdc_mapping(const PDS::PdcMappingConfiguration& configured) {
+        if (stopped_ || manager_.getPDSStatus().open_cnt)
+            throw std::logic_error("configure PDC mapping before opening connections");
+        services_.pdc_mapping=configured;
+    }
     void configure_trimming(const NetworkLayer::TrimmingOptions& options) {
         options.validate();
         if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
@@ -139,9 +144,11 @@ public:
     }
     // Establish the transport without inventing an SES NO_OP message. The
     // optional negotiation request uses NO_NEG and enables no optional feature.
-    uint16_t open_connection(uint32_t peer,uint32_t job=1,pdc_mode mode=ROD,bool negotiation=false) {
+    uint16_t open_connection(uint32_t peer,uint32_t job=1,pdc_mode mode=ROD,bool negotiation=false,
+                             PDS::PdcMappingIdentity identity={}) {
         if (stopped_ || format_!=WireFormat::Uet11) return UINT16_MAX;
-        const auto context=manager_.openWithControl(node_,peer,job,mode,negotiation);
+        if (!identity.valid()) return UINT16_MAX;
+        const auto context=manager_.openWithControl(node_,peer,job,mode,negotiation,identity);
         if (context!=UINT16_MAX) wake();
         return context;
     }
@@ -153,7 +160,7 @@ public:
         context_event_handler_=std::move(callback);
     }
     bool submit(const SES_PDS_req& request) {
-        if (stopped_ || request.src_fep != node_) return false;
+        if (stopped_ || request.src_fep != node_ || request.source_pid>0xfff) return false;
         if (!manager_.pushSESRequest(request)) return false;
         trace_.record(node_, "ses_submit", request.tx_pkt_handle);
         wake();

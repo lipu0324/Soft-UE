@@ -52,10 +52,11 @@ private:
 
 public:
 
-    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation) {
+    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
+                             UET::PDS::PdcMappingIdentity identity={}) {
         if (!local_node || !peer || (mode!=ROD && mode!=RUD)) return UINT16_MAX;
         uint16_t local_pdc=UINT16_MAX;
-        if (!assignPDC(job,peer,0,mode,0,&local_pdc)) return UINT16_MAX;
+        if (!identity.valid() || !assignPDC(job,peer,0,mode,0,&local_pdc,local_node,identity)) return UINT16_MAX;
         if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,peer,local_node,mode)) return UINT16_MAX;
         return IPDC_Processmanager.openWithControl(local_pdc,mode,negotiation)?local_pdc:UINT16_MAX;
     }
@@ -200,7 +201,7 @@ private:
         bool remote_pdc_known = false;
     };
     ConnectionIdentity connection_identities_[MAX_PDC * 2];
-    std::map<std::tuple<uint32_t,uint32_t,uint8_t,uint8_t>,uint16_t> tx_contexts_;
+    std::map<UET::PDS::InitiatorPdcKey,uint16_t> tx_contexts_;
     std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
     using OutgoingMessage=std::tuple<uint32_t,uint32_t,uint8_t,uint8_t,uint16_t>;
     std::set<OutgoingMessage> quiesced_messages_;
@@ -595,7 +596,10 @@ public:
     bool tryForwardRequest(SES_PDS_req& request) {
         const auto& semantic=request.pkt.bth_header.Standard_Header;
         uint16_t local_pdc;
-        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id,&local_pdc)) return false;
+        const UET::PDS::PdcMappingIdentity identity{request.source_pid,
+            static_cast<uint16_t>(semantic.PIDonFEP),static_cast<uint16_t>(semantic.resource_index)};
+        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id,
+                       &local_pdc,request.src_fep,identity)) return false;
         const OutgoingMessage message{semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id};
         if (quiesced_messages_.count(message) ||
             (semantic.som && IPDC_Processmanager.isConnectionClosing(local_pdc))) {
@@ -933,11 +937,12 @@ public:
      * @brief Allocate PDC when receiving SES request packet
      * @return true if allocation successful, false otherwise
      */
-    bool assignPDC(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode, uint16_t msgid, uint16_t *pdc_id)
+    bool assignPDC(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode,
+                   uint16_t msgid, uint16_t *pdc_id,uint32_t source_fa=0,UET::PDS::PdcMappingIdentity identity={})
     {
         // Allocate PDC algorithm
         // Simple allocation here for now
-        *pdc_id = muxTx2PDCID(job_id, dest_fa, trafficclass, deliverymode); // Calculate tx corresponding pdc_id
+        *pdc_id = muxTx2PDCID(job_id,dest_fa,trafficclass,deliverymode,source_fa,identity);
         LOG_INFO("assign_pdc", "Allocated PDC ID: " + std::to_string(*pdc_id));
         if (*pdc_id >= MAX_PDC * 2) return false;
         if (pdc_list[*pdc_id].is_open)
@@ -979,16 +984,20 @@ public:
 
     // PDC queue depth tracking
 
-    // 4-tuple to PDCID mapping algorithm
-    int muxTx2PDCID(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode)
+    // Mode-specific selection tuple, including mandatory FA/TC/mode fields.
+    int muxTx2PDCID(uint32_t job_id,uint32_t dest_fa,uint8_t trafficclass,uint8_t deliverymode,
+                    uint32_t source_fa=0,UET::PDS::PdcMappingIdentity identity={})
     {
-        const auto key = std::make_tuple(job_id,dest_fa,trafficclass,deliverymode);
+        const auto fields=runtime_?runtime_->pdc_mapping.fields(deliverymode==ROD):UET::PDS::PdcMappingFields{};
+        const UET::PDS::InitiatorPdcKey key{source_fa,dest_fa,trafficclass,deliverymode,
+            fields.include_job_id?job_id:0,fields.include_source_pid?identity.source_pid:uint16_t{0},
+            fields.include_target_pid?identity.target_pid:uint16_t{0},
+            fields.include_resource_index?identity.resource_index:uint16_t{0}};
         auto found = tx_contexts_.find(key);
         if (found != tx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
         const uint16_t capacity=initiatorCapacity();
         if (!capacity) return -1;
-        const uint64_t hash_key = (uint64_t{job_id} << 32) ^ dest_fa ^
-                                 (uint64_t{trafficclass} << 56) ^ (uint64_t{deliverymode} << 48);
+        const auto hash_key=key.allocation_hash();
         const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % capacity;
         for (uint16_t offset=0;offset<capacity;++offset) {
             const uint16_t id = 1+(first+offset)%capacity;

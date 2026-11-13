@@ -754,6 +754,9 @@ struct SES_PDS_req {
     uint32_t tss_context;   // TSS context, used to limit packets on same PDC to same public SDI
     uint16_t rsv_pdc_context; // Used to reserve packets in same reserved PDC
     uint16_t rsv_ccc_context; // Used to reserve packets in same reserved CCC
+    // Local source process identity for PDC selection (§3.5.8.1). This is
+    // distinct from ses.initiator, which is a Job-relative matching rank.
+    uint16_t source_pid=1;
 };
 
 /**

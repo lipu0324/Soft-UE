@@ -18,6 +18,7 @@ python3 scripts/run_simulation.py examples/simulation/nscc-incast-trim.yaml \
 |---|---|
 | `wire.udp`、`wire.udp_destination_port` | 默认使用UDP/4793；目的端口范围0～65535。 |
 | `wire.native_ip_protocol` | `wire.udp: false`时必填，范围0～255；没有隐含的实验协议号。详见[默认封装](NETWORK-DEFAULTS.md)。 |
+| `pds.rud_mapping`、`pds.rod_mapping` | 分别选择JobID、源/目标PID与RI字段；见[PDC元组](PDC-MAPPING.md)。 |
 | `pds.default_mpr` | 初始MPR编码0～255，0按1；参考默认8表示1024 PSN。 |
 | `pds.local_packet_capacity` | 本地发送缓存上限，1～32640个包，默认8；独立于线上MPR。 |
 | `pds.advertised_mpr`、`pds.mpr_zero_override` | 可选固定接收通告和共同零值解释，见[三个窗口](PDS-WINDOWS.md)。 |

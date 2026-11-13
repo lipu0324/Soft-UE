@@ -17,6 +17,7 @@ struct Operation {
     pdc_mode delivery_mode = ROD; // Reliable ordered by default; RUD permits packet reordering.
     uint32_t peer = 0;
     uint32_t job = 1;
+    uint16_t source_pid = 1; // Local process for optional PDC mapping; not ses.initiator's rank.
     uint16_t target_pid = 1;
     uint16_t target_resource = 1;
     uint64_t remote_key = 0;
@@ -124,7 +125,7 @@ public:
                 complete_local(CompletionStatus::InvalidRequest); return id;
             }
         }
-        if (!operation.peer || !memory_.has_job(operation.job) || operation.target_pid>0xfff || operation.target_resource>0xfff ||
+        if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
             (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && !is_datagram) ||
             (operation.type==OperationType::Noop && payload_length)) {
@@ -301,6 +302,7 @@ private:
             auto count=transfer.aborting?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
             SES_PDS_req request{};
             request.src_fep=node_; request.dst_fep=operation.peer;
+            request.source_pid=operation.source_pid;
             request.mode=datagram?UUD:operation.delivery_mode;
             request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
             request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;

@@ -412,7 +412,7 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0310-003 | §3.5.8.1，消息/PDC映射 | 一个消息只用一PDC；同PDC不同消息不交错，前消息完整发送后才发送下条。 | native FIFO producer与manager队列已有回归；所有扩展消息仍待验。 |
 | UE11-p0310-004 | §3.5.8.1，ROD强制同PDC | 同Job/源FA/目标FA/源PID/目标PID/index/TC流使用同PDC。 | 现有manager映射部分覆盖；完整选择策略与配置尚未完成。 |
 | UE11-p0310-005 | §3.5.8.1，最小tuple | 模式独立，所有tuple含目标FA和TC。 | 默认路径有单模式上下文；完整可编程tuple和TC选择未完成。 |
-| UE11-p0311-001 | §3.5.8.1，源tuple列表 | 支持基础FA/TC/mode、TSS时SDI；RUD/ROD可任意组合Job/源目标PID/index，三种模式分别默认tuple。 | 固定内部key不能代替全部可配置组合；M2/M3/M6/M8仍有缺口。多ROD带宽建议不是额外MUST。 |
+| UE11-p0311-001 | §3.5.8.1，源tuple列表 | 支持基础FA/TC/mode、TSS时SDI；RUD/ROD可任意组合Job/源目标PID/index，三种模式分别默认tuple。 | 已增加独立RUD/ROD策略及Job/源PID/目标PID/RI的全部16种组合，source PID采用本地元数据，与ses.initiator rank区分；全TC组、reserved pool、SDI与RODL仍待M6～M8。见PDC-MAPPING.md。 |
 | UE11-p0311-002 | §3.5.8.1，目标tuple列表 | 按源FA/目标FA/SPDCID识别，验证源IP；单FEP目标FA常量可省略，TSS加SDI。 | peer binding和源地址核对已有测试；TSS和RODL未启用。 |
 | UE11-p0311-003 | §3.5.8.1，tuple细则 | SPDCID跨mode/TC唯一，不靠mode/TC区分；启用TSS时SDI入key。 | 独立ID池与非法binding过滤部分覆盖，完整TC/TSS组合未完成。 |
 | UE11-p0311-004 | §3.5.8.1，CCC tuple列表 | 支持目标FA/DSCP映射；ROD每PDC独立CCC，不能与RUD混合。 | NSCC已有RUD共享/ROD独立CCC回归；完整DSCP映射配置及reserved pool待补。 |

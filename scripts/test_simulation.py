@@ -63,6 +63,11 @@ def main():
                         "mpr_zero_override": [-1, 32641, True, 1.5]}.items():
         invalid.extend(dict(base, pds={key: value}) for value in values)
     invalid.append(dict(base, pds={"advertised_mpr": 0}))
+    for mode in ["rud", "rod"]:
+        for field in ["include_job_id", "include_source_pid", "include_target_pid", "include_resource_index"]:
+            for value in [0, 1, "true", None]:
+                invalid.append(dict(base, pds={f"{mode}_mapping": {field: value}}))
+        invalid.append(dict(base, pds={f"{mode}_mapping": {"unknown": True}}))
     for port in [-1, 65536, True, 1.5]:
         invalid.append(dict(base, wire={"udp": True, "udp_destination_port": port}))
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
@@ -218,6 +223,18 @@ def main():
             check(advertisements and all(value == max(1, initial_encoding) for value in advertisements),
                   "configured MPR encoding missing from independent ACK_CC bytes")
         run(dict(base, pds={"advertised_mpr": 0, "mpr_zero_override": 4}), "small-override-window")
+        for mode in ["rud", "rod"]:
+            for include_job in [False, True]:
+                sharing = copy.deepcopy(base)
+                sharing["jobs"] = [1, 2]
+                sharing["operations"] = [dict(base["operations"][0], job=job, context=job, delivery_mode=mode)
+                                         for job in [1, 2]]
+                sharing["pds"] = {f"{mode}_mapping": {"include_job_id": include_job}}
+                sharing_output, _ = run(sharing, f"pdc-sharing-{mode}-job-{include_job}")
+                contexts = {int.from_bytes(frame[50:52], "big")
+                            for _, frame in read_pcap(sharing_output / "packets.pcap") if frame[42] >> 3 in [2, 3]}
+                check(len(contexts) == (2 if include_job else 1),
+                      "PDC JobID mapping policy did not change actual wire connection sharing")
         job_zero = dict(base, jobs=[0], operations=[dict(operation, job=0) for operation in base["operations"]])
         run(job_zero, "job-zero")
         lost = {"version": 1, "hosts": [1, 2], "duration_ns": 100_000_000,

@@ -27,6 +27,9 @@ protocol number; see [network defaults](NETWORK-DEFAULTS.md) and
 PDS binds NSCC congestion contexts when a connection is created, including
 control-only connections; see [CCC lifecycle](NSCC-LIFECYCLE.md).
 
+Initiator PDC selection supports independent RUD/ROD field policies, with source
+PID metadata separate from the SES matching rank; see [PDC mapping](PDC-MAPPING.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating
