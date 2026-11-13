@@ -247,6 +247,8 @@ private:
                     auto options=network_;
                     options.source=address(packet.src_fep); options.destination=address(packet.dst_fep);
                     const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header;
+                    const bool ordered_control=packet.PDS_type==RUOD_cp_header && packet.control_uses_request_traffic_class;
+                    frame.traffic_class=(data || ordered_control)?0:1;
                     if (services_.congestion_control || !data) options.entropy=packet.wire_entropy;
                     frame.entropy=options.entropy; // ECMP uses the actual on-wire EV, including without CMS.
                     if (services_.congestion_control) {
@@ -254,9 +256,12 @@ private:
                         if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
                     }
                     if (trimming_ && data) options.dscp=trimming_->trimmable_dscp;
-                    if ((services_.congestion_control || trimming_) && !data) {
-                        frame.traffic_class=1;
-                        options.dscp=trimming_?trimming_->control_dscp:48;
+                    if (!data) {
+                        // §3.5.16 / §3.6.4.7: numbered ROD controls cannot
+                        // overtake data via the ACK TC. NO_TRIM shares the
+                        // request TC while keeping all CPs non-trimmable.
+                        options.dscp=ordered_control?(trimming_?trimming_->no_trim_dscp:network_.dscp):
+                            (trimming_?trimming_->control_dscp:48);
                     }
                     frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                     if (services_.congestion_control && packet.PDS_type==RUOD_ack_header &&

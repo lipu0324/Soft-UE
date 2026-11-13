@@ -192,7 +192,8 @@ private:
             if (const auto dscp=NetworkLayer::UetWireCodec::packet_dscp(frame->bytes)) {
                 if (edge.config.trimming->is_trimmed(*dscp)) frame->traffic_class=edge.config.trimming->trimmed_traffic_class;
                 else if (*dscp==edge.config.trimming->control_dscp) frame->traffic_class=1;
-                else if (*dscp==edge.config.trimming->trimmable_dscp) frame->traffic_class=0;
+                else if (*dscp==edge.config.trimming->trimmable_dscp || *dscp==edge.config.trimming->no_trim_dscp)
+                    frame->traffic_class=0;
             }
         }
         auto traffic_class=frame->traffic_class;

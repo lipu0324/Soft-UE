@@ -12,6 +12,9 @@ by each regression, concrete remaining placeholders and the next gated work.
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
 
+Numbered ROD controls share the request traffic class using a non-trimmable
+DSCP; see [control traffic classes](CONTROL-TRAFFIC-CLASSES.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating
@@ -340,7 +343,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 400 are classified and split into obligations
+Profile classification. The first 420 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements

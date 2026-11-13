@@ -540,7 +540,7 @@ SHOULD采用逐包定时器/时间戳，或选择每PDC定时器；当前每PDC�
 | UE11-p0377-003 | §3.5.15.3，RTO跨页 | PDC维护RTO；结合下一页采用推荐的逐包timer/timestamp或每PDC替代方案。 | 当前每PDC拥有RTOTimer，逐PSN事件由注入时钟驱动；MAC出队启动及取消/重用已有回归。 |
 | UE11-p0386-001 | §3.5.15.5.1，ACK丢失恢复 | 判定ACK丢失后发ACK Request或原请求；建议优先ACK Request，READ数据例外。 | 普通请求SACK后转查询已有覆盖；READ例外留给M5真实READ实现。 |
 | UE11-p0386-002 | §3.5.16，CP全集 | 表3-82全部CP类型必须支持，TC按§3.6.4.7。 | NOOP/查询/Clear/Close/Probe/NO_NEG部分完成；Credit/Credit Request及完整Negotiation未完成。 |
-| UE11-p0386-003 | §3.5.16，ROD/RODL控制TC | 有唯一PSN的ROD/RODL CP必须用PDS Request TC。 | 已发现Host将全部非数据包映射到控制TC，需修正并验证不被NSCC/trim配置覆盖；RODL未实现。 |
+| UE11-p0386-003 | §3.5.16，ROD/RODL控制TC | 有唯一PSN的ROD/RODL CP必须用PDS Request TC。 | 已补ROD本地分类元数据及NO_TRIM码点，正在验证NSCC/trimming/双向Close组合；RODL未实现。 |
 | UE11-p0387-001 | §3.5.16，CP_ACK格式 | 专用payload使用CP_ACK next header；不能用在ACK_CC/CCX。 | Close/NO_NEG golden及标准codec部分覆盖；更多CP_ACK和非法组合仍需验收。 |
 | UE11-p0387-002 | §3.5.16，CP建连限制 | 仅NOOP/Negotiation可带SYN启动，其余必须等待PDC建连。 | control_establishment_test已验证已知其他类型SYN拒绝；未知类型另按静默丢弃规则处理。 |
 
@@ -573,6 +573,36 @@ CP字段义务按表3-82分开，唯一PSN不包括ACK查询、Clear、Probe和C
 | UE11-p0398-003 | §3.5.17，fetch响应 | fetch数据总放ACK，至少16字节能力；保存结果供重放，超长建议专用NACK。 | M5缺失；现有非fetch原子不能满足此要求。 |
 | UE11-p0399-001 | §3.5.18，可选reserved PDC | 选用时配置保留PDC/CCC数量，建议至少16；后续表3-83另验。 | 未选择该可选服务；资源池上限不等于保留池，不公布此能力。 |
 
-复核进度为上述 400 个候选的分类与义务拆分；其余 329 个候选、表格/算法的额外
+## 第 401～420 个候选
+
+这批把一个段落的RUD/ROD服务列表拆开列出，段落通过与否不能只取决于基本WRITE
+测试。ROD消息不可交织、ACK/READ响应顺序需要异步SES负载验收；固定entropy仅证明
+路径选择。§3.5.21.1的“CACK相等或更高”措辞还需结合§3.5.12.5对保证响应阻挡的
+规则，不能把相等CACK无条件解释成已经收到非DEFAULT语义结果。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0399-002 | §3.5.18，保留池条件项 | reserved PDC由软件分配/销毁，不因资源压力动态关闭。 | 未启用可选reserved服务，普通PDC的生命周期不能作为该项证据。 |
+| UE11-p0399-003 | §3.5.18，保留句柄条件项 | 句柄固定PDC/CCC、禁止混用，启动时设置use_rsvd_pdc。 | 未启用；未来需独立句柄类型与线上标志测试。 |
+| UE11-p0399-004 | §3.5.18，保留池分配条件项 | 新SYN按use_rsvd_pdc选择池，普通分配不得占用保留资源。 | 未启用，现有一般资源上限不是双池实现。 |
+| UE11-p0401-001 | §3.5.20.1，RUD九组服务 | 发送/选择性重传/恰好一次；SES响应交付、缓存或DEFAULT；Clear携带/处理/释放；同消息READ同向。 | 基础RUD、重试预算、重复、首错、Clear及原包重传刷新已有证据；READ例外和返回方向仍缺，整段不能通过。 |
+| UE11-p0415-001 | §3.5.21，ROD消息边界 | 同消息共用一个PDC，消息不可交织；可跨PID/队列共享上下文。 | 当前native ROD生产调度需补多消息/多队列线上审核；单消息streaming通过不代表全部边界已验收。 |
+| UE11-p0415-002 | §3.5.21.1，ROD发送顺序 | 单路径、消息内顺序、同send queue提交顺序。 | 固定entropy/GoBackN已有测试；多消息调度和唯一PSN CP的TC同序约束分开验证。 |
+| UE11-p0415-003 | §3.5.21.1，ROD服务列表 | GoBackN与一次有序交付；ACK/READ按请求顺序；NACK含Expected_PSN；新丢失阻止高PSN并从缺口重传。 | 重传轮次去重、Expected_PSN、阻止新业务已有覆盖；异步SES的ACK顺序和READ顺序还需补齐。 |
+| UE11-p0416-001 | §3.5.21.1，ROD ACK恢复 | ACK同序且回显entropy；按有效累计信息推断非保证响应；保证响应丢失选择查询/原请求/GoBackN。 | 普通查询、保证错误与entropy已有证据；CACK相等不能覆盖未知保证结果，完整异步ACK顺序尚待验收。 |
+| UE11-p0417-001 | §3.5.21.1，READ ACK恢复 | 丢失READ数据重发原请求；ROD允许重复旧PSN触发保证ACK；可选择完整GoBackN。 | 保证错误重复重放部分覆盖；READ重新执行与缓存例外尚缺。 |
+| UE11-p0417-002 | §3.5.21.1，重复处理例外 | 查询/原包恢复期间可继续发新PSN；目的端仍须处理乱序到达的重复包。 | chkRxError区分重复与新缺口，RUD/ROD恢复部分覆盖；READ专项仍需补充。 |
+| UE11-p0421-001 | §3.5.22.1.1，RODL可选禁重传 | 关闭RODL重传时，单包丢失即fatal并关闭PDC。 | M8缺失；RODL默认需先实现可靠重传，禁重传独立配置和验收。 |
+| UE11-p0422-001 | §3.5.22.1.2，RODL关闭 | target发Close Request前完成自己发起的全部事务及Clear；收到Close Command也须完成活动事务再ACK。 | M8缺失，不能复用单向ROD的空闲条件。 |
+| UE11-p0422-002 | §3.5.22.1.2，RODL死锁隔离 | 响应与请求使用不同TC；READ/fetch数据放ACK。 | M8缺失；通用双TC网络只提供基础设施，不构成RODL协议实现。 |
+| UE11-p0422-003 | §3.5.22.1.2，RODL ACK阈值 | Max_ACK_Data_Size等于Payload MTU；ACK/NACK映射独立TC。 | M8缺失；不得套用scale-out大READ返回请求路径。 |
+| UE11-p0423-001 | §3.5.22.1.3，RODL ACK/NACK | 必须支持收发ACK/NACK及READ/fetch/错误有状态响应。 | M8缺失；当前RUD/ROD codec和错误响应不是该模式的证据。 |
+| UE11-p0423-002 | §3.5.22.1.3，RODL状态ful响应 | 有状态响应由ACK携带，不能只靠反向CACK捎带。 | M8缺失。 |
+| UE11-p0423-003 | §3.5.22.1.3，RODL完整序号 | 双方维护32位PSN和Clear，线上的低位字段只作压缩。 | M8缺失；需结合低位扩展和回绕规则测试。 |
+| UE11-p0423-004 | §3.5.22.1.3，RODL空闲状态 | 空闲而Clear/CACK有更新时发送ACK/CP，按ROD合并子集触发。 | M8缺失；RUD/ROD立即Clear只是实现基础。 |
+| UE11-p0426-001 | §3.5.24，故障隔离 | 正常事件不改变健康PDC；unexpected事件不能影响其他良性连接。 | 资源压力多peer、错误码/peer绑定和上下文复用已有测试；完整事件矩阵仍需扩展。 |
+| UE11-p0427-001 | §3.5.24.2，PDC_ERR计数 | source必须计数，destination建议计数，可用事件位。 | 当前部分generic event_cnt与typed ingress计数，尚无完整按PDC_ERR分类的管理快照；M7仍需补齐。 |
+
+复核进度为上述 420 个候选的分类与义务拆分；其余 309 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

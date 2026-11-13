@@ -13,6 +13,11 @@ bool PDC::beginTransmitIncarnation() {
 
 void PDC::tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,
                           uint64_t attempt,uint16_t opaque) {
+    // §3.5.16: unique-PSN controls on ordered contexts use the request TC.
+    // Carry this as local metadata: Close has no meaningful wire pdc_type,
+    // and adapters without MAC notifications still need the classification.
+    packet.control_uses_request_traffic_class=kind==UET::Runtime::TransmitKind::NumberedControl &&
+        mode==ROD; // RODL is not enabled by the current kernel.
     const bool synchronizing=packet.PDS_type==RUOD_req_header?packet.PDS_header.RUOD_req_header.flags.syn:
         packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.flags.syn;
     packet.transmit_identity.reset();

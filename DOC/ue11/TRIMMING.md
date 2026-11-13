@@ -18,7 +18,8 @@ IPv4/IPv6、原生 UET 和 UDP 封装；TSS、扩展 IP/tunnel header、RUDI/ROD
 | trimmable DSCP | 0 | 可在缓冲准入失败时截短 |
 | trimmed DSCP | 8 | 普通截短通知 |
 | last-hop DSCP | 16 | 最后一跳的截短通知；可关闭这一可选区分 |
-| control DSCP | 48 | ACK/NACK/CP 使用的控制码点 |
+| no-trim DSCP | 32 | 与请求共用TC且不能截短的ROD唯一PSN CP |
+| control DSCP | 48 | ACK/NACK及其他当前CP使用的控制码点 |
 | trimmed traffic class | 1 | 截短通知重新准入的队列 |
 | minimum IP payload | 24 字节 | 保留 UDP/entropy 与当前最大的 PDS request header |
 

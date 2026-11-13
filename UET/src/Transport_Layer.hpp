@@ -568,6 +568,10 @@ struct PDStoNET_pkt
     bool has_receive_timestamp=false;
     std::optional<uint64_t> acknowledgment_trigger_arrival_ns;
     std::optional<UET::Runtime::TransmitIdentity> transmit_identity;
+    // Local PDS-to-network classification, never serialized. A numbered
+    // ROD control must stay behind earlier requests on their traffic class
+    // even when its wire pdc_type bits are reserved (§3.5.16).
+    bool control_uses_request_traffic_class=false;
     bool trimmed=false,trimmed_last_hop=false; // DSCP classification, never an SES payload promise.
 };
 
