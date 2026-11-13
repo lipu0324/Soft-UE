@@ -8,6 +8,7 @@
 #include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
 #include <rdma/fi_atomic.h>
+#include <rdma/fi_tagged.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <stdio.h>
@@ -24,11 +25,11 @@ int main(int argc,char** argv) {
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
     CHECK(hints!=NULL);
     hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
-    hints->caps=FI_MSG|FI_RMA|FI_REMOTE_CQ_DATA; hints->addr_format=FI_SOCKADDR_IN;
+    hints->caps=FI_MSG|FI_TAGGED|FI_RMA|FI_REMOTE_CQ_DATA; hints->addr_format=FI_SOCKADDR_IN;
     hints->domain_attr->mr_mode=~3; // fi_info's supported-mode mask, not required modes.
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info && !strcmp(info->fabric_attr->prov_name,"softue"));
-    CHECK(!(info->caps&FI_TAGGED) && (info->caps&FI_ATOMIC));
+    CHECK((info->caps&FI_TAGGED) && (info->caps&FI_ATOMIC));
     CHECK((info->caps&(FI_READ|FI_REMOTE_READ))==(FI_READ|FI_REMOTE_READ));
     CHECK(info->domain_attr->data_progress==FI_PROGRESS_MANUAL);
     CHECK(info->domain_attr->mr_mode==FI_MR_PROV_KEY);
@@ -64,7 +65,7 @@ int main(int argc,char** argv) {
     CHECK(atomic_limits.size==8 && atomic_limits.count==1);
     CHECK(fi_mr_key(region)!=fi_mr_key(local_only));
     CHECK(fi_mr_key(region)&(1ULL<<48));
-    struct fi_cq_attr queue_attributes={0}; queue_attributes.format=FI_CQ_FORMAT_DATA;
+    struct fi_cq_attr queue_attributes={0}; queue_attributes.format=FI_CQ_FORMAT_TAGGED;
     queue_attributes.size=64; queue_attributes.wait_obj=FI_WAIT_NONE;
     SUCCESS(fi_cq_open(domain,&queue_attributes,&completions,NULL));
     struct fi_av_attr address_attributes={0}; address_attributes.type=FI_AV_TABLE;
@@ -86,6 +87,8 @@ int main(int argc,char** argv) {
         SUCCESS(fi_recv(endpoint,buffer+5200,1,NULL,FI_ADDR_UNSPEC,(void*)79));
         SUCCESS(fi_recv(endpoint,buffer+5100,8,NULL,FI_ADDR_UNSPEC,(void*)78));
     }
+    SUCCESS(fi_trecv(endpoint,buffer+5300,16,NULL,FI_ADDR_UNSPEC,
+        server?UINT64_C(0xfedcba9876543210):UINT64_C(0x0123456789abcdef),0,(void*)80));
     fprintf(stderr,"READY %u %llu %llu %llu\n",ntohs(local.sin_port),(unsigned long long)fi_mr_key(region),
         (unsigned long long)fi_mr_key(local_only),(unsigned long long)fi_mr_key(atomic_region)); fflush(stderr);
     unsigned int peer_port=0; unsigned long long peer_key=0,peer_protected_key=0,peer_atomic_key=0;
@@ -107,12 +110,12 @@ int main(int argc,char** argv) {
         SUCCESS(fi_write(endpoint,"x",1,NULL,peer,0,peer_protected_key,(void*)16));
     }
     size_t send_completions=0,errors=0,receives=0,remote_writes=0;
-    int reply_started=0,read_started=0,fetch_started=0,compare_started=0,done_started=0,done_received=0,finished=0;
+    int reply_started=0,read_started=0,fetch_started=0,compare_started=0,tag_started=0,tag_received=0,tag_reply_started=0,done_started=0,done_received=0,finished=0;
     uint64_t read_result=0;
     uint64_t fetch_result=0,compare_result=0,compare_value=2,swap_value=9;
     const time_t deadline=time(NULL)+10;
     while (!finished && time(NULL)<deadline) {
-        struct fi_cq_data_entry entries[8]; ssize_t count=fi_cq_read(completions,entries,8);
+        struct fi_cq_tagged_entry entries[8]; ssize_t count=fi_cq_read(completions,entries,8);
         if (count==-FI_EAVAIL) {
             struct fi_cq_err_entry error={0}; CHECK(fi_cq_readerr(completions,&error,0)==1);
             if (server) {
@@ -127,11 +130,17 @@ int main(int argc,char** argv) {
             ++errors;
         } else if (count>0) {
             for (ssize_t index=0;index<count;++index) {
-                struct fi_cq_data_entry *entry=&entries[index];
+                struct fi_cq_tagged_entry *entry=&entries[index];
                 if ((entry->flags&FI_REMOTE_CQ_DATA) && (entry->flags&FI_REMOTE_WRITE)) {
                     CHECK(server && entry->data==123 && entry->len==4097 && (entry->flags&FI_REMOTE_WRITE));
                     ++remote_writes;
                 } else if (entry->flags&FI_RECV) {
+                    if (entry->flags&FI_TAGGED) {
+                        CHECK(entry->flags==(FI_TAGGED|FI_RECV) && entry->op_context==(void*)80 && entry->len==3 && entry->buf==buffer+5300);
+                        CHECK(entry->tag==(server?UINT64_C(0xfedcba9876543210):UINT64_C(0x0123456789abcdef)));
+                        CHECK(!memcmp(buffer+5300,server?"tag":"got",3)); tag_received=1;
+                        continue;
+                    }
                     CHECK(entry->flags&FI_REMOTE_CQ_DATA);
                     if (server && entry->op_context==(void*)78) { CHECK(entry->data==0); done_received=1; }
                     else { CHECK(entry->op_context==(void*)77 && entry->data==(server?456:789)); ++receives; }
@@ -172,11 +181,17 @@ int main(int argc,char** argv) {
             SUCCESS(fi_compare_atomic(endpoint,&swap_value,1,NULL,&compare_value,NULL,&compare_result,NULL,
                 peer,0,peer_atomic_key,FI_UINT64,FI_CSWAP,(void*)21)); compare_started=1;
         }
-        if (!server && send_completions==6 && compare_started && !done_started) {
+        if (!server && send_completions==6 && compare_started && !tag_started) {
             CHECK(compare_result==2);
+            SUCCESS(fi_tsend(endpoint,"tag",3,NULL,peer,UINT64_C(0xfedcba9876543210),(void*)22)); tag_started=1;
+        }
+        if (server && tag_received && !tag_reply_started) {
+            SUCCESS(fi_tsend(endpoint,"got",3,NULL,peer,UINT64_C(0x0123456789abcdef),(void*)23)); tag_reply_started=1;
+        }
+        if (!server && send_completions==7 && tag_received && !done_started) {
             SUCCESS(fi_senddata(endpoint,"done",4,NULL,0,peer,(void*)15)); done_started=1;
         }
-        finished=server?(reply_started && send_completions==1 && done_received):(done_started && send_completions==7);
+        finished=server?(reply_started && tag_reply_started && send_completions==2 && done_received):(done_started && send_completions==8);
         if (!finished) poll(NULL,0,1); // Application wait; fi_cq_read owns manual progress.
     }
     if (!finished) fprintf(stderr,"incomplete server=%d sends=%zu errors=%zu receives=%zu remote_writes=%zu\n",
@@ -188,6 +203,6 @@ int main(int argc,char** argv) {
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&completions->fid));
     SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints);
-    printf("PASS libfabric %s: SEND/WRITE IMM/READ/FETCH/CAS, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
+    printf("PASS libfabric %s: SEND/TAGGED/WRITE IMM/READ/FETCH/CAS, bulk integer atomics, checked host buffers and CQ errors\n",server?"server":"client");
     return 0;
 }

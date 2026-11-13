@@ -33,9 +33,10 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 | 消息 | `fi_send/recv/senddata`、单 iovec 的 `sendv/recvv`、`sendmsg/recvmsg`；SENDMSG 支持逐调用 `FI_REMOTE_CQ_DATA`；ROD 允许后投递接收缓冲区 |
 | 长度和缓冲区 | RDM 宣布最大消息为 4 GiB−1；SEND/WRITE 按需读取应用缓冲区，应用须按 libfabric 规则保持其有效且稳定直到完成；原子查询上限单独返回 |
 | RMA | `fi_write/writev/writemsg/writedata` 和 `fi_read/readv/readmsg`；实际注册的 host 缓冲区；地址是 MR 内的零基偏移 |
+| Tagged | RDM 的 fi_tsend/trecv 及v/msg、senddata、inject/data；64位精确/通配tag、FI_CQ_FORMAT_TAGGED及独立generation恢复，见 [tagged映射](PROVIDER-TAGGED.md) |
 | 原子 | 非取回 `fi_atomic/atomicv/atomicmsg` 支持8～64位整数；`fi_fetch_atomic`、`fi_compare_atomic` 及单 iovec 的v/msg入口支持8～128位整数，限一个元素；查询返回各自上限 |
 | DGRAM | SEND/RECV 映射到 UUD；最大 1024 字节；支持 SEND CQ data；仅本地发送完成，无 PDC/确认/重传 |
-| 完成 | CONTEXT/MSG/DATA CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
+| 完成 | CONTEXT/MSG/DATA/TAGGED CQ；可靠成功依据整条消息语义完成；WRITE IMM 产生独立远端 CQ data；SEND data 使用原接收 posting 的 CQ/context |
 | 访问权限 | `FI_REMOTE_READ/WRITE` 分别授予远端读/写；仅 `FI_READ/WRITE` 不授予远端访问；撤销使 key 立即失效 |
 | 地址和 key | `FI_AV_TABLE`、`FI_AV_UNSPEC` 按 TABLE 处理、数值 IPv4 `FI_SOCKADDR_IN`、provider 分配的 64 位 key |
 | 消息排序与传输模式 | 按 §2.2.6 / 表 2-29 分别计算 SEND 排序和 R/W 排序；SEND、READ/WRITE/ATOMIC 各自选择 ROD 或 RUD；DGRAM 使用 UUD |
@@ -95,7 +96,7 @@ READ 拒绝 FI_INJECT 和 FI_REMOTE_CQ_DATA，DGRAM 不公布 READ。公开 API 
 FI_REMOTE_CQ_DATA，DGRAM不公布原子能力。`FI_MSWAP` 的掩码与操作数逐字节转换为
 UE公式，详见[公开原子接口](PROVIDER-FETCHING-ATOMICS.md)。
 
-浮点原子、tagged、directed receive、
+浮点原子、directed receive、
 多 iovec、自动 progress、等待对象和选择性完成尚未实现，不会在发现结果中宣称这些
 能力。未实现的方法返回明确错误。接收截断产生 `FI_ETRUNC`，`len` 表示已放置字节，
 `olen` 表示未放置的原消息字节；当前 SEND 截断采用零字节放置策略。独立进程测试同时

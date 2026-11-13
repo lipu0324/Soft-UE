@@ -13,7 +13,7 @@
 
 class ProviderFixture {
 public:
-    explicit ProviderFixture(uint64_t ordering,uint64_t operation_flags=FI_FENCE,bool datagram=false) {
+    explicit ProviderFixture(uint64_t ordering,uint64_t operation_flags=FI_FENCE,bool datagram=false,fi_cq_format format=FI_CQ_FORMAT_DATA) :completion_format(format) {
         hints=fi_allocinfo(); CHECK(hints);
         hints->fabric_attr->prov_name=::strdup("softue"); hints->ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM;
         hints->addr_format=FI_SOCKADDR_IN; hints->caps=datagram?FI_MSG:FI_MSG|FI_RMA|FI_ATOMIC;
@@ -29,7 +29,7 @@ public:
         CHECK(fi_domain(fabric,info,&domain,nullptr)==0);
         fi_av_attr av_attributes{}; av_attributes.type=FI_AV_UNSPEC;
         CHECK(fi_av_open(domain,&av_attributes,&addresses,nullptr)==0);
-        fi_cq_attr cq_attributes{}; cq_attributes.format=FI_CQ_FORMAT_DATA; cq_attributes.wait_obj=FI_WAIT_NONE;
+        fi_cq_attr cq_attributes{}; cq_attributes.format=format; cq_attributes.wait_obj=FI_WAIT_NONE;
         CHECK(fi_cq_open(domain,&cq_attributes,&completions,nullptr)==0);
         CHECK(fi_endpoint(domain,info,&endpoint,nullptr)==0);
         CHECK(fi_ep_bind(endpoint,&addresses->fid,0)==0);
@@ -50,10 +50,12 @@ public:
         fi_addr_t result; CHECK(fi_av_insert(addresses,&peer,1,&result,0,nullptr)==1); return result;
     }
     size_t progress() {
-        fi_cq_data_entry entries[8]; const auto count=fi_cq_read(completions,entries,8);
+        fi_cq_data_entry entries[8]; fi_cq_tagged_entry tagged_entries[8];
+        const auto count=fi_cq_read(completions,completion_format==FI_CQ_FORMAT_TAGGED?static_cast<void*>(tagged_entries):static_cast<void*>(entries),8);
         CHECK(count>=0 || count==-FI_EAGAIN);
         return count>0?static_cast<size_t>(count):0;
     }
+    fi_cq_format completion_format;
     fi_info *hints=nullptr,*info=nullptr;
     fid_fabric* fabric=nullptr; fid_domain* domain=nullptr; fid_av* addresses=nullptr;
     fid_cq* completions=nullptr; fid_ep* endpoint=nullptr; sockaddr_in address{};

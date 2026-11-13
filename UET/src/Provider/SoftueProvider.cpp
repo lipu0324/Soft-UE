@@ -10,6 +10,7 @@
 #include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
 #include <rdma/fi_atomic.h>
+#include <rdma/fi_tagged.h>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -24,7 +25,7 @@ constexpr bool native_atomic_platform=true;
 #else
 constexpr bool native_atomic_platform=false;
 #endif
-constexpr uint64_t supported_caps=datagram_caps|FI_RMA|FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE|
+constexpr uint64_t supported_caps=datagram_caps|FI_TAGGED|FI_RMA|FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE|
     (native_atomic_platform?FI_ATOMIC:0);
 // The single application FIFO waits for final completion before initiating
 // its successor, including while a recoverable semantic error is retried.
@@ -93,7 +94,7 @@ struct ProviderCompletionQueue {
     ProviderDomain* domain=nullptr;
     size_t bindings=0;
     fi_cq_format format=FI_CQ_FORMAT_DATA;
-    std::deque<fi_cq_data_entry> completions;
+    std::deque<fi_cq_tagged_entry> completions;
     std::deque<fi_cq_err_entry> errors;
 };
 // EQs contain control events (fi_eq(3)), separately from data-transfer CQs.
@@ -143,7 +144,7 @@ struct ProviderEndpoint {
     std::unique_ptr<SES::Endpoint> semantic;
     std::map<uint64_t,ApplicationOperation> transmits,receives;
     std::deque<uint64_t> transmit_order;
-    std::map<std::pair<uint32_t,bool>,uint8_t> peer_generations; // Peer + SEND/RMA index space.
+    std::map<std::pair<uint32_t,SES::ResourceSpace>,uint8_t> peer_generations; // Generation belongs to each semantic resource space.
 };
 
 // fid is the first field in these Linux provider objects. These conversions
@@ -161,6 +162,7 @@ fi_ops endpoint_object_ops{};
 fi_ops_ep endpoint_ops{};
 fi_ops_cm connection_ops{};
 fi_ops_msg message_ops{};
+fi_ops_tagged tagged_ops{};
 fi_ops_rma rma_ops{};
 fi_ops_atomic atomic_ops{};
 
@@ -248,10 +250,11 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
                       const SES::Completion& completion) {
     if (completion.status==SES::CompletionStatus::Success || completion.status==SES::CompletionStatus::LocalSuccess) {
         if (application.suppress_success_completion) return;
-        fi_cq_data_entry entry{};
+        fi_cq_tagged_entry entry{};
         entry.op_context=application.context; entry.flags=application.flags;
         entry.len=completion.length; entry.buf=application.buffer;
         if (completion.immediate_data) { entry.flags|=FI_REMOTE_CQ_DATA; entry.data=*completion.immediate_data; }
+        entry.tag=completion.tag.value_or(application.request?application.request->tag:0);
         queue.completions.push_back(entry);
     } else {
         fi_cq_err_entry error{};
@@ -259,12 +262,15 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
         error.len=completion.length; error.err=completion_error(completion); error.prov_errno=completion.remote_code;
         if (completion.original_length>completion.length) error.olen=completion.original_length-completion.length;
         if (completion.immediate_data) { error.flags|=FI_REMOTE_CQ_DATA; error.data=*completion.immediate_data; }
+        error.tag=completion.tag.value_or(application.request?application.request->tag:0);
         queue.errors.push_back(error);
     }
 }
 
-std::pair<uint32_t,bool> generation_key(const SES::Operation& request) {
-    return {request.peer,request.type==SES::OperationType::Send};
+std::pair<uint32_t,SES::ResourceSpace> generation_key(const SES::Operation& request) {
+    const auto space=request.type==SES::OperationType::Send?SES::ResourceSpace::Send:
+        request.type==SES::OperationType::TaggedSend?SES::ResourceSpace::Tagged:SES::ResourceSpace::Rma;
+    return {request.peer,space};
 }
 
 void drive_transmissions(ProviderEndpoint& endpoint) {
@@ -284,7 +290,7 @@ void enqueue_transmission(ProviderEndpoint& endpoint,SES::Operation request,Appl
     const auto token=++endpoint.next_transmit_token;
     // Table 2-29: SEND ordering chooses SEND's mode; R/W ordering chooses
     // RMA/ATOMIC's mode. Extra local serialization cannot replace this mapping.
-    const auto ordering=request.type==SES::OperationType::Send?send_ordering_modes:read_write_ordering_modes;
+    const auto ordering=(request.type==SES::OperationType::Send || request.type==SES::OperationType::TaggedSend)?send_ordering_modes:read_write_ordering_modes;
     request.delivery_mode=endpoint.datagram?UUD:(endpoint.message_ordering&ordering?ROD:RUD);
     request.context=token; application.request=std::move(request);
     endpoint.transmits.emplace(token,std::move(application)); endpoint.transmit_order.push_back(token);
@@ -475,7 +481,7 @@ int open_completion_queue(fid_domain* domain,fi_cq_attr* attributes,fid_cq** res
         if (!attributes || !result || attributes->flags ||
             (attributes->wait_obj!=FI_WAIT_UNSPEC && attributes->wait_obj!=FI_WAIT_NONE)) return -FI_EINVAL;
         const auto format=attributes->format==FI_CQ_FORMAT_UNSPEC?FI_CQ_FORMAT_DATA:attributes->format;
-        if (format!=FI_CQ_FORMAT_CONTEXT && format!=FI_CQ_FORMAT_MSG && format!=FI_CQ_FORMAT_DATA) return -FI_EINVAL;
+        if (format!=FI_CQ_FORMAT_CONTEXT && format!=FI_CQ_FORMAT_MSG && format!=FI_CQ_FORMAT_DATA && format!=FI_CQ_FORMAT_TAGGED) return -FI_EINVAL;
         auto queue=std::make_unique<ProviderCompletionQueue>(); queue->domain=&owner<ProviderDomain>(domain); queue->format=format;
         initialize_fid(queue->handle.fid,FI_CLASS_CQ,context); queue->handle.ops=&completion_ops;
         ++queue->domain->children; *result=&queue.release()->handle; return 0;
@@ -540,7 +546,9 @@ ssize_t read_completions(fid_cq* handle,void* result,size_t count) {
         const auto available=std::min(count,queue.completions.size());
         for (size_t index=0;index<available;++index) {
             const auto& entry=queue.completions.front();
-            if (queue.format==FI_CQ_FORMAT_DATA) static_cast<fi_cq_data_entry*>(result)[index]=entry;
+            if (queue.format==FI_CQ_FORMAT_TAGGED) static_cast<fi_cq_tagged_entry*>(result)[index]=entry;
+            else if (queue.format==FI_CQ_FORMAT_DATA)
+                static_cast<fi_cq_data_entry*>(result)[index]={entry.op_context,entry.flags,entry.len,entry.buf,entry.data};
             else if (queue.format==FI_CQ_FORMAT_MSG)
                 static_cast<fi_cq_msg_entry*>(result)[index]={entry.op_context,entry.flags,entry.len};
             else static_cast<fi_cq_entry*>(result)[index]={entry.op_context};
@@ -668,7 +676,7 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
         initialize_fid(endpoint->handle.fid,FI_CLASS_EP,context,&endpoint_object_ops);
         endpoint->handle.ops=&endpoint_ops; endpoint->handle.cm=&connection_ops;
         endpoint->handle.msg=&message_ops; endpoint->handle.rma=&rma_ops;
-        endpoint->handle.atomic=&atomic_ops;
+        endpoint->handle.atomic=&atomic_ops; endpoint->handle.tagged=&tagged_ops;
         domain.endpoint=endpoint.get(); ++domain.children;
         *result=&endpoint.release()->handle; return 0;
     });
@@ -685,11 +693,11 @@ std::optional<uint32_t> resolve_peer(ProviderEndpoint& endpoint,fi_addr_t addres
 
 ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr_t destination,
                           uint64_t offset,uint64_t key,void* context,bool write,std::optional<uint64_t> immediate={},
-                          std::optional<uint64_t> flags={},bool suppress_success=false) {
+                          std::optional<uint64_t> flags={},bool suppress_success=false,std::optional<uint64_t> tag={}) {
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
-        if (write && endpoint.datagram) return -FI_EOPNOTSUPP;
+        if ((write || tag.has_value()) && endpoint.datagram) return -FI_EOPNOTSUPP;
         if ((length && !buffer) || length>(endpoint.datagram?1024:uint64_t{UINT32_MAX})) return -FI_EMSGSIZE;
         const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
         const bool inject=operation_flags&FI_INJECT;
@@ -698,9 +706,10 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
         if (!peer) return -FI_EADDRNOTAVAIL;
-        SES::Operation operation; operation.type=write?SES::OperationType::Write:
+        SES::Operation operation; operation.type=tag?SES::OperationType::TaggedSend:write?SES::OperationType::Write:
             (endpoint.datagram?SES::OperationType::DatagramSend:SES::OperationType::Send);
         operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
+        operation.tag=tag.value_or(0);
         if (inject) {
             // FI_INJECT returns ownership before network progress. Keep an
             // owned, bounded copy for PDS and for any later semantic retry.
@@ -711,7 +720,7 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
             auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
             operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
         }
-        ApplicationOperation application{context,write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,
+        ApplicationOperation application{context,tag?FI_TAGGED|FI_SEND:write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,
             suppress_success?nullptr:const_cast<void*>(buffer)};
         application.suppress_success_completion=suppress_success;
         enqueue_transmission(endpoint,std::move(operation),std::move(application));
@@ -913,11 +922,12 @@ ssize_t send_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags
     return submit_operation(endpoint,local.iov_base,local.iov_len,message->addr,0,0,message->context,false,
         flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt,flags);
 }
-ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
+ssize_t post_application_receive(fid_ep* handle,void* buffer,size_t length,fi_addr_t source,void* context,
+                                 std::optional<SES::TaggedReceiveMatch> match={}) {
     return guarded([&]() -> ssize_t {
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
-        if (source!=FI_ADDR_UNSPEC) return -FI_EOPNOTSUPP;
+        if ((match && endpoint.datagram) || source!=FI_ADDR_UNSPEC) return -FI_EOPNOTSUPP;
         if ((length && !buffer) || length>UINT32_MAX) return -FI_EINVAL;
         if (endpoint.receives.size()>=4096) return -FI_EAGAIN;
         if (endpoint.next_receive_token==UINT64_MAX) return -FI_ENOSPC; // Keep native context zero reserved for RMA CQ data.
@@ -927,11 +937,15 @@ ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_
             static_cast<uint8_t>(SES::Access::Write),local_receive);
         const auto token=++endpoint.next_receive_token;
         try {
-            endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token);
-            endpoint.receives.emplace(token,ApplicationOperation{context,FI_MSG|FI_RECV,buffer,region.key});
+            if (match) endpoint.semantic->post_tagged_receive(1,1,region.key,0,static_cast<uint32_t>(length),*match,token);
+            else endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token);
+            endpoint.receives.emplace(token,ApplicationOperation{context,(match?FI_TAGGED:FI_MSG)|FI_RECV,buffer,region.key});
         } catch (...) { endpoint.domain->memory.deregister(region.key); throw; }
         return 0;
     });
+}
+ssize_t receive_message(fid_ep* endpoint,void* buffer,size_t length,void*,fi_addr_t source,void* context) {
+    return post_application_receive(endpoint,buffer,length,source,context);
 }
 ssize_t receive_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t source,void* context) {
     if (count!=1 || !buffers) return -FI_EINVAL;
@@ -940,6 +954,45 @@ ssize_t receive_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count
 ssize_t receive_message_flags(fid_ep* endpoint,const fi_msg* message,uint64_t flags) {
     if (!message || (flags&~FI_COMPLETION)) return -FI_EOPNOTSUPP;
     return receive_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,message->context);
+}
+// Tagged and untagged operations share submission/registration ownership but
+// keep distinct native receive spaces, generation recovery and CQ flags.
+ssize_t send_tagged(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,uint64_t tag,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,context,false,{},{},false,tag);
+}
+ssize_t send_tagged_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t destination,uint64_t tag,void* context) {
+    if (!buffers || count!=1) return -FI_EINVAL;
+    return send_tagged(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,destination,tag,context);
+}
+ssize_t send_tagged_message(fid_ep* endpoint,const fi_msg_tagged* message,uint64_t flags) {
+    if (!message || !message->msg_iov || message->iov_count!=1 || (flags&~(supported_operation_flags|FI_REMOTE_CQ_DATA)))
+        return -FI_EOPNOTSUPP;
+    const auto& buffer=message->msg_iov[0];
+    return submit_operation(endpoint,buffer.iov_base,buffer.iov_len,message->addr,0,0,message->context,false,
+        flags&FI_REMOTE_CQ_DATA?std::optional<uint64_t>{message->data}:std::nullopt,flags,false,message->tag);
+}
+ssize_t send_tagged_data(fid_ep* endpoint,const void* buffer,size_t length,void*,uint64_t data,fi_addr_t destination,uint64_t tag,void* context) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,context,false,data,{},false,tag);
+}
+ssize_t inject_tagged(fid_ep* endpoint,const void* buffer,size_t length,fi_addr_t destination,uint64_t tag) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,nullptr,false,{},FI_INJECT,true,tag);
+}
+ssize_t inject_tagged_data(fid_ep* endpoint,const void* buffer,size_t length,uint64_t data,fi_addr_t destination,uint64_t tag) {
+    return submit_operation(endpoint,buffer,length,destination,0,0,nullptr,false,data,FI_INJECT,true,tag);
+}
+ssize_t receive_tagged(fid_ep* endpoint,void* buffer,size_t length,void*,fi_addr_t source,uint64_t tag,uint64_t ignore,void* context) {
+    return post_application_receive(endpoint,buffer,length,source,context,SES::TaggedReceiveMatch{tag,ignore,{}});
+}
+ssize_t receive_tagged_vector(fid_ep* endpoint,const iovec* buffers,void**,size_t count,fi_addr_t source,uint64_t tag,uint64_t ignore,void* context) {
+    if (!buffers || count!=1) return -FI_EINVAL;
+    return receive_tagged(endpoint,buffers[0].iov_base,buffers[0].iov_len,nullptr,source,tag,ignore,context);
+}
+ssize_t receive_tagged_message(fid_ep* endpoint,const fi_msg_tagged* message,uint64_t flags) {
+    // PEEK/CLAIM/DISCARD and multi-receive require their own state machines.
+    // Reject them before allocating an automatic local registration.
+    if (!message || (flags&~FI_COMPLETION)) return -FI_EOPNOTSUPP;
+    return receive_tagged_vector(endpoint,message->msg_iov,message->desc,message->iov_count,message->addr,
+        message->tag,message->ignore,message->context);
 }
 ssize_t write_memory(fid_ep* endpoint,const void* buffer,size_t length,void*,fi_addr_t destination,
                       uint64_t offset,uint64_t key,void* context) {
@@ -1064,6 +1117,7 @@ int get_information(uint32_t version,const char* node,const char* service,uint64
         auto& info=*information;
         info.caps=available_caps; info.mode=0; info.addr_format=FI_SOCKADDR_IN;
         info.ep_attr->type=datagram?FI_EP_DGRAM:FI_EP_RDM; info.ep_attr->protocol=FI_PROTO_UNSPEC;
+        info.ep_attr->mem_tag_format=datagram?0:UINT64_MAX;
         info.ep_attr->max_msg_size=datagram?1024:UINT32_MAX; info.ep_attr->tx_ctx_cnt=1; info.ep_attr->rx_ctx_cnt=1;
         // The source FIFO waits for actual READ placement and all forward
         // semantic results before initiating a following WRITE (§3.4.2.7.1.2).
@@ -1157,6 +1211,10 @@ void initialize_operations() {
     message_ops.recvmsg=receive_message_flags;
     message_ops.senddata=send_message_data;
     message_ops.inject=inject_message; message_ops.injectdata=inject_message_data;
+    tagged_ops.size=sizeof(tagged_ops); tagged_ops.send=send_tagged; tagged_ops.sendv=send_tagged_vector;
+    tagged_ops.sendmsg=send_tagged_message; tagged_ops.senddata=send_tagged_data;
+    tagged_ops.inject=inject_tagged; tagged_ops.injectdata=inject_tagged_data;
+    tagged_ops.recv=receive_tagged; tagged_ops.recvv=receive_tagged_vector; tagged_ops.recvmsg=receive_tagged_message;
     rma_ops.size=sizeof(rma_ops); rma_ops.write=write_memory; rma_ops.writev=write_vector;
     rma_ops.writemsg=write_message_flags; rma_ops.writedata=write_data;
     rma_ops.read=read_memory; rma_ops.readv=read_vector; rma_ops.readmsg=read_message_flags;

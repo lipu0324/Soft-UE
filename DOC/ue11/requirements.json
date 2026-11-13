@@ -487,13 +487,15 @@
       "status": "partial",
       "tests": [
         "tagged_message_test",
-        "reference_process_interop"
+        "reference_process_interop",
+        "libfabric_tagged_test",
+        "libfabric_provider_processes"
       ],
       "profiles": [
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public tagged mapping, optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md."
+      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public scalar/vector/msg tagged APIs, inject/data, full tag CQ/error fields and per-space generation recovery are implemented; private automatic tagged receive MRs reject known-key remote WRITE. Public two-provider processes exchange exact64bit tagged messages in both directions. Optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md."
     },
     {
       "id": "SES-DEFER",
