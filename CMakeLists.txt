@@ -139,6 +139,9 @@ if(BUILD_TESTING)
   softue_test(rendezvous_header_test RendezvousHeaderTest.cpp)
   softue_test(rendezvous_source_test RendezvousSourceTest.cpp)
   softue_test(rendezvous_transaction_test RendezvousTransactionTest.cpp)
+  # The complete448-scene matrix needs108s with ASan/UBSan on the measured
+  # local runner (2c57040). Keep every scene/assertion; budget this test180s.
+  set_tests_properties(rendezvous_transaction_test PROPERTIES TIMEOUT 180)
   softue_test(rendezvous_target_eager_test RendezvousTargetEagerTest.cpp)
   softue_test(rendezvous_fault_test RendezvousFaultTest.cpp)
   softue_test(rendezvous_isolation_test RendezvousIsolationTest.cpp)
@@ -146,6 +149,8 @@ if(BUILD_TESTING)
   softue_test(rendezvous_lifecycle_test RendezvousLifecycleTest.cpp)
   softue_test(rendezvous_malformed_test RendezvousMalformedTest.cpp)
   softue_test(rendezvous_addressing_test RendezvousAddressingTest.cpp)
+  softue_test(rendezvous_source_scope_test RendezvousSourceScopeTest.cpp)
+  softue_test(rendezvous_truncation_test RendezvousTruncationTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
   softue_test(streaming_read_test StreamingReadTest.cpp)
   # Boundary reports reject a stale binary instead of assigning current HEAD
@@ -206,6 +211,18 @@ if(BUILD_TESTING)
     add_dependencies(libfabric_tagged_test softue_fabric)
     set_tests_properties(libfabric_tagged_test PROPERTIES TIMEOUT 90
       ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
+    softue_test(libfabric_rendezvous_test LibfabricRendezvousTest.cpp)
+    target_include_directories(libfabric_rendezvous_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_rendezvous_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_dependencies(libfabric_rendezvous_test softue_fabric)
+    set_tests_properties(libfabric_rendezvous_test PROPERTIES TIMEOUT 120
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>;FI_SOFTUE_RENDEZVOUS_THRESHOLD=65536")
+    add_test(NAME libfabric_rendezvous_disabled_test COMMAND libfabric_rendezvous_test --ordinary-only)
+    set_tests_properties(libfabric_rendezvous_disabled_test PROPERTIES TIMEOUT 45
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>;FI_SOFTUE_RENDEZVOUS_THRESHOLD=0")
+    add_test(NAME libfabric_rendezvous_threshold_test COMMAND libfabric_rendezvous_test --small-threshold)
+    set_tests_properties(libfabric_rendezvous_threshold_test PROPERTIES TIMEOUT 45
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>;FI_SOFTUE_RENDEZVOUS_THRESHOLD=1024")
     softue_test(libfabric_atomic_return_test LibfabricAtomicReturnTest.cpp)
     target_include_directories(libfabric_atomic_return_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
     target_link_libraries(libfabric_atomic_return_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
@@ -257,11 +274,23 @@ if(BUILD_TESTING)
     add_test(NAME libfabric_recovery_processes COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
       --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
-    set_tests_properties(libfabric_recovery_processes PROPERTIES TIMEOUT 40 ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=1")
+    set_tests_properties(libfabric_recovery_processes PROPERTIES TIMEOUT 40
+      ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=1;FI_SOFTUE_RENDEZVOUS_THRESHOLD=0")
     add_test(NAME libfabric_unordered_recovery_processes COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
       --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
-    set_tests_properties(libfabric_unordered_recovery_processes PROPERTIES TIMEOUT 40 ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=0")
+    set_tests_properties(libfabric_unordered_recovery_processes PROPERTIES TIMEOUT 40
+      ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=0;FI_SOFTUE_RENDEZVOUS_THRESHOLD=0")
+    add_test(NAME libfabric_rendezvous_recovery_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_rendezvous_recovery_processes PROPERTIES TIMEOUT 40
+      ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=1;SOFTUE_RECOVERY_RENDEZVOUS=1;FI_SOFTUE_RENDEZVOUS_THRESHOLD=65536")
+    add_test(NAME libfabric_rendezvous_unordered_recovery_processes COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_libfabric_provider.py
+      --binary $<TARGET_FILE:libfabric_recovery_peer> --provider-directory $<TARGET_FILE_DIR:softue_fabric>)
+    set_tests_properties(libfabric_rendezvous_unordered_recovery_processes PROPERTIES TIMEOUT 40
+      ENVIRONMENT "SOFTUE_RECOVERY_ORDERED=0;SOFTUE_RECOVERY_RENDEZVOUS=1;FI_SOFTUE_RENDEZVOUS_THRESHOLD=65536")
   endif()
   add_test(NAME realtime_endpoint_processes COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_realtime_endpoint.py --binary $<TARGET_FILE:realtime_endpoint_peer>)

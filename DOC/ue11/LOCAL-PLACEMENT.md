@@ -40,6 +40,12 @@ READ返回路径和原子结果，可以依各自的posting/operation正常放�
 时撤销。公开 `fi_mr_reg/regv/regattr` 的远端权限继续由FI_REMOTE_READ/WRITE等
 flags控制；内部可写注册不会额外扩大这些权限。
 
+大消息 SEND 的隐式源注册使用另一项策略 `rendezvous_source_only`，只允许本地
+`RendezvousSource` 授权入口创建绑定对端的只读视图。普通远端 RMA 和本地结果
+放置均不能使用其原 key；普通 `local_placement_only` MR 也不能被提升为这种源。
+两种策略不能同时设置。参见 [provider rendezvous](PROVIDER-RENDEZVOUS.md) 中的
+权限边界与 `rendezvous_source_scope_test`。
+
 ## 实际回归
 
 `local_placement_scope_test` 验证相同key与R/W/Atomic位下的本地放置和远端拒绝，

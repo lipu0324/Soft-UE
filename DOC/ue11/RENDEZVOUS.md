@@ -3,8 +3,9 @@
 原生 `Endpoint` 通过 `RendezvousSend` / `RendezvousTaggedSend` 提供标准 opcode
 0x06 / 0x0a。它复用原 SES/PDS 和真实 READ，不依赖可靠网络后端。本文解释
 §3.4.5.3 的事务状态；24 字节 Figure3-21 编码另见[线格式](RENDEZVOUS-HEADERS.md)。
-这项原生能力不代表 HPC、AI Full 或 M5 已完成。provider 的自动 rendezvous 选择、
-完整 Sync Group、优化头、TSS 和完整 Profile 验收仍在计划内。
+这项能力不代表 HPC、AI Full 或 M5 已完成。provider 的大消息选择和私有源授权见
+[公开 API 接入](PROVIDER-RENDEZVOUS.md)；完整 Sync Group、优化头、TSS 和完整
+Profile 验收仍在计划内。
 
 ## 从应用缓冲区到完成事件
 
@@ -68,7 +69,9 @@ operation.context = application_context;
 const uint64_t operation_id = endpoint.submit(operation);
 ```
 
-注册必须授予 READ，且不能是仅供本地放置的 MR。提交时检查源资源映射、Job、权限
+注册必须授予 READ，且不能是仅供本地放置的 MR。provider 可以创建专供本地事务
+读取的 `rendezvous_source_only` 注册；它不授予任意远端请求通用 READ 权限。
+提交时检查源资源映射、Job、权限
 和完整范围；每次读源数据重新验证同一注册身份。源 key 撤销后再用同一数值注册新
 缓冲区，不能让旧事务复活。任意 `payload_source` 不能替代这里的真实注册源。
 
@@ -126,6 +129,10 @@ Close 不算成功。standalone READ 返回须收到真实反向语义 ACK。源
 MSG_ERROR 排空。目标 posting 截断不越界写入，撤销/复用目标 key 不会改写新注册。
 本地取消和总超时撤销 alias 并发布一次源 CQ，不能发明私有远端取消 opcode。
 
+截断等 posting 错误也保留 SOM 中的 CQ header data，包括值0。如果 RUD 的
+continuation 先到，错误 CQ 等待 SOM；只保存完成元数据，并由既有 Incoming
+资源预算限制数量。SOM 缺失时管理关闭回收该状态，保留最初的错误而不虚构数据。
+
 源端已取消时，目标捕获头可能仍有界等待 posting；迟投递 READ 会得到 key 错误，
 或者由管理关闭回收。源 PDC 本地重试耗尽也不保证对端同时获知；对端未完成事务
 保留到其自身 PDC 失败或管理关闭。生命周期测试分别强制两侧真实 PDC 失败，检查
@@ -155,6 +162,8 @@ ctest --test-dir build/cmake -R '^rendezvous_' --output-on-failure -j1
 | `rendezvous_lifecycle_test` | 三类共享FIFO的全部顺序、正常/失败PDC、目标关闭和一次完成 |
 | `rendezvous_malformed_test` | 初始/后续头不一致、错误扩展字段、MSG_ERROR和不可能的语义完成长度 |
 | `rendezvous_addressing_test` | 不同相对/绝对源与目标PID、两个generation、BAD_GENERATION重试和自定义反向rank |
+| `rendezvous_source_scope_test` | 私有源授权、直接RMA拒绝、精确注册与实际事务 |
+| `rendezvous_truncation_test` | 首个SOM/延迟SOM的截断CQ数据，以及SOM缺失后的关闭回收 |
 
 最大逻辑长度测试只传输 eager 和末字节，**不是完整4 GiB rendezvous传输证据**。
 READ 自身的完整4 GiB−1实验见 [READ-BOUNDARY.md](READ-BOUNDARY.md)，不得移用于此能力。
