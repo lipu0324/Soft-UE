@@ -19,7 +19,7 @@
 | UE11-p0085-001 | §2.2.2，条件性要求 | 供应商提供 Profile 以外功能时，应允许选择性启用和关闭。 | 已有显式 NSCC/trim 配置；完整特性开关和能力协商未完成。 |
 | UE11-p0085-002 | §2.2.2，表格引用 | 分别支持表 2-4 中各 Profile 标记为必选的参数。 | 需要把表 2-4 各单元及脚注独立建项；`API-FABRIC` 仅为粗粒度部分覆盖。 |
 | UE11-p0088-001 | §2.2.2.1，条件性要求 | 两端 Profile 有交集时，按最高公共逻辑优先级选择通信 Profile。 | 未实现；当前仅公布 experimental 能力。 |
-| UE11-p0088-002 | §2.2.2.1，跨 Profile 条件项 | AI Full/HPC 互通时：限制在 AI Full 操作集；HPC 把 deferrable send 当 SEND；把 deferrable tagged send 当 tagged SEND。 | 必须拆成三项。已有未标记 SEND 的接收兼容回归 `send_header_data_test`；tagged 与跨 Profile 协商未实现，不能据此通过整段。 |
+| UE11-p0088-002 | §2.2.2.1，跨 Profile 条件项 | AI Full/HPC 互通时：限制在 AI Full 操作集；HPC 把 deferrable send 当 SEND；把 deferrable tagged send 当 tagged SEND。 | 必须拆成三项。`send_header_data_test` 与 `tagged_message_test` 已覆盖两类目标接收兼容（含0x0b、全长或NO_MATCH/0）；跨 Profile 协商和操作集限制仍未实现，不能通过整段。 |
 | UE11-p0089-001 | §2.2.4，三个授权义务 | 特权实体分配 JobID；把分配结果交给驱动；对用户态提供的 JobID 在硬件上下文验证。 | 本轮模型要保留分配/验证边界；真实驱动和硬件验证不在当前软件实验的证据范围。固定 JobID=1 的实验 provider 不能满足该部署要求。 |
 | UE11-p0089-002 | §2.2.4.1，可选方法的条件项 | 若选择作业初始化时分配，则通过控制 API 配置 OS PID/服务名到 JobID 的映射。 | 方法尚未实现；需 M7 管理模型与 provider 映射共同验收。 |
 | UE11-p0090-001 | 表 2-8，字段要求 | JobID 映射 flags 的保留位为零。 | 控制 API 编解码未实现；本候选只覆盖表的一部分，仍需单独复核完整表 2-8。 |
@@ -101,17 +101,17 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0114-002 | §2.2.5.4.1.1，接收策略与发送兼容 | 目标至少选一种规范 unexpected-message 策略；发起端正确响应所有目标行为。 | 已有 ROD 暂存、RUD 丢弃/查询及晚到 receive 场景；全部目标行为及 deferral/rendezvous 的组合仍未覆盖。 |
 | UE11-p0114-003 | §2.2.5.4.1.2，Profile 条件项 | AI Full 支持 deferrable send；HPC 支持 rendezvous。 | 实际 defer/RTR/后续数据与 rendezvous 未实现。已有把收到的 DS 当 SEND 处理的兼容分支不能代替源端与目标完整协议。 |
 | UE11-p0114-004 | §2.2.5.4.1.2，rendezvous 条件项 | RENDEZVOUS_SEND 的 eager 数据不超过配置上限。 | M5 未实现；需要零、恰好上限及超限测试。触发使用 rendezvous 的大小选择另列 SHOULD。 |
-| UE11-p0115-001 | §2.2.5.4.2，Profile 条件项 | AI Full/HPC 支持 tagged API；DGRAM 不支持。 | 当前没有 tagged 能力和 API，均待 M5。 |
+| UE11-p0115-001 | §2.2.5.4.2，Profile 条件项 | AI Full/HPC 支持 tagged API；DGRAM 不支持。 | 原生及公开 scalar/v/msg tagged 已实现，64位精确/通配与 CQ 有回归；DGRAM 不公布 tagged。优化格式、rendezvous 等完整 M5 仍待验收。 |
 | UE11-p0115-002 | 表 2-23，接收 API 与匹配 | 支持 trecv/trecvv/trecvmsg，按 posted 顺序搜索；AI Full 至少 exact match，不支持 wildcard 时拒绝非零 ignore；HPC 支持 wildcard。 | 需拆分三个 API、FIFO、exact、ignore 拒绝及 wildcard，当前均缺失。 |
-| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 尚无 tagged/注入协议；须按每个 API、完成与大小边界分别验收。 |
-| UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | M5 缺失；其他地址字段参与 directed receive 属于可选，不能混入基础强制匹配。 |
+| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data、tsenddata 已有0/MTU/多包、缓冲区所有权与 CQ 回归；原生源端 deferrable/rendezvous 事务及按 Profile/大小的选择仍缺失。 |
+| UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | 原生 Job 内32位 rank 与公开 FI_DIRECTED_RECV 已用两个独立对端验证；未请求能力时忽略 src_addr，UNSPEC 为任意源。provider 使用UDP端点node作为rank代理；其他地址字段不混入强制匹配。 |
 | UE11-p0116-002 | §2.2.5.4.2.1，Profile/能力条件项 | AI Full/HPC 支持 UNSPEC；HPC 支持指定源地址。 | 未实现；FI_EXACT_DIRECTED_RECV 例外声明及与前句的关系需在选用该能力时单独复核，当前不宣称该能力。 |
 | UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 与未标记 rendezvous 分开验收；两者当前均缺失。 |
-| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；READ 仍缺失；三个完成等级采用 GO 点，inject 已覆盖复制/CQ/边界，FI_FENCE 已覆盖混合模式/重试。不能用 WRITE 成功证明整张表通过。 |
-| UE11-p0118-001 | §2.2.5.4.4，原子数量约束 | 非取回原子支持 bulk；取回原子限制为所选类型的一个单位。 | 非取回 bulk 已在 native/provider 实现并测试，公开 valid/query 返回类型相关数量；fetching 未实现，未来必须拒绝多单位。 |
+| UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；公开 read/v/msg 已有 RAW/WAR、两种结果载体与丢包回归；三个完成等级采用 GO 点，inject 已覆盖复制/CQ/边界，FI_FENCE 已覆盖混合模式/重试。不能用 WRITE 成功证明整张表通过。 |
+| UE11-p0118-001 | §2.2.5.4.4，原子数量约束 | 非取回原子支持 bulk；取回原子限制为所选类型的一个单位。 | 非取回 bulk 已在 native/provider 实现并测试，公开 valid/query 返回类型相关数量；公开8～128位整数 fetching 已实现，查询数量1并拒绝多单位；零字节put/get是§3.4.2.12的显式例外。 |
 | UE11-p0118-002 | 表 2-26，非取回 API 与 flags | atomic/atomicv/atomicmsg 必选；支持 COMPLETION、INJECT、FENCE，以及下一页续列的 TAGGED。 | bulk 整数操作已有覆盖；FI_FENCE 与 FI_INJECT 已有公开 API 回归；TAGGED 尚缺。“all profiles” 按本章范围解释。 |
-| UE11-p0119-001 | 表 2-26，inject 与 fetching | inject_atomic 为基础要求；AI Full/HPC 支持 fetch_atomic/v/msg，flags 继承 atomicmsg。 | inject_atomic 已有公开 API 所有权、字节上限和成功 CQ 抑制回归；fetching 未实现，单单位约束仍待验收。 |
-| UE11-p0119-002 | 表 2-26，CAS 与能力查询 | AI Full/HPC 支持 compare_atomic/v/msg；所有本章 Profile 支持 atomicvalid/fetch_atomicvalid/compare_atomicvalid/query_atomic，返回实际支持类型和操作。 | 非取回查询已有实现；fetch/CAS 当前明确不支持。需逐一复核查询 API 对不支持组合的返回值，不能把拒绝取回操作算作已实现取回。 |
+| UE11-p0119-001 | 表 2-26，inject 与 fetching | inject_atomic 为基础要求；AI Full/HPC 支持 fetch_atomic/v/msg，flags 继承 atomicmsg。 | inject_atomic 已有公开 API 所有权、字节上限和成功 CQ 抑制回归；公开 fetching/v/msg 的单单位整数路径及查询、错误和旧值缓存已测试；完整表列flags、浮点和tagged原子仍未完成。 |
+| UE11-p0119-002 | 表 2-26，CAS 与能力查询 | AI Full/HPC 支持 compare_atomic/v/msg；所有本章 Profile 支持 atomicvalid/fetch_atomicvalid/compare_atomicvalid/query_atomic，返回实际支持类型和操作。 | 公开 fetch/CAS scalar/v/msg 与各 valid/query 已实现8～128位整数，覆盖掩码转换、非零generation和缓存恢复；不支持组合清零size/count并拒绝。浮点、tagged和完整能力矩阵仍未验收。 |
 | UE11-p0120-001 | §2.2.5.4.5，选定 INC 后的条件项 | 支持 INC 时公布 FI_COLLECTIVE；不支持时不公布属于 SHOULD。 | INC 留给 M8 后独立增强，当前不公布 FI_COLLECTIVE，不算作已实现 INC。 |
 | UE11-p0120-002 | §2.2.5.4.5，选定 INC 后的管理条件项 | 支持 INC 时能与 manager 通信，并解释 PRIMARY/SECONDARY URL 配置。 | 当前未选定 INC；后续增强需正向、fallback 与失效测试。 |
 | UE11-p0121-001 | §2.2.5.6，错误 CQ 三项义务 | err 采用相应 libfabric 错误，无对应项时用 FI_EIO；prov_errno 保留 SES 错误码。 | provider 已实现映射、FI_EIO fallback 与 prov_errno；公开错误进程测试仅覆盖部分 SES 错误，完整映射表仍需逐项验证。 |
@@ -127,7 +127,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 |---|---|---|---|
 | UE11-p0121-004 | §2.2.6，前段 RDM 选择的细化 | AI Base/Full 只使用 RUD/ROD，按操作和配置的排序选择。 | 与 p0121-003、后续两张表共享实现差距，不重复算已实现功能。 |
 | UE11-p0122-001 | 表 2-29，AI Base 四种组合 | SEND 排序只控制 SEND 的 ROD/RUD；R/W 排序只控制 RMA/ATOMIC 的 ROD/RUD，两者独立。 | `libfabric_mode_selection_test` 检查四行中的 SEND、WRITE、ATOMIC 及实际 PDS type，另覆盖 RAS/SAR/SAW/WAS 交叉 flags；完整 Profile 仍有其他缺口。 |
-| UE11-p0122-002 | 表 2-30，AI Full 四种组合 | SEND/TAGGED 与 RMA/ATOMIC 分别遵循各自排序；有 SEND 排序的 deferrable tagged 初始/eager 数据用 ROD，后续数据用 RUD。 | 基础模式选择与 M5 延迟恢复均缺失；不能只修改一个 Operation 字段就通过整表。 |
+| UE11-p0122-002 | 表 2-30，AI Full 四种组合 | SEND/TAGGED 与 RMA/ATOMIC 分别遵循各自排序；有 SEND 排序的 deferrable tagged 初始/eager 数据用 ROD，后续数据用 RUD。 | 公开 SEND/tagged 与 RMA/ATOMIC 已分别按排序谓词选择 ROD/RUD；真实线上模式和分空间代次有回归。deferrable 初始/eager与重启跨模式事务仍缺失，不能通过整表。 |
 | UE11-p0122-003 | 表 2-31，HPC 组合与策略 | SEND/TAGGED、rendezvous 初始/后续、RMA、ATOMIC 分别选择表列模式；无 R/W 排序的 RMA 可依策略用 RUD 或 RUDI。 | RUDI 为可选分支而非所有 RMA 强制；当前未实现 HPC/rendezvous/RUDI，未作能力声明。 |
 | UE11-p0124-001 | §2.2.8.1，排序端点条件项 | 配置消息排序的 endpoint 操作约束到一个发送队列。 | provider 当前串行应用队列符合这一局部分支；多队列及流量类别映射是 SHOULD，PDC 内 packet window 不等于多个应用发送队列。 |
 | UE11-p0126-001 | §2.2.9，选定 TSS 后的条件项 | provider 支持表 2-33 的完整安全绑定参数，并由特权地址分配流程取得。 | M6/M7 管理与 TSS 缺失；真实 kernel driver 后续系统集成。 |
@@ -140,7 +140,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0132-002 | 表 2-43，small RMA 映射 | hd 必须为零，其余 opcode/dc/rel/index/generation/Job/PID/长度/offset/initiator/key 按各自来源映射。 | 未实现；无 CQ data 是必要前提，不能静默丢弃调用者提供的 CQ data 来选择该头。 |
 | UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | M5 缺失；需要跨 endpoint/并发/取消/复用的唯一性与迟到 RTR 回归。 |
 | UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | M5 缺失；源 MR 撤销、偏移边界及全消息 READ 必须共同验证。 |
-| UE11-p0133-002 | §2.2.10.4，原子映射 | libfabric datatype/op 映射至 SES 对应 mnemonic。 | 当前支持的 8 种整数类型、12 种非取回操作已有 native/wire/provider 回归；不据此声明浮点、fetching 或 CAS。 |
+| UE11-p0133-002 | §2.2.10.4，原子映射 | libfabric datatype/op 映射至 SES 对应 mnemonic。 | 当前支持的 8 种整数类型、12 种非取回操作已有 native/wire/provider 回归；fetching/CAS 另有8～128位整数、固定双操作数格式与旧值缓存/公开掩码转换证据；浮点和完整类型矩阵仍未验收。 |
 | UE11-p0133-003 | §2.2.10.4，CAS 扩展 | compare/swap 来自 API，每个值尺寸不超过 16 字节，并带正确 opcode/datatype。 | CAS 未实现；后续还需类型允许集、单单位和目标对齐/权限检查。 |
 | UE11-p0134-001 | §2.2.11，Linux 控制接口部署项 | Linux UET Control API 使用 UET family 的 Netlink 消息及规定 typed attributes。 | 真实 kernel 接口留后续系统集成；M7 软件管理模型仍需保留相应消息/权限语义，不宣称提供实际 UET Netlink family。 |
 | UE11-p0145-001 | §2.3.4.1，verbs 条件项 | UET verbs 设备支持至少一种 UET GID 类型，应用通过 GID 选择 UET。 | UE verbs 按 ROADMAP 在 M8 后独立增强；当前不声明 verbs 设备或 GID 支持。 |

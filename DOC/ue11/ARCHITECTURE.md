@@ -10,6 +10,8 @@ flowchart LR
     Endpoint --> Manager[PDS Manager]
     Manager --> PDC[IPDC / TPDC]
     PDC --> Codec[标准报文编码]
+    PDC -.准入与发送及ACK事件.-> CMS[CMS 已实现 NSCC]
+    CMS -.发送许可与速率及路径.-> PDC
     Codec --> Port[非阻塞 PacketPort]
     Port --> Fabric[链路 / 队列 / 路由模型]
     Fabric --> Peer[远端 PDS / SES]
@@ -18,8 +20,9 @@ flowchart LR
     Response --> Completion[发起端完成队列]
 ```
 
-图中 CMS、TSS、LLR、CBFC/PFC 和后续 Profile 的完整路径尚未接入；不能由这张
-已有路径图推断它们已经实现。UUD 没有图中的可靠返回响应路径。
+CMS 已接入 NSCC 的发送准入、记账、ACK/NACK反馈和路径选择；RCCC/TFC 等完整 CMS
+功能仍未完成。TSS、LLR、CBFC/PFC 和后续 Profile 的完整路径尚未接入。UUD 没有
+图中的可靠返回响应路径，也不能由此图推断安全或完整 Profile 已经实现。
 
 ## 每个模块负责什么
 
@@ -31,6 +34,7 @@ flowchart LR
 | PDS Manager | 将报文分发到正确的端点/PDC元组；按可配置字段选择连接，分配和回收上下文 | `UET/src/PDS/PDS_Manager/PDSManager.hpp` |
 | PDC选择策略 | 独立RUD/ROD字段组合、必需FA/TC/mode及碰撞安全的key | `UET/src/PDS/PdcMapping.hpp` |
 | Initiator/Target PDC | 建连、PSN、ACK/NACK、重复消除、RTO、Clear/Close | `UET/src/PDS/PDC/` |
+| CMS/NSCC | 限制实际新发/重传、维护拥塞窗口及速率、处理反馈和路径熵 | `UET/src/CMS/NsccEngine.hpp` |
 | Wire codec | 显式位宽、网络字节序、保留位、长度和 CRC；不决定重传 | `UET/src/Network_Layer/UetWireCodec.cpp` |
 | PacketPort | 非阻塞发送结果、接收回调、背压解除通知 | `UET/src/Runtime/PacketPort.hpp` |
 | Fabric | 串行化、传播延迟、出口队列、丢包、路由和链路状态 | `UET/src/Runtime/Fabric.hpp` |
@@ -50,8 +54,9 @@ flowchart LR
 4. 远端先校验编码、CRC 和端点/PDC 身份，再由 TPDC 执行对应投递模式。
 5. 远端 SES 检查 JobID、MR key、权限和整个操作的地址范围。收到的地址是模型中的
    地址或偏移，不能转换为进程指针。有效片段写入稀疏存储。
-6. 全部片段处理后，SES 生成语义响应。保证交付的响应由 PDC 保存，直到对端 Clear。
-   发起端收到响应后，才产生可靠操作的应用完成。
+6. SES 为每个处理后的包生成语义结果。中间包的结果不等于整消息完成；应用成功还
+   等待完整字节覆盖与 EOM。保证交付的响应由 PDC 保存到对端 Clear。发起端等待
+   自己的 EOM 已发出且全部正向语义结果齐备，READ/取回原子还等待本地结果放置。
 
 PDS 会把响应关联到原始 PSN。收到中间片段的默认响应只确认该片段，不能提前完成
 整条消息；EOM 已发送且所有已发送片段都有明确或合法推断的正向语义结果后，才报告成功。
@@ -63,7 +68,8 @@ SACK 只证明交付，CACK 严格高于某包 PSN 时才允许推断其 DEFAULT
 buffer_offset 都是受检区域内的偏移。注册应用真实缓冲区只发生在本地 API，远端
 无法指定主机指针。libfabric 适配器的进程路径见 [PROVIDER.md](PROVIDER.md)。
 
-WRITE immediate 的 `header_data` 随消息保存；全部数据落地后产生单独的远端完成。
+WRITE immediate 的 `header_data` 随消息保存；全部数据落地且 EOM 已到达后，产生单独
+的远端完成。字节覆盖、EOM 和 Clear 的区别见[末包边界](RECEIVE-END-MARKER.md)。
 普通 WRITE 不消耗 SEND 的接收缓冲区。非取回原子操作经过同一条路径，原子扩展头
 位于 SES 基础头与 payload 之间，每个元素在单线程事件循环中不可分割地更新。
 
@@ -71,6 +77,10 @@ WRITE immediate 的 `header_data` 随消息保存；全部数据落地后产生�
 
 | 名称 | 含义与约束 |
 |---|---|
+| SES `received` / `end_seen` | 字节覆盖计数与 EOM 到达分别记录；前者达到全长不意味着后者成立。 |
+| SES `end_of_message_psn` | 真正 EOM 的 PSN；RUD 最后补齐空洞的包可能更早，不能用其 PSN 替代。 |
+| `registration_id` | 本地注册的精确身份；撤销后重用同一 key 不会恢复旧投递/结果描述符的授权。 |
+| `initiator_id` / tag | Job 内 rank 与完整64位 tag，参与 SEND/tagged 匹配；与 source PID 和 RMA key 分开。 |
 | `tx_cur_psn` | 下一次发送要分配的 PSN；不是最后已发送的 PSN。 |
 | `clear_psn` | 发起端已经收到所需响应、可通知对端清理的连续 PSN 上界。 |
 | `rx_cur_psn` | 接收端连续收到的 PSN 上界；RUD 不能因收到更大的 PSN 而跳过缺口。 |
