@@ -474,6 +474,9 @@ public:
         // The explicit legacy SES path uses version 2 and omits DC. Preserve
         // its semantic-response contract; standard wire requests use version 0.
         const auto found = tx_pkt_buffer.find(psn);
+        if (runtime_ && runtime_->standard_wire && found!=tx_pkt_buffer.end() &&
+            found->second.PDS_type==RUOD_req_header && found->second.SESpkt.bth_type==Semantic_Response_with_Data_Header)
+            return true;
         return runtime_ && found != tx_pkt_buffer.end() &&
             found->second.PDS_type == RUOD_req_header &&
             found->second.SESpkt.bth_type == Standard_Header &&

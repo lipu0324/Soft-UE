@@ -173,6 +173,19 @@ public:
         wake();
         return true;
     }
+    bool submit_return_data(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        if (stopped_ || format_!=WireFormat::Uet11 || original.pkt.bth_type!=Standard_Header ||
+            data.bth_type!=Semantic_Response_with_Data_Header || data.payload.size()>8192) return false;
+        const auto& request=original.pkt.bth_header.Standard_Header;
+        const auto& response=data.bth_header.Semantic_Response_with_Data_Header;
+        // §3.5.17 always returns fetching-atomic results in their ACK. Only
+        // READ uses this size-dependent return-direction path in this API.
+        if (request.opcode!=2 || request.request_length<=services_.max_ack_data_size || response.opcode!=2 || response.version ||
+            response.read_request_msg_id!=request.msg_id || response.job_id!=request.job_id ||
+            response.payload_length!=data.payload.size()) return false;
+        if (!manager_.pushReturnData(original,data)) return false;
+        trace_.record(node_,"ses_return_submit",response.response_message_id); wake(); return true;
+    }
     void wake() {
         if (stopped_ || pending_) return;
         std::weak_ptr<int> life = lifetime_;

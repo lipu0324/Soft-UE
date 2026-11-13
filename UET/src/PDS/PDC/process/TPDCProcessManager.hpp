@@ -53,6 +53,24 @@
  */
 class TPDCProcessManager {
 public:
+    // §3.5.12.1: return data belongs to this existing target PDC, never to a
+    // new initiator PDC selected from the ordinary source mapping tuple.
+    bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        auto* process=getProcessInfo(original.PDCID);
+        if (!process || process->state.load()!=RUNNING) return false;
+        auto& context=*process->tpdc_instance;
+        if (context.state!=ESTABLISHED || context.start_psn!=original.connection_start_psn ||
+            context.dst_fep!=original.source_fep || context.mode!=original.delivery_mode) return false;
+        PDS_PDC_req request{}; request.delivery_mode=context.mode;
+        request.next_hdr=UET_HDR_RESPONSE_DATA; request.pkt=data;
+        request.tx_pkt_handle=data.bth_header.Semantic_Response_with_Data_Header.response_message_id;
+        request.pkt_len=20+data.payload.size();
+        // Each queued return packet owns its own response token. It does not
+        // start another application request/message in the forward direction.
+        request.som=request.eom=true;
+        context.tx_req_q.push(std::move(request));
+        return true;
+    }
     std::optional<std::pair<uint32_t,uint32_t>> receiveSequenceSnapshot(uint16_t pdcid) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=tpdc_processes.find(pdcid);

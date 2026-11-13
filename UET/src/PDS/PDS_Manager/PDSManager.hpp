@@ -52,6 +52,11 @@ private:
 
 public:
 
+    bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        return original.PDCID>=MAX_PDC && original.PDCID<MAX_PDC*2 && PDCOpen(original.PDCID) &&
+            TPDC_Processmanager.pushReturnData(original,data);
+    }
+
     uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
                              UET::PDS::PdcMappingIdentity identity={}) {
         if (!local_node || !peer || (mode!=ROD && mode!=RUD)) return UINT16_MAX;
@@ -367,6 +372,18 @@ public:
         else if (is_control) local_pdc_id = received_packet.PDS_header.RUOD_cp_header.dpdcid;
         else if (is_acknowledgement) local_pdc_id = received_packet.PDS_header.RUOD_ack_header.dpdcid;
         else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
+
+        if (is_request && runtime_ && runtime_->standard_wire) {
+            const bool forward=starts_connection || local_pdc_id>=MAX_PDC;
+            // §3.5.12.1: outside RODL, SES requests use only the forward
+            // direction; READ/atomic response data uses only the return
+            // direction. Drop an illegal combination before allocation or
+            // peer-ID learning (local malformed-direction policy).
+            if ((forward && received_packet.SESpkt.bth_type!=Standard_Header) ||
+                (!forward && received_packet.SESpkt.bth_type!=Semantic_Response_with_Data_Header)) {
+                ++event_cnt; return;
+            }
+        }
 
         if (starts_connection) {
             if (is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type!=Noop &&
@@ -692,12 +709,13 @@ public:
     {
         // Check if PDC is open, i.e., already in use
         // Simple simulation here, actual logic needs implementation based on specific requirements
-        if (pdc_id < 0 || pdc_id >= MAX_PDC)
+        // Both ID pools belong to this host: initiators occupy [0,MAX_PDC),
+        // targets [MAX_PDC,2*MAX_PDC). Return data uses the latter pool.
+        if (pdc_id < 0 || pdc_id >= MAX_PDC*2)
         {
             LOG_ERROR("pdc_open", "PDC ID " + std::to_string(pdc_id) + " out of range");
             return false; // PDC not available
         }
-        if (pdc_id >= MAX_PDC * 2) return false;
         if (!pdc_list[pdc_id].is_open)
         {
             LOG_ERROR("pdc_open", "PDC ID " + std::to_string(pdc_id) + " not open");

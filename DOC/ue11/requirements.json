@@ -457,14 +457,15 @@
       "summary": "多包 READ 与数据响应",
       "status": "partial",
       "tests": [
-        "read_ack_data_test"
+        "read_ack_data_test",
+        "return_data_transport_test"
       ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native single-MTU RUD/ROD READ up to configured Max_ACK_Data_Size (default 16 B); registered local result authority, data ACK, zero length, original-request reissue and no target result-data cache. Multi-packet/return-direction READ, optimized headers, provider mapping and RODL remain open; see READ-ACK-DATA.md."
+      "evidence_note": "Native single-MTU RUD/ROD READ up to configured Max_ACK_Data_Size (default 16 B); registered local result authority, data ACK, zero length, original-request reissue and no target result-data cache. Multi-packet/return-direction READ, optimized headers, provider mapping and RODL remain open; see READ-ACK-DATA.md. Same-PDC reverse data transport has a callback-level regression with independent PSN/Clear spaces, response token echo, loss/duplicates and late forward ACK; native multi-packet placement is not yet connected."
     },
     {
       "id": "SES-TAG",

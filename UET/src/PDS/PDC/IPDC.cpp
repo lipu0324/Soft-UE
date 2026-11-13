@@ -315,6 +315,12 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
 
     chkRxError(pkt);
     observeCongestionDuplicate(*pkt);
+    if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header &&
+        SYN && !DPDCID && (error_chk==OPEN || error_chk==OOO) && pkt->PDS_header.RUOD_req_header.spdcid) {
+        // Return data can overtake the forward ACK (§3.5.20.2.2). Learn where
+        // its ACK must go, while retaining SYN until a forward ACK arrives.
+        DPDCID=pkt->PDS_header.RUOD_req_header.spdcid;
+    }
     if (!trim && error_chk==ACK_ERROR && reissueReceivedRead(pkt)) return;
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
@@ -343,7 +349,8 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
                 const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
                     [sequence](const auto& request) { return request.second.psn==sequence; });
                 if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr,pkt);
-                else if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Standard_Header) {
+                else if (runtime_ && runtime_->standard_wire &&
+                    (pkt->SESpkt.bth_type==Standard_Header || pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header)) {
                     auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
                     sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false,pkt);
                 } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false,pkt);

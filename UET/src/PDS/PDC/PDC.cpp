@@ -165,12 +165,12 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
     meta.syn = pkt->PDS_header.RUOD_req_header.flags.syn;
     meta.retx = pkt->PDS_header.RUOD_req_header.flags.retx;
     meta.ar = pkt->PDS_header.RUOD_req_header.flags.ar;
-    meta.som = pkt->SESpkt.bth_header.Standard_Header.som;
-    if (meta.som == false) {
-        meta.payload_len = pkt->SESpkt.bth_header.Standard_Header.diff.som_false.payload_length;
-    }
-    else {
-        meta.payload_len = 0;
+    if (pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header) {
+        meta.som=true;
+        meta.payload_len=pkt->SESpkt.bth_header.Semantic_Response_with_Data_Header.payload_length;
+    } else {
+        meta.som=pkt->SESpkt.bth_header.Standard_Header.som;
+        meta.payload_len=meta.som?0:pkt->SESpkt.bth_header.Standard_Header.diff.som_false.payload_length;
     }
 
     uint16_t handle = setRXhandle(meta.psn, meta.spdcid);
@@ -313,11 +313,12 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     }
     if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && explicit_request->second.PDS_type==RUOD_req_header &&
         acknowledgment.next_hdr==UET_HDR_RESPONSE && packet.SESpkt.bth_type==Semantic_Response_Header) {
-        const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
+        const auto expected=UET::PDS::default_semantic_response(explicit_request->second.SESpkt);
+        const auto& request=expected.bth_header.Semantic_Response_Header;
         auto response=packet.SESpkt;
         auto& semantic=response.bth_header.Semantic_Response_Header;
         const bool query_default=semantic.opcode==0 && semantic.job_id==0 && !semantic.modified_length;
-        if (semantic.version==0 && semantic.opcode<=1 && semantic.message_id==request.msg_id &&
+        if (semantic.version==0 && semantic.opcode<=1 && semantic.message_id==request.message_id &&
             (!requiresReadReissue(explicit_sequence) || semantic.return_code!=1) &&
             (semantic.job_id==request.job_id || query_default)) {
             // Table 3-69 deliberately omits JobID/generation from an ACK
@@ -331,7 +332,8 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         }
     }
     for (const auto& cached:tx_pkt_buffer) {
-        if (cached.second.PDS_type!=RUOD_req_header || cached.second.SESpkt.bth_type!=Standard_Header ||
+        if (cached.second.PDS_type!=RUOD_req_header ||
+            (cached.second.SESpkt.bth_type!=Standard_Header && cached.second.SESpkt.bth_type!=Semantic_Response_with_Data_Header) ||
             semantic_completed_tx_.count(cached.first) || requiresReadReissue(cached.first)) continue;
         const uint32_t advance=acknowledgment.cack_psn-cached.first;
         // §3.5.13: equality is insufficient. SACK bits never enter this test.
@@ -495,7 +497,8 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
              (valid_cumulative && distance <= cumulative_distance))) {
             const auto sequence = it->first;
             if (runtime_ && runtime_->standard_wire && it->second.PDS_type==RUOD_req_header &&
-                it->second.SESpkt.bth_type==Standard_Header && !semantic_completed_tx_.count(sequence)) {
+                (it->second.SESpkt.bth_type==Standard_Header || it->second.SESpkt.bth_type==Semantic_Response_with_Data_Header) &&
+                !semantic_completed_tx_.count(sequence)) {
                 ++it; continue;
             }
             semantic_completed_tx_.erase(sequence);
@@ -605,7 +608,8 @@ void PDC::reTx(uint32_t psn){
         auto& control=query.PDS_header.RUOD_cp_header;
         control.type=CP; control.ctl_type=ACK_req; control.flags.ar=1;
         control.psn=psn; control.spdcid=SPDCID; control.dpdcid=DPDCID;
-        control.payload=uint32_t{p.SESpkt.bth_header.Standard_Header.msg_id}<<16;
+        const auto expected=UET::PDS::default_semantic_response(p.SESpkt);
+        control.payload=uint32_t{expected.bth_header.Semantic_Response_Header.message_id}<<16;
         decorateControl(query);
         tagTransmission(query,psn,UET::Runtime::TransmitKind::SemanticQuery,tx_pkt_map.at(psn).retry_cnt);
         if (public_net_queue) public_net_queue->push(query); else tx_pkt_q.push(query);
@@ -812,6 +816,11 @@ void PDC::freePDC()
             const std::pair<uint32_t,uint16_t> message{semantic.job_id,semantic.msg_id};
             if (rejected_messages.insert(message).second)
                 emitPdcEvent(UET::Runtime::PdcEventKind::RequestRejected,tx_cur_psn,semantic.job_id,semantic.msg_id);
+        } else if (queued.pkt.bth_type==Semantic_Response_with_Data_Header) {
+            const auto& semantic=queued.pkt.bth_header.Semantic_Response_with_Data_Header;
+            const std::pair<uint32_t,uint16_t> message{semantic.job_id,semantic.response_message_id};
+            if (rejected_messages.insert(message).second)
+                emitPdcEvent(UET::Runtime::PdcEventKind::RequestRejected,tx_cur_psn,semantic.job_id,semantic.response_message_id);
         }
         tx_req_q.pop();
     }
@@ -1514,6 +1523,10 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
         emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
             pkt->bth_header.Standard_Header.job_id,pkt->bth_header.Standard_Header.msg_id,
             pkt->bth_header.Standard_Header.eom);
+    else if (pkt->bth_type==Semantic_Response_with_Data_Header)
+        emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
+            pkt->bth_header.Semantic_Response_with_Data_Header.job_id,
+            pkt->bth_header.Semantic_Response_with_Data_Header.response_message_id,true);
     tagTransmission(p,psn,UET::Runtime::TransmitKind::Request,0);
     tx_pkt_buffer.insert(std::make_pair(psn,p)); 
 
