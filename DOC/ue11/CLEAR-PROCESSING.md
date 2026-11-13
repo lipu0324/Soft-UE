@@ -53,3 +53,18 @@ PDC现在用 `uncached_read_responses_` 区分这两种情况。首次响应尚�
 修复后的Clear与RUD窗口两项普通回归2/2通过（0.01s），ASan/UBSan/泄漏检查2/2通过
 （0.08s），日志分别为 `/tmp/softue-read-clear-race-after-tests.log` 与
 `/tmp/softue-read-clear-race-asan-tests.log`。该内核测试现共20个场景，完整版本回归另行记录。
+
+## 冻结版本完整回归
+
+009ca6b的干净工作树完成全部构建后，普通完整回归120/121通过（114.64s），唯一失败是
+上述旧窗口fixture；ASan/UBSan/泄漏检查119/121通过（740.70s），另有rendezvous事务
+矩阵触发180秒CTest超时。日志分别为 `/tmp/softue-sync-clean-normal-tests.log` 与
+`/tmp/softue-sync-clean-asan-tests.log`，不能记为完整通过。
+
+同一冻结ASan二进制在无其他编译/CPU实验时单独完成448个rendezvous场景，87.53s、
+exit0，无消毒器报告，记录在 `/tmp/softue-sync-rendezvous-budget-probe.json` 和同名log。
+这证明该独立执行可以结束；完整回归超时的根因尚未证实，180秒预算保持不变。
+
+修正窗口fixture的0c7be0e在GitHub run43519905515（workflow160）中，普通、消毒器及
+独立参考作业全部成功。后续READ重执行修复9f01c57及RUDI线格式626248a的完整验收另记，
+不把旧版本的二进制结果当作后续提交的证据。
