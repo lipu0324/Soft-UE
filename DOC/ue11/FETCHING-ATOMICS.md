@@ -13,6 +13,7 @@
 身份；撤销或重用 key 不会授权旧操作的结果。
 
 原子 READ 可以省略输入 `payload`，入口补一个零元素以符合标准请求格式。
+零字节 put/get 使用显式 `zero_length_atomic`，见[零字节操作](ZERO-ATOMIC.md)。
 取回操作不能使用惰性 payload reader、immediate data 或多个元素。目标偏移必须
 按 datatype 对齐。非取回 `Atomic` 仍使用独立的8～64位多元素能力列表；扩展取回
 数据类型不会隐式公布128位非取回能力。Profile 标志保持 false。

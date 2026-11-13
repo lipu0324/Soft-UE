@@ -46,6 +46,7 @@ struct Operation {
     std::optional<ReadResultBuffer> read_result;
     std::vector<uint8_t> atomic_compare; // One native little-endian compare/mask element, for dual-operand fetching only.
     std::optional<AtomicResultBuffer> atomic_result;
+    bool zero_length_atomic=false; // §3.4.2.12: explicit zero-byte put/get, distinct from READ's ignored input operand.
 };
 struct Completion {
     uint64_t operation;
@@ -137,6 +138,10 @@ public:
             complete_local(CompletionStatus::Unsupported); return id;
         }
         uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        if (operation.zero_length_atomic && (!is_atomic || payload_length || operation.payload_source ||
+            (operation.atomic_operation!=IntegerAtomicOperation::Read && operation.atomic_operation!=IntegerAtomicOperation::Write))) {
+            complete_local(CompletionStatus::InvalidRequest); return id;
+        }
         if ((!is_read && (operation.read_length || operation.read_result)) ||
             (!is_fetching_atomic && (operation.atomic_result || !operation.atomic_compare.empty())) ||
             (is_read && (payload_length || operation.payload_source || operation.immediate_data))) {
@@ -165,7 +170,7 @@ public:
                 complete_local(CompletionStatus::Unsupported); return id;
             }
             atomic_width=integer_atomic_width(operation.atomic_datatype);
-            if ((!is_fetching_atomic && (!payload_length || payload_length%atomic_width)) ||
+            if ((!is_fetching_atomic && ((!payload_length && operation.atomic_operation!=IntegerAtomicOperation::Write) || payload_length%atomic_width)) ||
                 operation.remote_offset%atomic_width || mtu_<atomic_width) {
                 complete_local(CompletionStatus::InvalidRequest); return id;
             }
@@ -173,22 +178,26 @@ public:
         std::optional<Region> atomic_registration;
         if (is_fetching_atomic) {
             const bool dual_operand=dual_operand_atomic(operation.atomic_operation);
-            if (operation.payload_source || operation.immediate_data || !operation.atomic_result ||
-                operation.atomic_result->capacity<atomic_width || operation.atomic_result->pid>0xfff ||
-                operation.atomic_result->resource_index>0xfff || mtu_<(dual_operand?32:atomic_width)) {
+            const auto result_length=operation.zero_length_atomic?size_t{0}:atomic_width;
+            if (operation.payload_source || operation.immediate_data || (!operation.atomic_result && result_length) ||
+                (operation.atomic_result && (operation.atomic_result->capacity<result_length || operation.atomic_result->pid>0xfff ||
+                operation.atomic_result->resource_index>0xfff)) || mtu_<(dual_operand?32:atomic_width) ||
+                (operation.zero_length_atomic && !operation.atomic_compare.empty())) {
                 complete_local(CompletionStatus::InvalidRequest); return id;
             }
-            if (operation.atomic_operation==IntegerAtomicOperation::Read && operation.payload.empty())
+            if (!operation.zero_length_atomic && operation.atomic_operation==IntegerAtomicOperation::Read && operation.payload.empty())
                 operation.payload.resize(atomic_width); // Atomic READ still carries one element on the wire.
             try {
-                operation.payload=fetching_atomic_wire_operands(operation.payload,operation.atomic_compare,
+                if (!operation.zero_length_atomic) operation.payload=fetching_atomic_wire_operands(operation.payload,operation.atomic_compare,
                     operation.atomic_operation,operation.atomic_datatype);
             } catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return id; }
             payload_length=operation.payload.size();
-            const auto& destination=*operation.atomic_result;
             try {
-                atomic_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
-                    destination.offset,atomic_width,Access::Write,destination.resource_index);
+                if (operation.atomic_result) {
+                    const auto& destination=*operation.atomic_result;
+                    atomic_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
+                        destination.offset,result_length,Access::Write,destination.resource_index);
+                }
             } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
@@ -214,7 +223,7 @@ public:
         pending.read_registration=std::move(read_registration);
         pending.is_fetching_atomic=is_fetching_atomic; pending.atomic_result=operation.atomic_result;
         pending.atomic_registration=std::move(atomic_registration);
-        pending.atomic_result_length=static_cast<uint32_t>(atomic_width);
+        pending.atomic_result_length=operation.zero_length_atomic?0:static_cast<uint32_t>(atomic_width);
         pending_.emplace(message,pending);
         try {
             auto source=operation.payload_source;
@@ -710,9 +719,13 @@ private:
         try {
             auto native_bytes=packet.payload;
             std::reverse(native_bytes.begin(),native_bytes.end()); // Exactly one network-order element.
-            const auto& destination=*operation.atomic_result;
-            memory_.write_registration(*operation.atomic_registration,operation.job,destination.pid,
-                destination.offset,native_bytes,destination.resource_index);
+            if (operation.atomic_registration) {
+                const auto& destination=*operation.atomic_result;
+                if (native_bytes.empty()) memory_.authorize_registration(*operation.atomic_registration,operation.job,destination.pid,
+                    destination.offset,0,Access::Write,destination.resource_index);
+                else memory_.write_registration(*operation.atomic_registration,operation.job,destination.pid,
+                    destination.offset,native_bytes,destination.resource_index);
+            }
         } catch (const MemoryAccessError&) { finish(message,CompletionStatus::LocalError,0,0); return; }
         operation.atomic_result_placed=true;
         trace_.record(node_,"atomic_result_placed",operation.atomic_result_length);
@@ -1122,7 +1135,9 @@ private:
         const auto datatype=static_cast<IntegerAtomicDatatype>(extension.atomic_datatype);
         const auto operation=static_cast<IntegerAtomicOperation>(extension.atomic_opcode);
         const auto width=integer_atomic_width(datatype);
-        if (header.request_length!=(dual_operand_atomic(operation)?32:width) ||
+        const bool zero_length=header.request_length==0 &&
+            (operation==IntegerAtomicOperation::Read || operation==IntegerAtomicOperation::Write);
+        if ((!zero_length && header.request_length!=(dual_operand_atomic(operation)?32:width)) ||
             request.pkt.payload.size()!=header.request_length) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
         if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
         ResourceSelection selected{};
@@ -1131,17 +1146,17 @@ private:
                 ResourceSpace::Rma,header.ri_generation);
         } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
         try {
-            const auto operands=decode_fetching_atomic_operands(request.pkt.payload,operation,datatype);
+            const auto operands=zero_length?FetchingAtomicOperands{}:decode_fetching_atomic_operands(request.pkt.payload,operation,datatype);
             auto previous=memory_.fetch_atomic_element(header.job_id,selected.absolute_pid,header.match_bits,
                 header.buffer_offset,operation,datatype,operands.operand,operands.compare_or_mask,
-                selected.resource_index,header.rel);
+                selected.resource_index,header.rel,zero_length);
             convert_integer_atomic_byte_order(previous,datatype);
             SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
-            response.rsp_len=20+width; response.gtd_del=true;
+            response.rsp_len=20+previous.size(); response.gtd_del=true;
             response.rsp.bth_type=Semantic_Response_with_Data_Header;
             auto& result=response.rsp.bth_header.Semantic_Response_with_Data_Header;
             result.opcode=2; result.return_code=1; result.job_id=header.job_id;
-            result.read_request_msg_id=header.msg_id; result.payload_length=width;
+            result.read_request_msg_id=header.msg_id; result.payload_length=previous.size();
             result.modified_length=header.request_length; response.rsp.payload=std::move(previous);
             message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
             message.initialized=true; message.completed=true; message.completion_reported=true;
@@ -1149,7 +1164,7 @@ private:
             // PDS retains the old value until Clear, including when the MR is
             // changed or revoked after execution. SES retains no second copy.
             if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected fetching atomic result");
-            host_.wake(); trace_.record(node_,"fetching_atomic_executed",width);
+            host_.wake(); trace_.record(node_,"fetching_atomic_executed",zero_length?0:width);
         } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
     void receive(const PDC_SES_req& request) {

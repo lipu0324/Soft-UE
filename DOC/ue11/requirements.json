@@ -374,7 +374,9 @@
       "summary": "线上的非取回原子操作",
       "status": "partial",
       "tests": [
-        "native_atomic_test"
+        "native_atomic_test",
+        "zero_atomic_test",
+        "libfabric_atomic_return_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -382,7 +384,7 @@
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Signed/unsigned integer widths 8/16/32/64, non-fetching arithmetic/logical/bitwise/write; FP, fetch/CAS and semantic-control coverage remain open."
+      "evidence_note": "Signed/unsigned integer widths 8/16/32/64, non-fetching arithmetic/logical/bitwise/write; zero-byte PUT passes normal authority/alignment/bounds and target completion without a memory write. Fetch/CAS now have separate SES-FETCH evidence. FP and complete semantic-control coverage remain open."
     },
     {
       "id": "SES-SIZE",
@@ -519,14 +521,15 @@
         "native_fetching_atomic_test",
         "reference_process_interop",
         "libfabric_atomic_return_test",
-        "libfabric_provider_processes"
+        "libfabric_provider_processes",
+        "zero_atomic_test"
       ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Public libfabric scalar/vector/message fetching and compare APIs support a single8–128bit integer element; all queries, masked-swap translation, result CQ fields, bad-generation retries with preserved nonzero generation, cached-loss recovery and independent provider processes are tested. Optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md."
+      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Public libfabric scalar/vector/message fetching and compare APIs support a single8–128bit integer element; all queries, masked-swap translation, result CQ fields, bad-generation retries with preserved nonzero generation, cached-loss recovery and independent provider processes are tested. Optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md. Zero-byte atomic put/get (§3.4.2.12) use normal MR checks and completion; GET performs one actual zero read, with an empty guaranteed data ACK cached through loss and local snapshot revocation/key reuse checked. See ZERO-ATOMIC.md."
     },
     {
       "id": "SES-SYNC",

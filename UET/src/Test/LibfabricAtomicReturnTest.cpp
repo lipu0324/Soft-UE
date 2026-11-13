@@ -60,7 +60,7 @@ struct AtomicReturnHarness {
         network.add_peer(ntohs(provider.address.sin_port),"127.0.0.1",ntohs(provider.address.sin_port));
     }
     void* context() { return reinterpret_cast<void*>(++next_context); }
-    void complete(void* context,void* result,size_t bytes,int error_code=0,int protocol_code=0) {
+    void complete(void* context,void* result,size_t bytes,int error_code=0,int protocol_code=0,uint64_t flags=FI_ATOMIC|FI_READ) {
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
         bool completed=false;
         while (!completed && std::chrono::steady_clock::now()<deadline) {
@@ -68,10 +68,10 @@ struct AtomicReturnHarness {
             if (count==-FI_EAVAIL) {
                 fi_cq_err_entry failure{}; CHECK(fi_cq_readerr(provider.completions,&failure,0)==1);
                 CHECK(error_code && failure.op_context==context && failure.buf==result && !failure.len &&
-                    failure.flags==(FI_ATOMIC|FI_READ) && failure.err==error_code && failure.prov_errno==protocol_code);
+                    failure.flags==flags && failure.err==error_code && failure.prov_errno==protocol_code);
                 ++errors; completed=true;
             } else if (count==1) {
-                CHECK(!error_code && entry.op_context==context && entry.buf==result && entry.len==bytes && entry.flags==(FI_ATOMIC|FI_READ));
+                CHECK(!error_code && entry.op_context==context && entry.buf==result && entry.len==bytes && entry.flags==flags);
                 ++successes; completed=true;
             } else CHECK(count==-FI_EAGAIN);
             network.progress(); runtime.progress(10000);
@@ -192,9 +192,43 @@ void validation_and_errors() {
     harness.close();
 }
 
+void zero_put_get() {
+    AtomicReturnHarness harness;
+    auto* context=harness.context();
+    CHECK(fi_atomic(harness.provider.endpoint,nullptr,0,nullptr,harness.peer,64,harness.remote.key,
+        FI_UINT64,FI_ATOMIC_WRITE,context)==0);
+    harness.complete(context,nullptr,0,0,0,FI_ATOMIC|FI_WRITE);
+    context=harness.context();
+    CHECK(fi_fetch_atomic(harness.provider.endpoint,nullptr,0,nullptr,nullptr,nullptr,harness.peer,64,harness.remote.key,
+        FI_UINT64,FI_ATOMIC_READ,context)==0);
+    harness.complete(context,nullptr,0);
+    fi_ioc result{nullptr,0};
+    context=harness.context();
+    CHECK(fi_fetch_atomicv(harness.provider.endpoint,nullptr,nullptr,0,&result,nullptr,1,harness.peer,64,harness.remote.key,
+        FI_UINT128,FI_ATOMIC_READ,context)==0);
+    harness.complete(context,nullptr,0);
+    fi_rma_ioc remote{64,0,harness.remote.key}; fi_msg_atomic message{};
+    message.rma_iov=&remote; message.rma_iov_count=1; message.addr=harness.peer; message.datatype=FI_UINT64;
+    message.op=FI_ATOMIC_READ; message.context=harness.context();
+    CHECK(fi_fetch_atomicmsg(harness.provider.endpoint,&message,&result,nullptr,1,FI_FENCE)==0);
+    harness.complete(message.context,nullptr,0);
+    context=harness.context();
+    CHECK(fi_fetch_atomic(harness.provider.endpoint,nullptr,0,nullptr,nullptr,nullptr,harness.peer,64,harness.remote.key,
+        FI_UINT64,FI_ATOMIC_WRITE,context)==0);
+    harness.complete(context,nullptr,0);
+    CHECK(fi_fetch_atomic(harness.provider.endpoint,nullptr,0,nullptr,nullptr,nullptr,harness.peer,64,harness.remote.key,
+        FI_UINT64,FI_SUM,nullptr)==-FI_EINVAL);
+    context=harness.context();
+    CHECK(fi_fetch_atomic(harness.provider.endpoint,nullptr,0,nullptr,nullptr,nullptr,harness.peer,72,harness.remote.key,
+        FI_UINT64,FI_ATOMIC_READ,context)==0);
+    harness.complete(context,nullptr,0,FI_EIO,0x1d);
+    CHECK(harness.target.memory().read(1,1,harness.remote.key,0,64)==std::vector<uint8_t>(64,0));
+    harness.close();
+}
+
 int main() {
     try {
-        operation_matrix(false); operation_matrix(true); retry_generation_and_loss(); validation_and_errors();
+        operation_matrix(false); operation_matrix(true); retry_generation_and_loss(); validation_and_errors(); zero_put_get();
         std::cout<<"PASS public fetching/CAS APIs,128bit queries, mask conversion, cached results, generation retries and CQ ownership\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

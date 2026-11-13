@@ -17,7 +17,8 @@ size/count，返回 FI_EOPNOTSUPP。两种查询 flags不能同时设置。
 原生层保存精确注册身份，每次结果放置重新校验。普通原子输入最多复制一个16 B
 元素，比较另外保存一个同宽元素，用于语义generation重试。不会把本地指针或
 结果注册key发送到网络。v/msg形式最多一个向量、一个远端元素；原子READ可以
-省略输入，结果向量仍须明确给出一个元素。
+省略输入，结果向量仍须明确给出一个元素。零字节 put/get 是 count=0 的例外，见
+[零字节操作](ZERO-ATOMIC.md)。
 
 CQ成功等待实际结果放置与正向语义完成。flags为FI_ATOMIC|FI_READ，buf指向结果，
 len为datatype的字节数（uint64为8、uint128为16），不是CAS32 B请求长度。错误也保留context、

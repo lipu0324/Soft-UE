@@ -307,10 +307,13 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         const bool valid_offset=offset<=request.request_length;
         const auto datatype=fetching_atomic?
             explicit_request->second.SESpkt.eth_header.Atomic_Operation_Extension_Header.atomic_datatype:0;
-        const uint32_t count=fetching_atomic?(datatype<=9?uint32_t{1}<<(datatype/2):0):
+        const auto atomic_operation=fetching_atomic?
+            explicit_request->second.SESpkt.eth_header.Atomic_Operation_Extension_Header.atomic_opcode:0;
+        const bool zero_atomic=fetching_atomic && !request.request_length && (atomic_operation==0x0b || atomic_operation==0x0c);
+        const uint32_t count=fetching_atomic?(datatype<=9 && !zero_atomic?uint32_t{1}<<(datatype/2):0):
             valid_offset?std::min(read_response_payload_mtu_,request.request_length-offset):0;
         if (!result.version && result.opcode==2 && result.return_code==1 && result.job_id==request.job_id &&
-            result.read_request_msg_id==request.msg_id && valid_offset && (!fetching_atomic || count) && result.message_offset==offset &&
+            result.read_request_msg_id==request.msg_id && valid_offset && (!fetching_atomic || (datatype<=9 && (count || zero_atomic))) && result.message_offset==offset &&
             result.modified_length==request.request_length && result.payload_length==count && packet.SESpkt.payload.size()==count) {
             auto response=packet.SESpkt;
             if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);

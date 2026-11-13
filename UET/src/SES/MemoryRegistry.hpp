@@ -330,11 +330,21 @@ public:
     std::vector<uint8_t> fetch_atomic_element(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                          IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
                          const std::vector<uint8_t>& operand,const std::vector<uint8_t>& compare_or_mask={},
-                         std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
+                         std::optional<uint16_t> resource_index={},bool relative_addressing=true,bool zero_length=false) {
         const auto width=integer_atomic_width(datatype);
         if (offset%width) throw MemoryAccessError(MemoryError::Alignment);
-        const auto& region=authorize(job,pid,key,offset,width,Access::Atomic,resource_index,relative_addressing);
+        if (zero_length && (operation!=IntegerAtomicOperation::Read && operation!=IntegerAtomicOperation::Write))
+            throw std::invalid_argument("zero-byte atomic is put/get only");
+        if (zero_length && (!operand.empty() || !compare_or_mask.empty())) throw std::invalid_argument("zero-byte atomic has operands");
+        const auto& region=authorize(job,pid,key,offset,zero_length?0:width,Access::Atomic,resource_index,relative_addressing);
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
+        if (zero_length) {
+            // §3.4.2.12 requires an actual zero-byte read at the selected
+            // address for GET. PUT changes no bytes; the normal protocol
+            // completion path still waits for target authorization.
+            if (operation==IntegerAtomicOperation::Read) region.storage->read(offset,nullptr,0);
+            return {};
+        }
         std::vector<uint8_t> previous(width);
         region.storage->read(offset,previous.data(),width);
         const auto next=fetching_atomic_update(previous,operand,compare_or_mask,operation,datatype);
