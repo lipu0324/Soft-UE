@@ -9,6 +9,7 @@
 #include <rdma/fi_rma.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +77,14 @@ int main(int argc,char** argv) {
         struct fi_cq_data_entry entries[8]; const ssize_t count=fi_cq_read(queue,entries,8);
         if (count==-FI_EAVAIL) {
             struct fi_cq_err_entry error={0}; CHECK(fi_cq_readerr(queue,&error,0)==1);
+            // Preserve the first protocol/application failure before CHECK's
+            // early exit can produce a much longer sanitizer cleanup report.
+            if (server || !failure_started || error.op_context!=(void*)3 ||
+                error.prov_errno!=(ordered?4:5) || errors)
+                fprintf(stderr,"unexpected recovery CQ error server=%d context=%llu err=%d provider=%d "
+                    "flags=%llu sends=%zu receives=%zu errors=%zu failure_started=%d elapsed=%.6f\n",
+                    server,(unsigned long long)(uintptr_t)error.op_context,error.err,error.prov_errno,
+                    (unsigned long long)error.flags,sends,receives,errors,failure_started,monotonic_seconds()-started);
             CHECK(!server && failure_started && error.op_context==(void*)3 && error.prov_errno==(ordered?4:5) && !errors);
             ++errors;
         } else if (count>0) for (ssize_t index=0;index<count;++index) {

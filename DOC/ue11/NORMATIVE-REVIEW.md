@@ -540,7 +540,7 @@ SHOULD采用逐包定时器/时间戳，或选择每PDC定时器；当前每PDC�
 | UE11-p0377-003 | §3.5.15.3，RTO跨页 | PDC维护RTO；结合下一页采用推荐的逐包timer/timestamp或每PDC替代方案。 | 当前每PDC拥有RTOTimer，逐PSN事件由注入时钟驱动；MAC出队启动及取消/重用已有回归。 |
 | UE11-p0386-001 | §3.5.15.5.1，ACK丢失恢复 | 判定ACK丢失后发ACK Request或原请求；建议优先ACK Request，READ数据例外。 | 普通请求SACK后转查询已有覆盖；READ例外留给M5真实READ实现。 |
 | UE11-p0386-002 | §3.5.16，CP全集 | 表3-82全部CP类型必须支持，TC按§3.6.4.7。 | NOOP/查询/Clear/Close/Probe/NO_NEG部分完成；Credit/Credit Request及完整Negotiation未完成。 |
-| UE11-p0386-003 | §3.5.16，ROD/RODL控制TC | 有唯一PSN的ROD/RODL CP必须用PDS Request TC。 | 已补ROD本地分类元数据及NO_TRIM码点，正在验证NSCC/trimming/双向Close组合；RODL未实现。 |
+| UE11-p0386-003 | §3.5.16，ROD/RODL控制TC | 有唯一PSN的ROD/RODL CP必须用PDS Request TC。 | 已补ROD本地分类元数据及NO_TRIM码点，32种NSCC/trimming/双向Close组合通过普通和sanitizer定向回归；RODL未实现。 |
 | UE11-p0387-001 | §3.5.16，CP_ACK格式 | 专用payload使用CP_ACK next header；不能用在ACK_CC/CCX。 | Close/NO_NEG golden及标准codec部分覆盖；更多CP_ACK和非法组合仍需验收。 |
 | UE11-p0387-002 | §3.5.16，CP建连限制 | 仅NOOP/Negotiation可带SYN启动，其余必须等待PDC建连。 | control_establishment_test已验证已知其他类型SYN拒绝；未知类型另按静默丢弃规则处理。 |
 
@@ -603,6 +603,93 @@ CP字段义务按表3-82分开，唯一PSN不包括ACK查询、Clear、Probe和C
 | UE11-p0426-001 | §3.5.24，故障隔离 | 正常事件不改变健康PDC；unexpected事件不能影响其他良性连接。 | 资源压力多peer、错误码/peer绑定和上下文复用已有测试；完整事件矩阵仍需扩展。 |
 | UE11-p0427-001 | §3.5.24.2，PDC_ERR计数 | source必须计数，destination建议计数，可用事件位。 | 当前部分generic event_cnt与typed ingress计数，尚无完整按PDC_ERR分类的管理快照；M7仍需补齐。 |
 
-复核进度为上述 420 个候选的分类与义务拆分；其余 309 个候选、表格/算法的额外
+## 第 421～440 个候选
+
+错误总则要服从unknown type、无效网络头、trimmed CP等明确静默丢弃例外。
+NSCC是必选；RCCC/TFC是可选算法，但本路线图仍计划在M5实现。CSIG-Reflect的
+必选范围是CSIG-capable FEP，当前不能因只实现普通NSCC就公布CSIG能力。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0427-002 | §3.5.24.2，拒绝交付诊断 | 适用的请求/CP交付失败返回说明原因的PDS NACK，遵守具体禁回包例外。 | 未知DPDCID、资源准入及模式/SYN错误部分覆盖；完整表3-68事件生成仍缺。 |
+| UE11-p0427-003 | §3.5.24.3，不可恢复事件 | fatal关闭、释放资源、向SES报告失败并丢弃关联包。 | 重试耗尽、连接复用及目标失败完成已有测试；所有fatal生成与关闭CP的矩阵仍需补齐。 |
+| UE11-p0427-004 | §3.5.24.3，fatal计数 | source必须计数、destination建议计数。 | 当前generic event_cnt与失败事件不构成完整fatal管理计数接口；M7缺口。 |
+| UE11-p0435-001 | §3.5.26，TSS/CRC互斥 | UET_DATA_PROTECT=TSS时不再使用CRC，由ICV保护。 | M6缺失；当前crc开关不是完整DATA_PROTECT协商或配置类型。 |
+| UE11-p0435-002 | §3.5.26，发送CRC | CRC模式下所有包包括CP按规定覆盖范围计算并附尾。 | 独立reference CRC、golden、IPv4/IPv6/native/UDP与控制包回归已有覆盖；未实现封装另验。 |
+| UE11-p0436-001 | §3.5.26，接收CRC | CRC模式验证所有正常包；trimmed例外按缺失CRC处理。 | CRC破坏、保留位与unknown type完整性优先，以及trim路径已有测试。 |
+| UE11-p0437-001 | §3.5.26.1，UFH_16 CRC | UFH_16必须有CRC，其中携带PSN状态并按专门覆盖范围计算。 | M8缺失，不能复用普通CRC尾部而忽略PSN位。 |
+| UE11-p0440-001 | §3.6.2，算法支持范围 | NSCC必选；RCCC/TFC可选且可按允许组合运行。 | NSCC已接入真实发送准入；RCCC/TFC按路线图M5待做，各自不得被能力发现提前公布。 |
+| UE11-p0441-001 | §3.6.4，网络遥测范围 | 网络必选ECN；端点支持trim，交换机trim可选。 | Fabric的瞬时出队ECN、主机trim接收/NACK和可选出口trimming已有测试。 |
+| UE11-p0441-002 | §3.6.4.1，ECN基础 | 端点与交换机必须支持ECN。 | ECT到CE、CE回显与CRC/IPv4 checksum保留已有测试；非IP UFH路径另验。 |
+| UE11-p0441-003 | §3.6.4.1，瞬时队列 | 交换机必须支持用瞬时队列深度决定ECN，可选择确定性/概率策略。 | 当前选出队确定性阈值，含在服务帧字节；Fabric解析测试和实验已有证据。 |
+| UE11-p0441-004 | §3.6.4.1，ECT条件 | NSCC或依赖ECN的路径算法启用时，所有UET数据设置ECT。 | NSCC的可靠/UUD数据已标ECT；其他尚未启用路径算法未来需独立验证。 |
+| UE11-p0441-005 | §3.6.4.2，service time跨页 | 目标测量接收到ACK发送的延迟，反馈后源端从RTT扣除；高优先返回为建议且需服从ROD CP同序。 | MAC首字节通知、ACK发送时stamp及Karn已有回归；无MAC通知适配器明确采用提交边界近似。 |
+| UE11-p0443-001 | §3.6.4.4，trim端点 | 按DSCP接收trimmed数据并产生NACK；交换机生成可不开启。 | 主机和可选交换机路径均已实现，首次SYN被trim不分配上下文。 |
+| UE11-p0444-001 | §3.6.4.4，MIN_TRIM_SIZE | 大小必须覆盖PDS request、可选CC_State与所有外层封装。 | 当前24字节IP payload覆盖已实现头；TSS/CC_Request/其他tunnel启用前必须重算并校验。 |
+| UE11-p0449-001 | §3.6.4.7.3，大READ接收 | lossless下返回方向大READ PDS Request必须可无条件从网络接受以防死锁。 | M5/M7缺失；不能把普通前向SES消息信用拒绝机制直接套到返回READ。 |
+| UE11-p0450-001 | §3.6.4.8，CSIG反射条件 | sender CC/路径选择使用CSIG时开启Reflect，回ACK_CCX/NACK_CCX携带至多128位状态。 | CSIG及扩展ACK格式未实现；普通ACK_CC不能替代该能力。 |
+| UE11-p0450-002 | §3.6.4.8，CSIG-capable端点 | 支持CSIG的FEP必须实现Reflect，并在NSCC启用时开启。 | 当前不公布CSIG；M5需能力协商、启用条件和反射联合验收。 |
+| UE11-p0450-003 | §3.6.4.8，正反射跨页 | Reflect已开且收到CSIG tag，正响应使用ACK_CCX。 | M5缺失，不能静默丢掉tag再发普通ACK。 |
+| UE11-p0451-001 | §3.6.4.8，扩展反馈字段 | 负响应用NACK_CCX；按NSCC_CSIG/RCCC_CSIG填算法字段并附64位Reflection Header。 | M5缺失；需独立线格式、源算法解释和错误/保留type测试。 |
+
+## 第 441～460 个候选
+
+CCC的共享键不仅有目的端，还包括流量类组与算法语义。当前模型只启用一种数据TC
+组和NSCC，不能将其内部连接键称为已实现线上RCCC CCC_ID。信用是发送前的严格
+准入条件，不可由发送后计数或超时重传代替。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0456-001 | §3.6.6，TC组隔离 | 同源同目的但不同TC映射的PDC组必须独立CCC。 | 当前只有一个数据TC组；多组配置/键隔离未实现，不能复用单组共享CCC证据。 |
+| UE11-p0458-001 | §3.6.8.1.1，CCC生命周期 | 首个PDC创建时分配CCC，最后PDC销毁后可保留NSCC缓存；RCCC/TFC另有关闭规则。 | 当前NSCC在首次使用时惰性建立状态；控制建连期间的资源预留/失败回滚还需补齐。 |
+| UE11-p0459-001 | §3.6.8.1.1，CCC状态约束 | IDLE/ACTIVE/READY/PENDING随发送准入和业务改变；仅IDLE或全部关联PDC失败后可移除。 | 当前窗口/在途/连接关闭路径部分表达这些事实，尚无完整显式状态及所有转换测试。 |
+| UE11-p0463-001 | §3.6.9.2.3，可选OOO计数 | 选择计算时支持16位每PDC乱序计数，含最大活动PSN范围。 | 未选择实际OOO计数，不能把placeholder当真实计数；未来早期丢失检测另验。 |
+| UE11-p0463-002 | §3.6.9.2.3，无OOO计数 | 未计算时必须发FFFF表示无效。 | 默认congestion_ack及NSCC反馈采用FFFF，反馈测试已有覆盖。 |
+| UE11-p0463-003 | §3.6.9.2.4，service_time=0 | 零表示无效，应忽略。 | NSCC将零转换为零扣除量，不作为有效额外延迟；编码/RTT与stamp回归覆盖。 |
+| UE11-p0464-001 | §3.6.9.3.1，信用准入 | RCCC/TFC信用耗尽停止发送，不能超分配或记到负数。 | M5缺失；当前NSCC允许的有符号inflight残差不是信用计数实现。 |
+| UE11-p0470-001 | §3.6.10.6，丢失记账 | RTO/推断丢失时从原包状态计算名义大小。 | 缓存congestion_nominal_bytes、trim不按短包长度扣费、迟到ACK取消未发送retry debit已有回归。 |
+| UE11-p0479-001 | §3.6.13.1，重传RTT歧义 | 已重传但ACK未回显RETX时，不得更新RTT；推荐逐包发送时间。 | MAC时间、宽attempt与Karn检查已有回归；可选其他算法仍未实现。 |
+| UE11-p0479-002 | §3.6.13.2，接收窗口惩罚 | 反馈Rcv_Cwnd_Pend必须0～127并按算法影响源窗口。 | 7位线字段/NSCC计算已有；可配置目标处理速率及动态惩罚产生器仍不完整。 |
+| UE11-p0490-001 | §3.6.13.10，CSIG maxDelay条件 | 选用时每包插入maxDelay，缺失计数/阈值后永久fallback RTT，管理可响应。 | CSIG未启用；M5需独立状态机、阈值与缺失/恢复测试，不能将RTT模式当fallback实现。 |
+| UE11-p0492-001 | §3.6.14.1，线上CCC ID | RCCC/TFC使用RUD_CC_REQ/ROD_CC_REQ，携带ccc_id/credit_target。 | M5缺失；当前标准codec明确拒绝这些已定义格式。 |
+| UE11-p0493-001 | §3.6.14.1，信用CCC共享 | RUD建议共享，ROD不得共享；同目的端CCC_ID唯一，跨目的可复用。 | 当前NSCC共享/独立键部分对应，但未实现RCCC/TFC分配器与wire ID。 |
+| UE11-p0493-002 | §3.6.14.1，目标查找 | SYN按源地址/CCC_ID查找目标的source与destination CCC；非SYN使用已绑定PDC。 | M5缺失；普通PDC lookup不构成信用CCC lookup。 |
+| UE11-p0493-003 | §3.6.14.1，CCC ID作用域 | 同目的不同实例不得重用CCC_ID，可跨另一PDC的前/返回方向共享。 | M5缺失；需双向关联和TC组隔离联合验证。 |
+| UE11-p0493-004 | §3.6.14.1，关闭组隔离 | 旧CCC全部PDC正在关闭时，新PDC必须分配新CCC，避免无信用死锁。 | M5缺失；NSCC无信用模式的普通复用不能证明该条件。 |
+| UE11-p0494-001 | §3.6.14.1，Credit Request选择 | 无信用且未请求过时建议发请求，但必须使用先前已存在的PDC。 | M5缺失；须避免借尚未建成的新PDC发送信用查询。 |
+| UE11-p0494-002 | §3.6.14.1，RCCC关闭 | 最后一个PDC关闭时必须关闭其RCCC CCC。 | M5缺失；不能沿用NSCC允许保留拥塞缓存的策略。 |
+| UE11-p0505-001 | §3.6.15，TFC准入 | 无信用不得发送数据包。 | M5缺失；需要等待/唤醒、重传和不同目的信用隔离。 |
+| UE11-p0505-002 | §3.6.15，TFC反馈 | Credit CP或CC_CREDIT携带24位信用；OOO必须FFFF且接收忽略。 | M5缺失；共享字段格式不意味着可套用NSCC received-byte计数。 |
+
+## 第 461～480 个候选
+
+TFC的正信用残量可以允许一整个MTU包，目的端必须为此预留空间；不能只比较
+`credit >= packet_bytes`就称为实现了规范算法。PCM是路线图明确安排在M8后的独立
+增强，以下义务仅在启用PCM时适用。表3-110的逐行候选不是完整表格的替代物。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0505-003 | §3.6.15，TFC正残量 | credit>0即可发送；目的端必须可接收MTU-sized包，与当前包长无关。 | M5缺失，未来信用准入/缓冲预留必须联合验证，不能直接套用NSCC字节窗口比较。 |
+| UE11-p0506-001 | §3.6.15，cell计费 | 支持256字节～9KB范围、256字节倍数的cell；默认256，按cell计算credit_used。 | M5缺失；需边界、舍入及跨cell payload测试。 |
+| UE11-p0506-002 | §3.6.15，overhead容量 | 计入包头/元数据等目标开销，已分配信用必须保证所有合法包可存储。 | M5/M7缺失；Fabric网络缓冲与目标TFC缓冲不是同一资源。 |
+| UE11-p0507-001 | §3.6.15，配置冻结 | 活动PDC不能改变cell size/overhead；非默认值须发送前带外配置。 | M5缺失；管理配置应在建连前验证并绑定到上下文。 |
+| UE11-p0507-002 | §3.6.15.2，初始信用 | 初始credit至少overhead；SES NO_OP可带目标信用启动PDC，Credit Request CP不能启动。 | M5缺失；需零overhead配置、NO_OP启动及首次信用丢失恢复测试。 |
+| UE11-p0508-001 | §3.6.15.2，TFC共享 | 同CCC_ID关联同CCC，不同ID关联独立CCC。 | M5缺失，不能把普通目标地址相同等同于显式CCC_ID相同。 |
+| UE11-p0508-002 | §3.6.15.3，TFC关闭竞态 | 最后PDC进入QUIESCE后，不得给新PDC复用该CCC。 | M5缺失；需要目标释放buffer与源新建同时发生的确定性事件测试。 |
+| UE11-p0513-001 | §3.6.16.6.1，多端口条件 | GetSendParams的可用端口列表至少含一个空闲端口。 | 当前单IPacketPort主机模型，不宣称多端口CCC调度；扩展时须验证无空闲情况不会错误调用。 |
+| UE11-p0513-002 | §3.6.16.6.2，共享IP多端口条件 | 选择的entropy必须稳定映射到同一出端口，保证反馈路径无歧义。 | 当前entropy控制ECMP路径但没有多NIC端口抽象；后续独立能力，不套用单端口证据。 |
+| UE11-p0519-001 | §3.6.18.1，PCM类型条件 | 必须支持整数；浮点可选，未支持时使用浮点的程序必须编译失败。 | M8后PCM增强未实现；未来编译器/验证器拒绝机制不可用运行时静默转换代替。 |
+| UE11-p0522-001 | §3.6.18.4，PCM默认信号 | PCM必须支持默认/必选信号集，可扩展optional/vendor信号。 | PCM未启用；事件Trace不是标准PCM信号接口。 |
+| UE11-p0522-002 | §3.6.18.4.1，PCM累积器 | 支持表3-106全部运算，并结合表3-110的信号必选组合。 | PCM未启用；未来逐运算类型/溢出/初始化验收。 |
+| UE11-p0523-001 | §3.6.18.4.2，PCM读取 | uet_signal_get必选，set/update可选。 | PCM未启用；不能把内部统计访问器当作标准函数。 |
+| UE11-p0524-001 | §3.6.18.4.3，PCM必选信号 | 表3-109的tx/rx/time触发与req/ack/ctl分类均须支持。 | PCM未启用；完整表3-109另需拆分和字段位宽证据。 |
+| UE11-p0527-001 | 表3-110，PCM条件项 | uet_rx_ack支持sum；last可选，其余N/A。 | PCM未启用；按整表支持矩阵验收。 |
+| UE11-p0527-002 | 表3-110，PCM条件项 | uet_rx_ack_bytes支持sum和last。 | PCM未启用。 |
+| UE11-p0527-003 | 表3-110，PCM条件项 | uet_rx_ack_count支持sum；last可选。 | PCM未启用。 |
+| UE11-p0527-004 | 表3-110，PCM条件项 | uet_rx_ack_ecn支持last；sum可选。 | PCM未启用。 |
+| UE11-p0527-005 | 表3-110，PCM条件项 | uet_rx_ack_rtt支持sum/max/min/last。 | PCM未启用；NSCC RTT状态不是该可编程接口的证据。 |
+| UE11-p0527-006 | 表3-110，PCM条件项 | uet_rx_ack_svc支持sum/last；max/min可选。 | PCM未启用。 |
+
+复核进度为上述 480 个候选的分类与义务拆分；其余 249 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。
