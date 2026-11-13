@@ -3,6 +3,7 @@
 #include "PacketTrimming.hpp"
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace UET::NetworkLayer {
@@ -26,6 +27,22 @@ struct DecodedPacket {
     WireOptions network;
     PDStoNET_pkt packet{};
     uint32_t nominal_packet_size=0; // transport_pktsize+40, §3.6.12.2.
+};
+
+// Typed ingress errors preserve the mandatory silent-drop diagnostics without
+// parsing exception strings. Known but unimplemented formats and corrupt
+// packets remain ordinary invalid_argument errors, not unknown wire types.
+class PdsDecodeError : public std::invalid_argument {
+public:
+    enum class Reason { UnknownType, UnknownControlType };
+    PdsDecodeError(Reason reason,uint8_t value)
+        : std::invalid_argument(reason==Reason::UnknownType?"unknown PDS type":"unknown PDS control type"),
+          reason_(reason),value_(value) {}
+    Reason reason() const { return reason_; }
+    uint8_t value() const { return value_; }
+private:
+    Reason reason_;
+    uint8_t value_;
 };
 
 // Initial supported subset: RUD/ROD requests, ACK, NACK, CP; standard SES

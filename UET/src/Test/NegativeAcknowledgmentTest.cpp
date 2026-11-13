@@ -87,7 +87,19 @@ void acknowledgment_beats_delayed_retry(bool semantic) {
     auto packet=nack(UET_RCVD_SES_PROCG); sender.rxNack(&packet);
     loop.run_until(100); auto response=acknowledgment(semantic); sender.rxAck(&response);
     loop.run_until(200); sender.openChk();
-    CHECK(sender.tx_pkt_q.size()==1); // No duplicate data was generated.
+    size_t data_packets=0,clear_commands=0;
+    while (!sender.tx_pkt_q.empty()) {
+        const auto& sent=sender.tx_pkt_q.front();
+        if (sent.PDS_type==RUOD_req_header) ++data_packets;
+        else {
+            CHECK(sent.PDS_type==RUOD_cp_header && sent.PDS_header.RUOD_cp_header.ctl_type==Clear_cmd);
+            ++clear_commands;
+        }
+        sender.tx_pkt_q.pop();
+    }
+    // The original data is still queued in this direct-kernel fixture. A
+    // semantic ACK additionally sends idle Clear (§3.5.11.4.3), never DATA.
+    CHECK(data_packets==1 && clear_commands==(semantic?1u:0u));
     if (semantic) CHECK(sender.tx_pkt_map.empty() && loop.pending()==0);
     else {
         CHECK(sender.tx_pkt_map.at(1000).delivery_confirmed && sender.tx_pkt_map.at(1000).retry_cnt==0);

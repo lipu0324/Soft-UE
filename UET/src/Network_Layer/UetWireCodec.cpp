@@ -231,6 +231,12 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
 PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
     PDStoNET_pkt packet{}; Reader reader(bytes,size);
     const auto prologue=reader.take(2), type=prologue>>11, flags=prologue&0x7f;
+    // Table 3-39 defines 1..15; zero and 16..31 are reserved. Classify
+    // before interpreting next_hdr, after the outer integrity check. A known
+    // format disabled in this implementation must not become TYPE_INVALID.
+    if (!type || type>=16) throw PdsDecodeError(PdsDecodeError::Reason::UnknownType,type);
+    if (type==11 && ((prologue>>7)&0xf)>=10)
+        throw PdsDecodeError(PdsDecodeError::Reason::UnknownControlType,(prologue>>7)&0xf);
     PDS_next_hdr next=type==11 ? UET_HDR_NONE : next_host((prologue>>7)&0xf);
     if (type==2 || type==3) {
         // RUD/ROD share a 12-byte header. During SYN the final two bytes
@@ -392,6 +398,7 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         packet.trimmed_last_hop=trimming->last_hop_dscp && network_options.dscp==*trimming->last_hop_dscp;
         const auto* pds=bytes+start+transport;
         const auto type=get(pds,2)>>11;
+        if (!type || type>=16) throw PdsDecodeError(PdsDecodeError::Reason::UnknownType,type);
         if (type==2 || type==3) {
             if (size<start+transport+12) throw std::invalid_argument("incomplete trimmed PDS request");
             packet.PDS_type=RUOD_req_header;

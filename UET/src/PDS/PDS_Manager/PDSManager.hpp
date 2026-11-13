@@ -310,6 +310,14 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
+        if (!received_packet.trimmed && received_packet.PDS_type==RUOD_cp_header &&
+            received_packet.PDS_header.RUOD_cp_header.ctl_type>=10) {
+            // Protect direct protocol-queue adapters as well as wire ingress.
+            // Unknown CPs may have PSN=0; sending a NACK or learning a peer
+            // from them would violate §3.5.11.3 and corrupt connection state.
+            if (runtime_) runtime_->pds_error_counters.record_invalid_control_type();
+            ++event_cnt; return;
+        }
         if (received_packet.trimmed) {
             // Trimmed headers are not authenticated by the missing CRC. Resolve
             // only an already-bound tuple for NACK generation; never allocate

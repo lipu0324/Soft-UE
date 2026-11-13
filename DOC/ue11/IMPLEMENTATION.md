@@ -9,6 +9,9 @@ disabled.
 See [the baseline audit](BASELINE-AUDIT.md) for the actual protocol paths exercised
 by each regression, concrete remaining placeholders and the next gated work.
 
+Unknown PDS/control types are silently dropped before connection state changes,
+with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating
@@ -337,7 +340,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 340 are classified and split into obligations
+Profile classification. The first 400 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements
@@ -345,6 +348,11 @@ are verified. A `verified` implementation task such as deterministic replay is
 not an assertion of UE compliance.
 
 Known specification/reference differences requiring explicit review:
+
+- Table 3-82 assigns PCM Telegram `ctl_type=0x10`, which cannot fit the
+  four-bit field in Table 3-48 (10..15 are reserved there). The rendered page
+  398 confirms the value. No codepoint is invented or truncated; PCM remains
+  an unimplemented enhancement after M8.
 
 - Section 3.3 defines four Profiles; section 8 retains old three-Profile wording.
   Use section 3.3 for this roadmap and record the inconsistency.

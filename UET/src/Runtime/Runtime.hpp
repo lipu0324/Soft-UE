@@ -1,6 +1,7 @@
 #pragma once
 #include "PdcEvents.hpp"
 #include "RetryTiming.hpp"
+#include "../PDS/ReceiveDiagnostics.hpp"
 
 #include <chrono>
 #include <array>
@@ -81,6 +82,7 @@ struct Services {
     bool enable_automatic_window_probes=true; // May be disabled for isolated admission experiments.
     bool actual_transmit_notifications=false; // Set by a port with a first-bit departure boundary.
     uint64_t next_pdc_incarnation=0;
+    PDS::ReceiveErrorCounters pds_error_counters;
 };
 
 class EventLoop final : public IClock, public ITimerQueue {

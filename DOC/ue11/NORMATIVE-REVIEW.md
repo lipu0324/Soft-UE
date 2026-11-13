@@ -463,8 +463,8 @@ REQ_CLEAR 位解释：§3.5.11.4.3 和 PDS_Clear_Time 的定义还要求空闲�
 
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
-| UE11-p0347-001 | §3.5.11.1，未知type | 未识别PDS type递增PDS_TYPE_INVALID，丢弃且无响应。 | codec拒绝未知格式，但Host目前只有通用malformed trace，分类计数仍缺。 |
-| UE11-p0347-002 | §3.5.11.3，未知控制类型 | 未识别ctl_type递增PDS_CTL_TYPE_INVALID，丢弃且不改变PDC。 | 已发现unknown CP带SYN可能走通用错误NACK，需在建连/peer学习前明确分类和丢弃。 |
+| UE11-p0347-001 | §3.5.11.1，未知type | 未识别PDS type递增PDS_TYPE_INVALID，丢弃且无响应。 | 已补完整性检查后的分类异常与每主机16位计数；已定义但未实现类型另行拒绝，不误标未知。 |
+| UE11-p0347-002 | §3.5.11.3，未知控制类型 | 未识别ctl_type递增PDS_CTL_TYPE_INVALID，丢弃且不改变PDC。 | 已补wire及直接队列入口静默丢弃，覆盖SYN/已建连/PSN=0/伪造peer及后续合法请求；见PDS-INVALID-TYPES.md。 |
 | UE11-p0348-001 | §3.5.11.4.3，累计Clear | RUD/ROD/RODL支持Clear，表示≤该PSN的ACK均已收到。 | RUD/ROD语义完成与Clear区分已有覆盖；RODL未完成。 |
 | UE11-p0348-002 | §3.5.11.4.3，Clear初始化 | 两个方向初始化为Start_PSN−1。 | init与双向控制、回绕有覆盖，反向READ/RODL还需独立验收。 |
 | UE11-p0349-001 | §3.5.11.4.3，空闲Clear | 无请求捎带时立即或定时发送Clear Command；使用PDS_Clear_Time计时是SHOULD。 | 已补立即策略；普通及sanitizer定向回归验证req=0默认ACK也推进Clear、无额外应用请求即可释放错误尾部，延时合并未启用。 |
@@ -484,6 +484,95 @@ REQ_CLEAR 位解释：§3.5.11.4.3 和 PDS_Clear_Time 的定义还要求空闲�
 | UE11-p0359-001 | §3.5.12.2，响应entropy | 从触发包复制原生entropy或UDP源端口。 | native/UDP、重放、ECN/RETX和Probe有回归；未实现封装另验。 |
 | UE11-p0359-002 | §3.5.12.2，逐包ACK | 必须支持ACK per packet，可选coalescing。 | 当前逐包策略覆盖，不声明可选coalescing已经实现。 |
 
-复核进度为上述 340 个候选的分类与义务拆分；其余 389 个候选、表格/算法的额外
+## 第 341～360 个候选
+
+这批区分逐包 ACK、可选 ACK 合并和 RODL 的反向累计确认。§3.5.12.2 对 CP 的
+`UET_HDR_NONE` 概述还要结合 §3.5.16 的专用 `UET_HDR_CP_ACK` 格式，不能删除
+Close/Negotiation 的有效载荷。第 352 个候选的 stateful response 位于 RODL
+反向确认上下文，要求单独 ACK，不能仅从“ACK packet”一词推导所有 scale-out 响应类型。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0359-003 | §3.5.12.2，AR触发 | 收到AR=1的请求必须ACK，与ACK-per-packet配置无关。 | 当前逐包SES响应及控制回归覆盖；资源拒绝时按规定返回NACK，未启用合并策略。 |
+| UE11-p0359-004 | §3.5.12.2，CP响应 | 普通CP确认不携带SES头；专用CP_ACK按§3.5.16编码。 | Clear无ACK，NOOP/Probe及Close/Negotiation各有测试；未来Credit等仍需分别验证。 |
+| UE11-p0359-005 | §3.5.12.2，ACK范围 | ACK_PSN低于有效CACK或高于最高已发送PSN时不得更新PDC。 | I/T_PDC在CMS/交付/语义处理前检查序号；窗口、回绕和未来ACK覆盖仍应集中补强。 |
+| UE11-p0359-006 | §3.5.12.3，逐包AR | 启用ACK-per-packet时，每个请求设置AR。 | 当前发送请求强制AR；标准codec/恢复测试检查，其他可靠模式待实现。 |
+| UE11-p0359-007 | §3.5.12.3，DEFAULT推断 | 丢失ACK的PSN严格低于CACK时推断DEFAULT。 | selective_acknowledgment_test验证严格高于与SACK不能替代语义结果。 |
+| UE11-p0359-008 | §3.5.12.3.1，逐包SACK | 64位；只在实际收到、交给SES且取得响应后置位；零位不携带否定信息。 | 当前从完成集合/响应缓存构造，不使用仅接收集合；异步SES与保证错误测试覆盖，其他模式仍缺。 |
+| UE11-p0360-001 | §3.5.12.4，可选合并条件 | 选择合并时依表3-61设置AR，需逐条复核该表。 | 未启用ACK合并；不把逐包策略的通过证据套用到合并。 |
+| UE11-p0360-002 | §3.5.12.4，RUD/ROD合并 | 表3-62触发、ACK_CC/CCX、ACK_PSN对应显式响应，其余已确认PSN按DEFAULT处理。 | 合并发送策略未实现；接收端语义推断仍保留严格CACK规则，不能由SACK推断DEFAULT。 |
+| UE11-p0360-003 | §3.5.12.4，RODL合并 | 按表3-62及UFH_16/idle例外，可用反向ACK状态替代独立ACK。 | M8缺失；不得复用scale-out的全部触发条件。 |
+| UE11-p0360-004 | §3.5.12.4，语义与收据分离 | CACK严格推进才能推断DEFAULT；SACK不能推断DEFAULT。 | processSemanticAcknowledgment与对应回归已分离交付/语义状态。 |
+| UE11-p0362-001 | §3.5.12.4.3，合并SACK | 各Profile支持64位SACK；收到并交付SES才置位，零位不是丢失证据。 | RUD逐包接收/发送与Probe部分实现；合并及其他Profile证据仍缺。 |
+| UE11-p0364-001 | §3.5.12.4.4，RODL有状态响应 | 非DEFAULT响应必须用ACK传递，不能仅捎带反向CACK。 | M8缺失；候选提取的章节归属跨越小节，按原文上下文归类。 |
+| UE11-p0365-001 | §3.5.12.4.4，RODL序号恢复 | 双方维护完整32位CACK，按12/16位低位检测回绕并恢复高位。 | M8缺失；需单独测试多个回绕及低位歧义边界。 |
+| UE11-p0365-002 | §3.5.12.4.4，RODL完整状态 | 双方维护完整32位PSN/CLEAR_PSN。 | M8缺失；不能把wire位宽直接作为内部状态位宽。 |
+| UE11-p0365-003 | §3.5.12.4.4，RODL空闲推进 | 无SES业务但Clear/CACK待更新时必须发ACK或控制包。 | M8缺失；当前RUD/ROD空闲Clear不构成RODL证据。 |
+| UE11-p0365-004 | §3.5.12.5，保证响应阻挡 | 保证响应未Clear前CACK不得推进到或越过该PSN。 | 保证错误缓存、Clear、SACK及回绕已有测试；新READ/fetch模式仍需验收。 |
+| UE11-p0365-005 | §3.5.12.5，显式结果优先 | 先处理ACK_PSN携带的非DEFAULT响应，再为允许的其余PSN推断DEFAULT并标记完成。 | processSemanticAcknowledgment先显式后累计，防止错误被后续成功覆盖；对应测试已覆盖。 |
+| UE11-p0366-001 | §3.5.12.6，目的ACK窗口 | 仅在允许窗口或Clear到CACK例外区间ACK，≤Clear不再ACK。 | RUD窗口/缩窗/重复与Clear部分覆盖；动态本地MPR和全CP边界还需补强。 |
+| UE11-p0366-002 | §3.5.12.6，源窗口 | 不发高于CACK+MP_RANGE的新包；缩窗后允许重传。 | PeerSequenceWindow独立于本地容量，MPR边界/缩窗/重传已有回归。 |
+| UE11-p0367-001 | §3.5.12.7，NACK生成 | 按表3-66；回显触发包RETX与entropy。 | 全码分类、RUD/ROD恢复及反馈触发测试部分覆盖；完整表3-66仍需逐行映射。 |
+
+## 第 361～380 个候选
+
+表3-66的禁发NACK条件不能被一般错误处理覆盖。§3.5.15.3在下一页继续说明
+SHOULD采用逐包定时器/时间戳，或选择每PDC定时器；当前每PDC的`RTOTimer`
+管理逐PSN事件，按这段续文采用逐包方案，不把第一页的概述解释为必须删除逐包恢复。
+本批还发现ROD唯一PSN控制包的TC映射需要独立检查，不能把所有CP都映射到ACK TC。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0368-001 | 表3-66，六类触发 | 本地资源丢弃/trim/未收到的ACK查询/规定UET错误产生NACK；窗口外与网络头无效不得NACK。 | 资源准入、trim、ACK查询和codec部分覆盖；新建窗口拒绝与ACK窗口丢弃需区分，完整逐行证据仍待整理。 |
+| UE11-p0369-001 | §3.5.12.7，错误分类 | NORMAL/PDC_ERR/PDC_FATAL分别处理，fatal发送者/接收者关闭PDC。 | negative_acknowledgment_test覆盖所有码的source action；本地fatal生成后关闭的全矩阵仍需补强。 |
+| UE11-p0370-001 | §3.5.12.7，配置支持 | 支持表3-67列出的必选变量。 | RTO初始值、1～4组NACK延迟和公共重试预算已配置；独立NACK预算为未选择可选项。 |
+| UE11-p0370-002 | 表3-67，多项配置 | RTO_Init_Time、NACK_Retx_Time、Max_RTO_Retx_Cnt及可选Max_NACK_Retx_Cnt分开解释。 | RetryTiming/RetryLimit测试覆盖纳秒范围、零延迟、0～14/15无限及原因保存；新模式仍需接入。 |
+| UE11-p0370-003 | §3.5.12.7，跨页RTO算法 | 超时重传、指数增加；NACK等待后重传并重启RTO；Probe允许暂停。 | 逐包MAC启动、timeout_retry_count和NACK不增加退避已有覆盖；Probe采用独立恢复事件，组合矩阵仍部分完成。 |
+| UE11-p0371-001 | §3.5.12.7，有效NACK码 | 发送码必须来自表3-68；可按实现资源粒度选择合法码。 | 全256值分类、保留值拒绝和实际资源NACK已有测试；尚无所有合法码的真实生成路径。 |
+| UE11-p0371-002 | 表3-68，接收动作 | 每个合法码执行规定source action，不能统一视为重传。 | NORMAL/fatal/New_Start分类已有；New_Start安全建连动作仍缺，不能因分类正确通过全项。 |
+| UE11-p0373-001 | §3.5.12.7，NACK保护 | 不可trimmable，trimmed NACK丢弃；越界NACK除计数外不能更新状态。 | trim与全码/未来PSN/未绑定peer回归覆盖；可选trim诊断计数尚不完整。 |
+| UE11-p0374-001 | §3.5.13，推断响应 | 推断成功时构造DEFAULT；若支持NO_RESPONSE，需独立状态区分。 | 当前DEFAULT helper与显式NO_RESPONSE恢复分离；未声称所有可选NO_RESPONSE路径完整。 |
+| UE11-p0375-001 | §3.5.13，重复/查询响应 | 已完成非保证请求构造表3-69 DEFAULT；SES处理中按规则NACK。 | ACK Request、重复PSN、首错缓存及JobID恢复已有测试；READ缺失时不套用普通DEFAULT。 |
+| UE11-p0376-001 | §3.5.15，丢失检测总则 | 必须实现表3-70的必选检测方法。 | trimming/NACK/RTO已接通；新模式与TSS组合仍缺。 |
+| UE11-p0376-002 | 表3-70，分层义务 | trimming/NACK/RTO为MUST；请求早期检测和ACK丢失早期检测为SHOULD。 | 三种基础方法已有；SHOULD项需给选择理由及独立实验，不能仅靠RTO通过所有建议。 |
+| UE11-p0377-001 | §3.5.15.1，trim识别 | 按DSCP识别；不验证IP/UDP长度；完整性/认证行为按有效载荷保留情况选择。 | IPv4/IPv6/native/UDP无CRC尾部和长度不一致回归已有；TSS解密/ICV路径未实现。 |
+| UE11-p0377-002 | 表3-71，未认证trim | 仅按允许字段产生NACK或丢弃；不得用于正常PDC状态更新，CP丢弃。 | 既有identity匹配与无分配/peer学习路径已有测试；RUDI/RODL/TSS仍缺。 |
+| UE11-p0377-003 | §3.5.15.3，RTO跨页 | PDC维护RTO；结合下一页采用推荐的逐包timer/timestamp或每PDC替代方案。 | 当前每PDC拥有RTOTimer，逐PSN事件由注入时钟驱动；MAC出队启动及取消/重用已有回归。 |
+| UE11-p0386-001 | §3.5.15.5.1，ACK丢失恢复 | 判定ACK丢失后发ACK Request或原请求；建议优先ACK Request，READ数据例外。 | 普通请求SACK后转查询已有覆盖；READ例外留给M5真实READ实现。 |
+| UE11-p0386-002 | §3.5.16，CP全集 | 表3-82全部CP类型必须支持，TC按§3.6.4.7。 | NOOP/查询/Clear/Close/Probe/NO_NEG部分完成；Credit/Credit Request及完整Negotiation未完成。 |
+| UE11-p0386-003 | §3.5.16，ROD/RODL控制TC | 有唯一PSN的ROD/RODL CP必须用PDS Request TC。 | 已发现Host将全部非数据包映射到控制TC，需修正并验证不被NSCC/trim配置覆盖；RODL未实现。 |
+| UE11-p0387-001 | §3.5.16，CP_ACK格式 | 专用payload使用CP_ACK next header；不能用在ACK_CC/CCX。 | Close/NO_NEG golden及标准codec部分覆盖；更多CP_ACK和非法组合仍需验收。 |
+| UE11-p0387-002 | §3.5.16，CP建连限制 | 仅NOOP/Negotiation可带SYN启动，其余必须等待PDC建连。 | control_establishment_test已验证已知其他类型SYN拒绝；未知类型另按静默丢弃规则处理。 |
+
+## 第 381～400 个候选
+
+CP字段义务按表3-82分开，唯一PSN不包括ACK查询、Clear、Probe和Credit。
+本批对照PDF确认表3-82的Telegram编码`0x10`不能放入表3-48的4位字段，
+暂不自定线格式。reserved PDC是整个小节明确声明的可选功能，其MUST只在选用后适用。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0387-003 | §3.5.16，CP trimming | CP不得标trimmable；收到trimmed CP丢弃，建议计数。 | 当前CP走控制DSCP且trimmed CP丢弃；将ROD唯一PSN CP改到请求TC时仍须使用NO_TRIM，诊断计数尚部分完成。 |
+| UE11-p0388-001 | §3.5.16.1，NOOP字段 | 新唯一PSN、AR=1、正确pdc_type、payload=0并触发ACK。 | RUD/ROD建连、重传、类型和golden已有回归；RODL另验，isrod旧名称按正式两位pdc_type解释。 |
+| UE11-p0388-002 | §3.5.16.1，NOOP启动 | NOOP/Negotiation可用SYN建连，其余不可。 | control_establishment_test及初始SYN窗口/模式测试已有覆盖。 |
+| UE11-p0388-003 | §3.5.16.2，查询字段 | ACK Request使用被查询PSN，AR=1。 | SACK查询与定时恢复已有检查；不得为查询额外分配新PSN。 |
+| UE11-p0389-001 | §3.5.16.2，小READ恢复 | 小READ的ACK数据丢失时重发原READ，不查询不保存的数据。 | M5缺失；未来READ必须保留请求并重新读取目标内存。 |
+| UE11-p0389-002 | §3.5.16.2，陈旧查询 | 查询PSN小于Clear时静默丢弃，可计诊断。 | receiveAckRequest已有Clear边界处理；相等及跨回绕仍应集中加强。 |
+| UE11-p0390-001 | §3.5.16.3，Clear字段 | Clear/Clear Request的PSN=0、AR=0，不触发ACK。 | 空闲Clear、显式Clear Request及回绕已有回归。 |
+| UE11-p0390-002 | §3.5.16.4，关闭权限与超时 | 仅initiator正式关闭；target请求未及时确认时必须错误关闭。 | target_close_test覆盖双向握手与超时；迟到包/新模式矩阵仍部分完成。 |
+| UE11-p0390-003 | §3.5.16.4，Close字段 | Close Command/Request分配下一PSN且AR=1。 | 两个方向共用发送追踪/计时器，Close回归已有覆盖；RODL未实现。 |
+| UE11-p0392-001 | §3.5.16.5，Probe字段 | PSN=0、AR=1；opaque回显到ACK offset；payload选择SACK基址。 | pds_probe_test覆盖opaque、查询基址、回绕和超时，不占新业务PSN。 |
+| UE11-p0392-002 | §3.5.16.5，Probe ACK | P=1，REQ_CLEAR/REQ_CLOSE均不可设置。 | Probe独立收发与普通ACK隔离已有回归；TSS/RODL适用范围另验。 |
+| UE11-p0392-003 | §3.5.16.6，Credit字段 | RCCC/TFC下Credit及Credit Request的PSN=0、AR=0，由CMS请求。 | M5缺失；旧生成函数占位不算已实现信用协议。 |
+| UE11-p0394-001 | §3.5.16.7，Negotiation字段 | 新唯一PSN、AR=1、PDC类型正确；启动时用SYN状态机。 | NO_NEG建连、丢失/重复和正确类型已有回归；完整ON_OFF与安全协商未实现。 |
+| UE11-p0395-001 | 表3-78，NO_NEG与ON_OFF | NO_NEG长度=0且其余32字节为零，用普通ACK格式；ON_OFF携带功能位。 | NO_NEG独立字节检查已有；ON_OFF未实现，保留类型不能启用未知功能。 |
+| UE11-p0397-001 | §3.5.16.8，PCM条件项 | Telegram唯一PSN、AR=1、仅建连后双向发送；交付PCM或返回规定NACK。 | PCM是M8后增强且未启用；编码表存在4位/0x10差异，见PDS-INVALID-TYPES.md。 |
+| UE11-p0397-002 | §3.5.16.9，RODL CP范围 | Close双向生成必选，接受NOOP/查询/Clear；其余列出类型可不支持。 | M8缺失；不能把scale-out所有CP生成要求直接套用RODL。 |
+| UE11-p0398-001 | §3.5.17，保证响应状态 | 保证响应设置REQ_CLEAR并保留重放状态，READ数据例外。 | 首错缓存/查询/丢失已有覆盖；READ/fetch保证响应路径仍缺。 |
+| UE11-p0398-002 | §3.5.17，保证响应寿命 | 保留到Clear；窗口内重复/查询重发保证响应或构造合适DEFAULT。 | SES错误、SACK和Clear已有回归；READ特殊规则不得被通用缓存掩盖。 |
+| UE11-p0398-003 | §3.5.17，fetch响应 | fetch数据总放ACK，至少16字节能力；保存结果供重放，超长建议专用NACK。 | M5缺失；现有非fetch原子不能满足此要求。 |
+| UE11-p0399-001 | §3.5.18，可选reserved PDC | 选用时配置保留PDC/CCC数量，建议至少16；后续表3-83另验。 | 未选择该可选服务；资源池上限不等于保留池，不公布此能力。 |
+
+复核进度为上述 400 个候选的分类与义务拆分；其余 329 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

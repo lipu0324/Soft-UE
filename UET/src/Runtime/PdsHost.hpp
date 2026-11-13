@@ -55,6 +55,16 @@ public:
                 if (packet.PDS_type==nack_header)
                     trace_.record(node_,"pds_nack",packet.PDS_header.nack_header.nack_code);
                 wake();
+            } catch (const NetworkLayer::PdsDecodeError& error) {
+                // §3.5.11.1/.3: unknown types are counted and silently
+                // discarded before queueing, allocation or peer-ID learning.
+                if (error.reason()==NetworkLayer::PdsDecodeError::Reason::UnknownType) {
+                    services_.pds_error_counters.record_invalid_type();
+                    trace_.record(node_,"pds_type_invalid",error.value());
+                } else {
+                    services_.pds_error_counters.record_invalid_control_type();
+                    trace_.record(node_,"pds_ctl_type_invalid",error.value());
+                }
             } catch (const std::invalid_argument&) { trace_.record(node_, "malformed_frame"); }
         });
     }
@@ -66,6 +76,8 @@ public:
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
+    const PDS::ReceiveErrorCounters& pds_error_counters() const { return services_.pds_error_counters; }
+    void clear_pds_error_counters() { services_.pds_error_counters={}; }
     void configure_retransmission_timeout(Time timeout_ns) {
         if (stopped_ || manager_.getPDSStatus().open_cnt) throw std::logic_error("configure RTO before opening connections");
         if (timeout_ns>kMaximumInitialRtoNs) throw std::invalid_argument("initial RTO exceeds UE 1.1 eight-second range");
