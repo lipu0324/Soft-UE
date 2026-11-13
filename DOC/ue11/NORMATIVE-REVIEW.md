@@ -886,6 +886,161 @@ TSS计数器初始化为零、按位宽回绕，并向SDME提供64位值；不�
 | UE11-p0595-002 | §4.1.3，transport识别 | 启用trim时上层能由保留头识别原包，MIN_TRIM_SIZE覆盖必要信息。 | RUD/ROD依peer/PDC/PSN生成NACK且不交付残留SES；RUDI/RODL/TSS仍缺。 |
 | UE11-p0595-003 | §4.1.3，UET头链保留 | 保留entropy、所选tunnel头及完整PDS req/response，含PSN/PDCID。 | 当前明文IP路径部分完成；未启用头型必须在能力打开前补保留长度与恢复验证。 |
 
-复核进度为上述 620 个候选的分类与义务拆分；其余 109 个候选、表格/算法的额外
-义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
-粒度的记录，两个数量都不能解释为完整 MUST 总数。
+## 第 621～640 个候选
+
+本批从trim配置进入CSIG。CSIG的base profile是该子协议的能力集合，不能仅凭名称
+将其等同于AI Base。M5计划实现CSIG及反射；wide tag是单独的可选能力，当前未选择。
+量化和局部信号计算都使用整数，必须在加入tag编码前明确precision与饱和边界。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0595-004 | §4.1.3，多封装trim | MIN_TRIM_SIZE取所有同时启用封装所需头长度最大值，可按包动态确定。 | 当前统一24字节覆盖已选明文格式；TSS/tunnel启用时需管理侧重算最大值。 |
+| UE11-p0596-001 | §4.1.4.1，TC映射 | TRIMMABLE映射TC_low，CONTROL映射TC_high。 | 当前0/1独立队列、DSCP重分类、ACK隔离与ROD非trim同TC控制已有回归。 |
+| UE11-p0596-002 | §4.1.4.1，trim优先级 | trimmed与未截短数据必须不同TC；建议trim/control再分开TC_med/high。 | 当前使用两个TC的允许策略，trim/control共享高TC；三TC完整配置未启用。 |
+| UE11-p0596-003 | §4.1.4.1，DSCP分离 | TRIMMED与TRIMMABLE不同。 | TrimmingOptions验证与codec负向测试已有覆盖。 |
+| UE11-p0596-004 | §4.1.4.1，控制DSCP分离 | TRIMMED与CONTROL不同，即使二者共享TC也保留码点区别。 | 当前独立DSCP校验与endpoint识别已有覆盖。 |
+| UE11-p0598-001 | §4.1.6，加密trim限制跨页 | 未认证trim不能改变超出ECN/drop影响的连接状态，不能交付残余数据或导致后续合法数据被拒。 | M6缺失；现有明文trim的受限tuple/NACK路径提供部分基础，不能代替密文认证边界。 |
+| UE11-p0605-001 | §4.2.4，CSIG基础格式 | CSIG-capable主机/交换机必须支持compact tag。 | M5缺失；不公布CSIG能力。 |
+| UE11-p0606-001 | §4.2.4.1.1，CSIG EtherType | 永久分配前支持可配置compact/wide EtherType，两者不同且不冲突。 | M5缺失；不得硬编码一个实验码点并称为正式分配值。 |
+| UE11-p0607-001 | §4.2.4.1.2，CSIG base信号 | 支持CSIG时实现§4.2.7.1的base信号集合。 | M5缺失；后续需按具体signal/type表逐项拆分。 |
+| UE11-p0608-001 | §4.2.4.1.3，整数信号 | 本地原始值和量化值都是整数，按type指定聚合函数比较更新。 | M5缺失；不能用浮点舍入掩盖桶边界。 |
+| UE11-p0609-001 | §4.2.4.1.5，compact桶 | inclusive区间连续且不重叠。 | M5缺失；未来配置校验须覆盖空隙、重叠与端点相邻。 |
+| UE11-p0609-002 | §4.2.4.1.5，compact量化 | 5位共32桶；原始precision高于桶precision时先右移差值位，再作区间映射。 | M5缺失；不得直接按原值索引或引入浮点近似。 |
+| UE11-p0609-003 | §4.2.4.1.5，compact饱和 | 低于最低值归桶0，高于最高值归桶31；建议记录越界事件。 | M5缺失；未来零/最大整数及两端越界测试。 |
+| UE11-p0609-004 | §4.2.4.1.6，wide条件项 | 20位桶，e≥1，base为0或2的幂，每桶2^e连续值。 | 未选择可选wide tag；启用后需精确整数量化及参数上界。 |
+| UE11-p0610-001 | §4.2.4.1.6，wide饱和 | v<b归桶0，超出b+2^(e+20)−1归最大桶；建议计越界。 | wide未启用；未来计算须避免移位/加法溢出。 |
+| UE11-p0610-002 | §4.2.4.1.7，locator | compact6位/wide15位，signal更新时必须同时更新locator。 | M5缺失；不能只更新数值而保留上一个bottleneck的位置。 |
+| UE11-p0611-001 | §4.2.4.1.8，D位 | 初始D=0；D=0按type比较更新；D=1禁止修改signal。 | M5缺失；需多hop聚合及冻结位置测试。 |
+| UE11-p0611-002 | §4.2.4.1.8，trim冻结 | CSIG+trim网络的基础行为是在trim处置D=1，建议不再改其他tag字段。 | M5缺失；不能在下游继续覆盖已冻结的信号。 |
+| UE11-p0611-003 | §4.2.4.1.8，基础冻结能力 | 即使提供其他可选策略，CSIG-capable交换机也必须支持trim时置D的基础行为。 | M5缺失；可选扩展不能取代该能力。 |
+| UE11-p0612-001 | §4.2.4.1.9，CSIG保留位 | 发起FEP设置r=0，接收忽略。 | M5缺失；保留字段测试将与type/precision有效字段分开。 |
+
+## 第 641～660 个候选
+
+CSIG基础信号的完整列表是ABW、ABW/C、Delay；extended里的nQD/Experimental可选择
+空集。LLDP的tag格式能力与每个signal的支持能力分别管理。链路层LLR开始出现，
+其确认/重传和byte-spacing属于M7链路状态机，不能套用PDS的PSN/RTO定时器。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0612-002 | §4.2.5.1，CSIG基础能力 | compact/base必选，wide/extended可选；switch可跨端口携带tag、egress更新，并可strip支持的格式。 | M5/M7缺失；parse、forward、update、strip分别验收。 |
+| UE11-p0612-003 | §4.2.5.1.1，peer不支持 | 对不支持相应格式的peer，发送前strip compact/wide，不受D位影响。 | M5/M7缺失；D只冻结signal更新，不阻止格式移除。 |
+| UE11-p0613-001 | §4.2.5.1.1，LLDP通告 | 支持TLV对象时按本地能力/启用状态公布NO/COMPACT/COMPACT-WIDE。 | M7缺失；物理支持但本地禁用时不可继续通告已开启。 |
+| UE11-p0613-002 | 表4-7，LLDP配置状态 | 选用LLDP配置时执行完整状态表；可有管理override，但通告必须一致。 | M7缺失；状态表额外转换仍需结构化映射。 |
+| UE11-p0613-003 | §4.2.5.1.2，链路能力协调 | 链路启用LLDP时双方协调能力并按例示状态转换。 | M7缺失；需能力不一致、更新丢失/重复和link reset测试。 |
+| UE11-p0614-001 | §4.2.5.2，tag初始化 | FEP插tag同时按表4-8初始化type/signal，D/R置零。 | M5缺失；min/max类初始值不能一律设零。 |
+| UE11-p0615-001 | §4.2.5.4，Strip-and-Forward | LLDP获知下一跳不支持CSIG，先strip再forward，即使D=1。 | M5/M7缺失；需混合支持拓扑和MTU变化验证。 |
+| UE11-p0616-001 | §4.2.5.5.1，transport反射 | Term将tag交给transport；sender-based CC/路径算法使用时开启Reflect并随ACK/NACK回送Reflection Header。 | M5缺失；普通NSCC ACK_CC不能替代ACK_CCX/NACK_CCX反射格式。 |
+| UE11-p0616-002 | §4.2.5.5.1，FEP反射能力 | CSIG-capable FEP必须实现Reflect。 | M5缺失；未来能力发现与实际路径共同验收。 |
+| UE11-p0619-001 | §4.2.7，CSIG子Profile | base所有信号必选；extended可任意子集含空集。 | M5缺失；子Profile不等于AI Base/HPC等端到端Profile。 |
+| UE11-p0619-002 | §4.2.7.1，base信号全集 | ABW、ABW/C、Delay全部支持。 | M5缺失；已读取候选未包含的完整列表，三者需独立解析值验算。 |
+| UE11-p0620-001 | §4.2.7.2，extended发现 | 若提供额外信号，必须能查询具体支持集合。 | 未选择extended；将来开启nQD/vendor等时补发现接口。 |
+| UE11-p0620-002 | §4.2.7.2，重复说明 | informative段重复CSIG支持base的要求，不新增独立能力。 | 义务并入前述base集合，保留候选ID便于追溯。 |
+| UE11-p0620-003 | §4.2.8，测量周期 | fabric所有switch周期必须一致；建议默认102.4µs及128ns～1024ms范围的可选精度。 | M5/M7缺失；周期/量化与RTT反馈不能混作同一个参数。 |
+| UE11-p0620-004 | §4.2.8，周期近似 | 若近似周期，其误差不得超过量化允许精度损失。 | M5缺失；采用整数事件周期可直接避免额外近似。 |
+| UE11-p0622-001 | §4.2.9.1.2，负载口径 | 支持排除MAC生成帧的端口负载模式，建议不计PAUSE/LLR/CBFC/PFC。 | M5/M7缺失；普通Fabric总字节统计不是CSIG数据负载统计。 |
+| UE11-p0625-001 | §4.2.9.3.3，Delay测量 | ingress SOP至egress SOP之差，可减固定空载delay；不混入与包长成比例的额外延迟。 | Fabric已有逐hop首字节时间基础，CSIG信号产生/聚合仍缺。 |
+| UE11-p0633-001 | §5.1.1，UE链路前导 | 所有UE链路帧使用规定8字节preamble。 | M7缺失；当前Ethernet帧抽象省略preamble，需链路表示与串行化记账。 |
+| UE11-p0637-001 | §5.1.3.1.1，LLR CtlOS间距 | ACK/NACK速率在400～17296字节之间；不插入首256字节；同帧两CtlOS至少隔2KB，NACK_SENT按特例。 | M7缺失；须按字节流位置而非固定墙钟sleep建模。 |
+| UE11-p0646-001 | §5.1.9.1.1，LLR INIT | INIT周期重发含tx_seq，间隔至少4倍target spacing；receiver必须回显init_data。 | M7缺失；需独立LLR初始序号、丢失重试及回显验证。 |
+
+## 第 661～680 个候选
+
+CBFC采用每端口/每VC的独立循环计数器，不与TFC接收信用或NSCC窗口混用。
+LLR重放不再次消费CBFC信用，discard window对CC_Update、CF_Update及PFC有不同处理。
+LLDP协商中wanted、enabled和operational也必须分开，不能将单端开关直接当链路已就绪。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0655-001 | §5.2.5.2，VC映射 | 双方按同一规则从PCP/DEI、DSCP及其任意子集映射VC。 | M7缺失；现有8个Fabric TC不等于CBFC VC。 |
+| UE11-p0656-001 | 表5-18，计数初始化 | Port/VC credit limit、used、consumed为20位，freed为15位；port limit初始TotalCredits，其余按表初始化；启用CBFC至少一个lossless VC。 | M7缺失；初始化值与counter wrap须逐项测试。 |
+| UE11-p0657-001 | §5.2.5.3，内部位宽 | S_P_CL/CU、S_VC_CL/CU支持20位CC范围，内部字段也不能截短。 | M7缺失。 |
+| UE11-p0659-001 | §5.2.5.6.4，CC周期 | 周期发CC_Update覆盖所有lossless VC，0～15/16～31分两种消息，恢复丢包泄漏信用。 | M7缺失；与LLR丢弃/重放组合验收。 |
+| UE11-p0660-001 | §5.2.5.6.4，CC线性化 | 64B帧至多16个VC计数，含此前发送包的全部消耗，不含此后包。 | M7缺失；生成时与真正发送时必须有明确序列边界。 |
+| UE11-p0660-002 | §5.2.5.6.4，CC timer | 提供可配置CC_msg_timer。 | M7缺失；使用注入事件时钟，不在协议中sleep。 |
+| UE11-p0661-001 | §5.2.5.7.3，CF timer选择 | 至少实现全局或per-VC CF_max_timer之一，以恢复丢失的freed更新。 | M7缺失；可选择全局策略但必须覆盖全部VC。 |
+| UE11-p0663-001 | 表5-22，CC_Update编码 | DA按组播/对端地址；8808/FFFE、CID FA-7A-CB、type01/02，16×20位计数和FCS；未用或BE VC填0。 | M7缺失；不能以JSON通知代替要求检查的64B控制帧字段。 |
+| UE11-p0667-001 | §5.2.8.3，初始化自举 | lossless VC初始化使用的LLDP不能使用正在初始化的lossless VC。 | M7缺失；需控制通道无信用也能推进。 |
+| UE11-p0668-001 | §5.2.8.4，CBFC启动门限 | 双方初始化完成且RTS/RTR就绪后才能按CBFC信用发包。 | M7缺失；禁止只收到一边参数就放行。 |
+| UE11-p0677-001 | §5.2.9，LLR/CBFC/PFC组合 | LLR replay不重扣信用；discard不计被丢弃LLR数据；CC_Update参与LLR并在discard丢弃；CF_Update仍处理；PFC不参与LLR、走BE且仍生效，只限制后续首次发送；CC_Update走BE不花信用。 | M7缺失；八组独立规则须做组合故障测试。 |
+| UE11-p0679-001 | 表5-27，CBFC能力范围 | 至少2VC，最多32，lossless数可配；CreditSize支持32～2048列举值，TotalCredits1～2^19−1，perVC limit可配，PktOvhd−16～12；CF格式/min≥800B/max16KB～1MB及CC格式。 | M7缺失；完整表格参数/颗粒度与负值overhead解析需专项验收。 |
+| UE11-p0680-001 | 表5-27续，范围与映射 | CC timer1µs～250ms；20/15位各counter范围；PCP/DEI/DSCP灵活映射；CF max全局或perVC至少其一。 | M7缺失；不以现有unsigned统一配置解析替代带符号/位宽校验。 |
+| UE11-p0687-001 | §5.3.1，LLDP目的地址 | UE组织TLV使用表5-32 nearest-bridge组地址。 | M7缺失；需完整TLV/目的MAC编解码。 |
+| UE11-p0688-001 | §5.3.2.1，W/E握手 | 双W为真才设置本地E；见远端E后才operational，双方E必须都真。 | M7缺失；management状态与数据路径准入分别验证。 |
+| UE11-p0689-001 | §5.3.2.1.5，版本兼容 | v1支持新选项；遇v0时只用v0功能，禁止启用额外能力。 | M7缺失；v0/v1混合链路必测。 |
+| UE11-p0689-002 | §5.3.2.1.5，未来兼容 | 未来版本兼容0/1；旧端忽略扩展长度、未知码点/保留字段。 | M7缺失；长度边界与未知字段不能引入越界访问。 |
+| UE11-p0689-003 | §5.3.2.1.6，选项启用 | E表明正在运行；wanted端仅在peer也wanted后置E并启用。 | M7缺失；本地capable不等于协商enabled。 |
+| UE11-p0689-004 | §5.3.2.1.6.1，LLR W/E码点 | W仅0或3；收1/2禁用；v0 E为1位，v1为2位值3，混合版本按规定解释。 | M7缺失；保留码点与位序转换需独立测试。 |
+| UE11-p0690-001 | §5.3.2.1.6.1，LLR双方就绪 | 本地已置E也须等待peer E，双端启用才开始LLR。 | M7缺失；防止未协商的重放序号被对端当普通帧。 |
+
+## 第 681～700 个候选
+
+本批读取跨页的CSIG compact-only条件及UFH参数匹配要求。可选IPGR/wide格式
+未选用时应如实通告不可用；M7/M8的协商模型仍需处理对端通告、缺失TLV和版本回退。
+CBFC每个方向独立握手，不能用一个全链路ready布尔值替代32个VC的状态。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0690-002 | §5.3.2.1.6.2，IPGR条件 | 支持时仅在peer C=1后减少发送idle；能力双方满足时启用；缺TLV/v0按false。 | 未选择可选idle reduction，M7仍需正确通告/解析不可用状态。 |
+| UE11-p0690-003 | §5.3.2.1.6.3，CSIG无能力 | 一端C=0则不得发送带CSIG tag；缺TLV/v0按C=0。 | M5/M7缺失；应结合strip-forward而非直接向不支持端发tag。 |
+| UE11-p0691-001 | §5.3.2.1.6.3，compact-only跨页 | 任一端仅compact时双方不发wide，收到wide记录错误。 | M7缺失；已读取前页条件，不能把禁止wide套到双方都wide-capable的情况。 |
+| UE11-p0691-002 | §5.3.2.1.6.4，UFH启动 | 收齐双方Options/参数前丢弃出链路UFH；仅启用共同格式、相同位数/版本，没交集置S=0。 | M7/M8缺失；原文表号引用另需按UFH字段定义核对。 |
+| UE11-p0691-003 | §5.3.2.1.6.4，UFH相同能力跨页 | 同能力仍需匹配格式版本与地址位数，后续页细化条件。 | M7/M8缺失；共同能力只是必要条件。 |
+| UE11-p0692-001 | §5.3.2.1.6.4，UFH匹配集 | 32/16分别比较V32/位长及V16/位长；只有匹配的格式可用。 | M7/M8缺失；一套不匹配时保留另一套允许的交集。 |
+| UE11-p0692-002 | §5.3.2.1.6.4，UFH不同能力 | 只发两端共同支持的编码，无共同编码时禁止UFH。 | M7/M8缺失；不能以较大格式自动包裹较小格式。 |
+| UE11-p0692-003 | §5.3.2.1.6.4，RR字段 | RR32/RR16发送零、接收忽略。 | M7缺失。 |
+| UE11-p0692-004 | §5.3.2.1.6.5，RESV1 | 1位保留字段发送零、接收忽略。 | M7缺失。 |
+| UE11-p0692-005 | §5.3.2.1.6.6，RESV2 | 4位保留字段发送零、接收忽略。 | M7缺失。 |
+| UE11-p0692-006 | §5.3.2.1.6.7，RESV3 | 1位保留字段发送零、接收忽略。 | M7缺失；保留字段可忽略不等于忽略明确无效的长度。 |
+| UE11-p0693-001 | §5.3.2.2，CBFC三方位序 | 每方向receiver WANT→sender RTS→receiver RTR；不得提前置RTS/RTR或使用信用。 | M7缺失；每VC独立配置及重新初始化测试。 |
+| UE11-p0695-001 | §5.3.2.2.5，CBFC TLV版本 | 初始v0，未来向后兼容；旧端跳过新增保留字段/码点/扩展长度。 | M7缺失；解析必须按长度安全跳过。 |
+| UE11-p0695-002 | §5.3.2.2.7，S_CreditSize冻结 | 等peer R_CellSize后选择；任何VC RTS=true时值有效且不可改变；0表示未设。 | M7缺失；配置更新需先解除受影响握手。 |
+| UE11-p0695-003 | §5.3.2.2.8，overhead冻结 | 任一VC RTS=true时S_PacketOverhead有效且不可变化。 | M7缺失；有符号语义与8位线编码需分别测试。 |
+| UE11-p0696-001 | §5.3.2.2.9，RTS等待 | 32位每VC标志，bit0为VC0；RTS=true仍等receiver RTR。 | M7缺失。 |
+| UE11-p0696-002 | §5.3.2.2.10，R_VCnLength | v0元素长6B，future可增，v0读完6B后跳过扩展。 | M7缺失；未知尾部不可误当下一VC。 |
+| UE11-p0696-003 | §5.3.2.2.15.1，WANT撤销 | WANT变false后sender停止信用准入、清RTS、回BE。 | M7缺失；不把撤销当保持旧信用无限有效。 |
+| UE11-p0696-004 | §5.3.2.2.15.2，RTR撤销 | peer RTS之前不得置RTR；RTR变false后sender停止按CBFC信用发送。 | M7缺失；停用/重启与在途帧处理需明确。 |
+| UE11-p0698-001 | §5.3.2.2.15.10，可选opaque匹配 | R_PktID_Sel=3时12位handle列表须由管理双方预配一致；不要求某种特定复杂匹配法。 | 未选择该可选匹配方式；M7可先实现必选PCP/DEI/DSCP映射。 |
+
+## 第 701～729 个候选
+
+最后一批区分UFH/链路行为模型与真实PHY电气/PCS实现。路线图排除了电气及RTL逐周期
+仿真，因此硬件PHY类型合规不作声明；LLR/CBFC控制表示、误码/FEC结果与时延/容量
+行为仍属于M7。IPGR与MTBPE估计均是未选择的可选增强。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0698-002 | §5.3.2.2.15.11，信用分配模式 | R_VC_CreditLimit与R_TotalCredits不得同时非零，选择其一。 | M7缺失；配置/LLDP接收均需拒绝冲突。 |
+| UE11-p0716-001 | §5.4.1，UFH共存 | UFH与普通Ethernet同链路共存，不要求修改MAC以下物理实现。 | M8缺失；已实现IP帧只是共存的一半。 |
+| UE11-p0717-001 | §5.4.1，UFH设计要求 | tag stacking、兼容LLR/CBFC但不依赖、地址至少256K endpoints；地址族不固定，建议无状态转ETH/IP。 | M8缺失；64节点仿真规模不降低地址字段可表达范围，gateway翻译为可选。 |
+| UE11-p0718-001 | §5.4.2，UFH适用范围 | 需要不支持的fragment/tunnel等特性时继续用Ethernet/IP。 | M8缺失；能力选择需在发包前确定。 |
+| UE11-p0719-001 | §5.4.3，UFH V/W | 发送V=0，接收验证V/W后选择格式；V=1保留未来。 | M8缺失；位码校验与协商结果共同验收。 |
+| UE11-p0720-001 | §5.4.4，opaque字段 | UFH_32的8位、UFH_16的44位opaque由端到端覆盖，switch转发忽略。 | M8缺失；不把transport状态错误作为交换机路由字段。 |
+| UE11-p0722-001 | §5.4.5，tag顺序 | 遵循Ethernet tag stack规则，VLAN在offset12首先出现。 | M8缺失；将与CSIG/TSS位置和MTU预算一起验证。 |
+| UE11-p0723-001 | §5.4.6，地址有效位 | 地址LSB对齐，端点/交换机按配置忽略容器未使用高位。 | M8缺失；不能因高保留位变化误选目的端。 |
+| UE11-p0724-001 | §5.4.8，UFH trimming | 若选择对UFH trim，按§4.1更新UFH DSCP。 | M8缺失；RODL仍按其独立禁NSCC/trim约束选择路径，不把可选UFH trimming强加给RODL。 |
+| UE11-p0725-001 | §5.4.10，UDP/IPv4校验 | 特定UDP/IPv4映射可发送checksum0，receiver忽略。 | M8缺失；当前普通IP/UDP规则不能直接证明UFH映射路径。 |
+| UE11-p0725-002 | §5.4.11，UFH显式启用 | 域内通过适用管理方式显式开启UFH，假定全部路径支持。 | M7/M8缺失；不得仅由单个发送者header设置自动启用整网。 |
+| UE11-p0728-001 | §5.5.1，IPGR条件 | 选用时保留terminate block并按8字节对齐，减少idle而非删除合法帧边界。 | 未选择可选IPGR数据路径；协商能力需如实保持false。 |
+| UE11-p0729-001 | §5.5.4，IPGR接收能力 | 通告支持即须能接收reduced idle，无论发送侧是否enabled；建议向管理报告能力。 | IPGR未选择；未来不得将disabled与incapable混淆。 |
+| UE11-p0730-001 | §6.1，真实PHY条件 | 声明UE PHY硬件合规的设备须符合列出的某种PHY类型。 | 电气/真实PHY合规不在当前软件模型声明范围，M7仅验证配置速率/FEC/误码行为。 |
+| UE11-p0732-001 | §6.2，可选CtlOS PHY | PHY选择该可选能力后遵守全节要求。 | M7需要控制ordered-set的行为表示；实际MII/PCS实现不在本轮RTL范围。 |
+| UE11-p0733-001 | 表6-3，CtlOS表示 | CtlOS的MII D4低半字节为6，其余字节按表。 | M7控制表示/编解码仍缺；不声明物理lane接口已经实现。 |
+| UE11-p0734-001 | §6.2.3.1，特定PHY decoder | 指定200G/400G/800G/1.6T PHY采用所引用stateless 64B/66B decoder及RS要求。 | 真实PCS电气/RTL不在本轮范围；相关错误结果可映射到M7行为模型。 |
+| UE11-p0735-001 | §6.2.3.1，100G overwrite条件 | 若作FEC error overwrite，用指定stateless decoder并按未纠正codeword设置前四EBLOCK_R。 | 未选择真实PCS实现；不能把简单BER计数当该decoder符合性证据。 |
+| UE11-p0735-002 | §6.2.3.1，100G非overwrite条件 | 不作overwrite时用表6-5而非旧state-diagram decoder。 | 真实PCS不在本轮范围。 |
+| UE11-p0735-003 | §6.2.3.2，PCS encoder | 所支持线速率采用指定stateless encoder。 | 真实PCS不在本轮范围；行为串行化不冒充encoder实现。 |
+| UE11-p0736-001 | §6.2.4.1，CtlOS与数据隔离 | 任意合法插入位置不破坏802.3 packet transfer。 | M7缺失；模型需保证控制符号插入/提取后交付字节不变。 |
+| UE11-p0736-002 | §6.2.4.1，DIC隔离 | CtlOS不改变发送RS的Deficit Idle Count。 | 实际RS不在本轮范围；M7的idle/控制记账须保持独立。 |
+| UE11-p0736-003 | §6.2.4.2，接收CtlOS | lane0合法CtlOS编码需被RS接受。 | M7可验证控制表示合法性；不声明真实MII接口。 |
+| UE11-p0736-004 | §6.2.4.2，DATA_VALID隔离 | 合法CtlOS不改变RS DATA_VALID_STATUS。 | M7缺失；控制事件与数据有效/损坏事件分开。 |
+| UE11-p0736-005 | §6.2.4.2，Start前CtlOS | 判断lane0 Start的数据有效性时跳过紧前CtlOS，用其之前RXC/RXD。 | 真实RS逻辑不在本轮范围；控制提取行为需保留前序数据状态。 |
+| UE11-p0736-006 | §6.2.4.2，CtlOS错误窗口 | 单次CtlOS不使数据无效；过密多次按允许策略处理，窗口由表6-6定义。 | M7缺失；可选择规定的忽略策略但须验证合法数据不受影响。 |
+| UE11-p0736-007 | §6.3，可选PHY预测 | 选择FEC link-quality prediction后遵守该节要求。 | 未选择硬件预测能力；M7基本FEC纠正/失败统计另行实现。 |
+| UE11-p0742-001 | §6.3.2，可选MTBPE | 若支持MTBPE估计，则全部规定counter可由软件访问。 | 未选择该可选估计器，不把普通包丢失率计数当MTBPE。 |
+| UE11-p0762-001 | §8.1.1，能力与验收声明 | 明确公布支持功能/相关Profile，执行对应checklist；旧例名依§3.3四Profile及实际适用功能解释。 | 当前capabilities/validator/inventory四Profile均false；M8完成后再按完整义务和证据开放。 |
+
+729个自动提取候选已逐条分类并拆分上述义务。该数字不是MUST总数，也不代表729项
+功能已实现或验收。M0仍需补充候选未覆盖的表格字段、状态图、算法步骤和条件集合，
+并把每个最终义务映射到实现、Profile适用性、正反边界测试及证据。
+`requirements.json`的51个开发任务保持独立粒度，`inventory_complete`继续为false。

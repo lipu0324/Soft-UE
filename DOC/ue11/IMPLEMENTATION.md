@@ -349,9 +349,9 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 620 are classified and split into obligations
-in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
-remaining candidates are still open. The inventory deliberately remains incomplete; the
+Profile classification. All 729 extracted candidates are classified and split into obligations
+in the [manual review ledger](NORMATIVE-REVIEW.md); additional table fields, state
+machines, algorithms and final evidence mapping are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements
 are verified. A `verified` implementation task such as deterministic replay is
 not an assertion of UE compliance.

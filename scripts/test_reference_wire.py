@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import struct
 import tempfile
 
 parser = argparse.ArgumentParser()
@@ -13,9 +14,17 @@ arguments = parser.parse_args()
 with tempfile.TemporaryDirectory(prefix="softue-reference-") as temporary:
     destination = Path(temporary)
     subprocess.run([str(arguments.fixtures), str(destination)], check=True)
-    for fixture in sorted(destination.glob("*.bin")):
-        packet_type = int(fixture.name.split("-")[0])
-        parsed = json.loads(subprocess.check_output([str(arguments.oracle), str(fixture)], text=True))
+    fixtures = sorted(destination.glob("*.bin"))
+    assert len(fixtures) == 36
+    for fixture in fixtures:
+        fields = list(map(int, fixture.stem.split("-")))
+        packet_type, ipv6, udp = fields[:3]
+        udp_destination_port = fields[3] if len(fields) == 4 else 4793
+        if udp:
+            frame = fixture.read_bytes()
+            assert struct.unpack_from(">H", frame, 14 + (40 if ipv6 else 20) + 2)[0] == udp_destination_port
+        parsed = json.loads(subprocess.check_output(
+            [str(arguments.oracle), str(fixture), str(udp_destination_port)], text=True))
         assert parsed["type"] == packet_type, (fixture.name, parsed)
         assert parsed["entropy"] == 0xBEEF, (fixture.name, parsed)
         if packet_type in (2, 3):
@@ -33,4 +42,4 @@ with tempfile.TemporaryDirectory(prefix="softue-reference-") as temporary:
     data[-5] ^= 1
     corrupted.write_bytes(data)
     assert subprocess.run([str(arguments.oracle), str(corrupted)], capture_output=True).returncode != 0
-print("PASS: 24 reference-parser/CRC comparisons and corrupted-payload rejection")
+print("PASS: 36 reference-parser/CRC comparisons at default/custom UDP ports and corrupted-payload rejection")

@@ -11,7 +11,12 @@
 
 int main(int argument_count, char** arguments)
 {
-    if (argument_count!=2) return 2;
+    if (argument_count!=2 && argument_count!=3) return 2;
+    unsigned long udp_destination_port=4793; /* UE 1.1 Table 3-35 reference default. */
+    if (argument_count==3) {
+        char* end=NULL; udp_destination_port=strtoul(arguments[2],&end,10);
+        if (!end || !*arguments[2] || *end || udp_destination_port>65535) return 2;
+    }
     FILE* input=fopen(arguments[1],"rb");
     if (!input) return 2;
     unsigned char frame[65536];
@@ -20,7 +25,9 @@ int main(int argument_count, char** arguments)
     if (frame_length<54 || frame_length>=sizeof(frame)) return 2;
     struct uet_instance reference_context={0};
     reference_context.uet_ipproto=UET_IPPROTO;
-    reference_context.uet_udp_port=UET_UDP_PORT;
+    /* The pinned reference's lab default is 49150. Configure its parser for
+     * the chosen fabric port without changing the independent parser code. */
+    reference_context.uet_udp_port=(uint16_t)udp_destination_port;
     reference_context.max_payload_len=8192;
     struct uet_parsed_pkt parsed;
     const int result=uet_parse_pkt(&reference_context,frame,frame_length,&parsed);

@@ -102,7 +102,7 @@ RUDI 与 RODL 不能直接套用这三种路径；它们仍在后续实施范围
 - `pdc_lifecycle_test`：正常关闭、Close Command 丢失、关闭 ACK 丢失和资源清理。
 - `native_atomic_test`：整数边界、8 种数据类型、权限拒绝、丢失 ACK 后原子只执行一次，
   以及 WRITE immediate 的远端完成。
-- `reference_wire_comparison`：独立链接官方解析器和 CRC 实现，检查 24 组报文。
+- `reference_wire_comparison`：独立链接官方解析器和 CRC 实现，检查 36 组报文及默认/自定义UDP目的端口。
   这是报文差分，不代表两个协议端点进程已经互通。
 - `reference_process_interop`：独立进程中的原样参考 SES/PDS 经过测试 NIC，验证
   WRITE/SEND、返回 SEND 和 Clear；不覆盖 raw NIC 驱动。

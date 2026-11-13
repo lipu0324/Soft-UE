@@ -8,7 +8,10 @@ int main(int argument_count,char** arguments) {
     if (argument_count!=2) return 2;
     const std::filesystem::path output=arguments[1];
     std::filesystem::create_directories(output);
-    for (bool ipv6:{false,true}) for (bool udp:{false,true}) for (int type:{2,3,6,7,10,11}) {
+    size_t fixture_count=0;
+    for (bool ipv6:{false,true}) for (bool udp:{false,true}) for (const uint16_t port:{4793,49150})
+        for (int type:{2,3,6,7,10,11}) {
+        if (!udp && port!=4793) continue;
         PDStoNET_pkt packet{};
         if (type==2 || type==3 || type==6) {
             packet.SESpkt.bth_type=Standard_Header;
@@ -45,13 +48,16 @@ int main(int argument_count,char** arguments) {
             header.psn=1000; header.payload=998; header.spdcid=17; header.dpdcid=29;
         }
         WireOptions network; network.ipv6=ipv6; network.udp=udp; network.entropy=0xbeef;
+        network.udp_destination_port=port;
         network.source.ip[0]=10; network.source.ip[3]=1;
         network.destination.ip[0]=10; network.destination.ip[3]=2;
         const auto frame=UetWireCodec::encode(packet,network);
-        const auto name=std::to_string(type)+"-"+std::to_string(ipv6)+"-"+std::to_string(udp)+".bin";
+        const auto name=std::to_string(type)+"-"+std::to_string(ipv6)+"-"+std::to_string(udp)+
+            (port==4793?"":"-"+std::to_string(port))+".bin";
         std::ofstream file(output/name,std::ios::binary);
         file.write(reinterpret_cast<const char*>(frame.data()),frame.size());
         if (!file) return 1;
+        ++fixture_count;
     }
-    std::cout<<"Generated 24 independent-reference fixtures\n";
+    std::cout<<"Generated "<<fixture_count<<" independent-reference fixtures\n";
 }
