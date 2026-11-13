@@ -48,6 +48,7 @@ Job 内 rank、三种资源空间和 generation、ROD迟投递、RUD NO_MATCH、
 目标内存与 FI_CQ_FORMAT_TAGGED 中的 tag/flags/len 均检查。参考 SES/PDS 未修改；
 其接收 API 明确拒绝 ignore bits，因此互通证据不包含通配匹配。
 
+目标还支持标准允许的 deferrable tagged-as-send，见[兼容语义](DEFERRABLE-AS-SEND.md)。
 公开 libfabric tagged 映射见[接口说明](PROVIDER-TAGGED.md)。tagged rendezvous、
 优化头、multi-receive、tagged atomics、TSS 与 RODL 仍分别验收，不据此声明完整
 AI Full/HPC Profile。

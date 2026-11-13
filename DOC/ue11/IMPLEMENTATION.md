@@ -53,7 +53,7 @@ See [real-time progress](REALTIME-PROGRESS.md).
   legacy-wire regression.
 - A new asynchronous SES entry point supports NO_OP, SEND into a posted receive
   region, fragmented WRITE, WRITE with immediate completion data, single-packet
-  DATAGRAM_SEND, fragmented native READ, exact/wildcard tagged SEND, SEND/DGRAM CQ header data, receiver-side deferrable-as-SEND, non-fetching 8/16/32/64-bit integer atomics, and single-element 8–128-bit integer fetching/CAS.
+  DATAGRAM_SEND, fragmented native READ, exact/wildcard tagged SEND, SEND/DGRAM CQ header data, receiver-side deferrable SEND/tagged-as-SEND, non-fetching 8/16/32/64-bit integer atomics, and single-element 8–128-bit integer fetching/CAS.
   It uses the existing PDS/PDC implementation, not a replacement transport.
 - Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is

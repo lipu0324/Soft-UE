@@ -17,31 +17,44 @@ public:
     SendResult try_send(const Frame& frame) override {
         const auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
         auto packet=decoded.packet;
+        auto transmitted=frame;
         if (packet.PDS_type==RUOD_req_header && packet.SESpkt.bth_type==Standard_Header &&
             packet.SESpkt.bth_header.Standard_Header.opcode==9) {
             const auto& header=packet.SESpkt.bth_header.Standard_Header;
             ++tagged_requests;
+            if (deferrable_tagged) {
+                packet.SESpkt.bth_header.Standard_Header.opcode=0x0b;
+                packet.SESpkt.bth_header.Standard_Header.buffer_offset=UINT64_MAX; // Both tokens ignored at this target.
+                transmitted.bytes=UetWireCodec::encode(packet,decoded.network);
+            }
             if (delay_first && header.som && !header.eom) {
                 delay_first=false;
-                loop_.after(kMillisecond,[this,frame] { CHECK(lower_.try_send(frame)==SendResult::Accepted); });
+                loop_.after(kMillisecond,[this,transmitted] { CHECK(lower_.try_send(transmitted)==SendResult::Accepted); });
                 return SendResult::Accepted;
             }
             if (change_fragment_tag && !header.som) {
                 packet.SESpkt.bth_header.Standard_Header.match_bits^=1;
-                auto changed=frame; changed.bytes=UetWireCodec::encode(packet,decoded.network);
+                auto changed=transmitted; changed.bytes=UetWireCodec::encode(packet,decoded.network);
                 return lower_.try_send(changed);
             }
-            if (duplicate_first) { duplicate_first=false; CHECK(lower_.try_send(frame)==SendResult::Accepted); }
+            if (duplicate_first) { duplicate_first=false; CHECK(lower_.try_send(transmitted)==SendResult::Accepted); }
+        }
+        if (verify_deferrable && packet.PDS_type==RUOD_ack_header && packet.SESpkt.bth_type==Semantic_Response_Header) {
+            const auto& response=packet.SESpkt.bth_header.Semantic_Response_Header;
+            if (response.opcode==3) ++null_responses;
+            if (response.return_code==1) CHECK(response.opcode==0 || response.modified_length==48);
+            if (response.return_code==5) CHECK(!response.modified_length);
         }
         if (drop_result && packet.PDS_type==RUOD_ack_header && packet.SESpkt.bth_type==Semantic_Response_Header) {
             drop_result=false; ++dropped_results; return SendResult::Accepted;
         }
-        return lower_.try_send(frame);
+        return lower_.try_send(transmitted);
     }
     void set_receiver(Receiver receiver) override { lower_.set_receiver(std::move(receiver)); }
     void set_writable_handler(Writable callback) override { lower_.set_writable_handler(std::move(callback)); }
     bool delay_first=false,duplicate_first=false,change_fragment_tag=false,drop_result=false;
-    size_t tagged_requests=0,dropped_results=0;
+    bool deferrable_tagged=false,verify_deferrable=false;
+    size_t tagged_requests=0,dropped_results=0,null_responses=0;
 private:
     IPacketPort& lower_;
     EventLoop& loop_;
@@ -143,13 +156,14 @@ void independent_spaces_and_generations(pdc_mode mode) {
     fixture.close();
 }
 
-void late_posting_and_no_match(pdc_mode mode) {
-    TaggedFixture fixture(mode);
+void late_posting_and_no_match(pdc_mode mode,bool deferrable=false) {
+    TaggedFixture fixture(mode); fixture.forward.deferrable_tagged=deferrable; fixture.reverse.verify_deferrable=deferrable;
     auto first=fixture.message(0xa,0x11,48); first.immediate_data=UINT64_MAX;
     fixture.source.submit(first); fixture.loop.run_until(kMillisecond);
     Completion completion{};
-    if (mode==RUD) {
+    if (mode==RUD || deferrable) {
         fixture.source_completion(CompletionStatus::RemoteError,0x05);
+        CHECK(!fixture.target.unexpected_bytes());
         fixture.post(0,64,{0xa,0,{}},30); fixture.run();
         CHECK(!fixture.target.poll_completion(completion)); // No late rescue of the rejected MID.
         fixture.source.submit(first); fixture.run(); fixture.source_completion();
@@ -285,8 +299,8 @@ void untagged_source_matching(pdc_mode mode,bool datagram=false) {
     fixture.close();
 }
 
-void faults_and_fragment_identity(pdc_mode mode,bool congestion) {
-    TaggedFixture fixture(mode,congestion);
+void faults_and_fragment_identity(pdc_mode mode,bool congestion,bool deferrable=false) {
+    TaggedFixture fixture(mode,congestion); fixture.forward.deferrable_tagged=deferrable; fixture.reverse.verify_deferrable=deferrable;
     fixture.post(0,64,{0xface,0,{}},50); fixture.post(64,64,{0xface,0,{}},51);
     fixture.forward.duplicate_first=true; fixture.reverse.drop_result=true;
     if (mode==RUD) fixture.forward.delay_first=true;
@@ -296,10 +310,13 @@ void faults_and_fragment_identity(pdc_mode mode,bool congestion) {
     CHECK(fixture.target.memory().read(1,1,fixture.destination.key,0,48)==operation.payload);
     CHECK(fixture.target.memory().read(1,1,fixture.destination.key,64,48)==std::vector<uint8_t>(48,0));
     // The second posting remains available despite duplicate packets/ACK loss.
-    fixture.source.submit(fixture.message(0xface,0x88)); fixture.run(); fixture.source_completion(); fixture.target_completion(51,0xface);
+    fixture.source.submit(fixture.message(0xface,0x88,deferrable?48:1)); fixture.run(); fixture.source_completion(); fixture.target_completion(51,0xface);
     fixture.post(128,64,{0xface,0,{}},52); fixture.forward.change_fragment_tag=true;
     fixture.source.submit(operation); fixture.run(); fixture.source_completion(CompletionStatus::RemoteError,0x18);
     fixture.target_completion(52,0xface,CompletionStatus::RemoteError);
+    // This fixture's SES processing is synchronous. In particular the RUD
+    // early-EOM response is full/default, never a false zero-length deferral.
+    if (deferrable) CHECK(!fixture.reverse.null_responses);
     CHECK(fixture.target.memory().read(1,1,fixture.destination.key,144,32)==std::vector<uint8_t>(32,0));
     fixture.close();
 }
@@ -307,8 +324,8 @@ void faults_and_fragment_identity(pdc_mode mode,bool congestion) {
 int main() {
     try {
         for (const auto mode:{RUD,ROD}) {
-            for (const bool congestion:{false,true}) { fifo_and_source_matching(mode,congestion); faults_and_fragment_identity(mode,congestion); }
-            independent_spaces_and_generations(mode); late_posting_and_no_match(mode); zero_truncation_and_snapshot(mode); absolute_rank_job_scope(mode); untagged_source_matching(mode);
+            for (const bool congestion:{false,true}) { fifo_and_source_matching(mode,congestion); faults_and_fragment_identity(mode,congestion); faults_and_fragment_identity(mode,congestion,true); }
+            independent_spaces_and_generations(mode); late_posting_and_no_match(mode); late_posting_and_no_match(mode,true); zero_truncation_and_snapshot(mode); absolute_rank_job_scope(mode); untagged_source_matching(mode);
         }
         zero_storage_and_resource_recovery(); untagged_source_matching(ROD,true);
         std::cout<<"PASS native tagged exact/wildcard FIFO, rank, independent spaces, unexpected, zero/truncation, snapshots and wire faults\n";

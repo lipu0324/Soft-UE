@@ -503,11 +503,15 @@
       "id": "SES-DEFER",
       "reference": "Table 3-1",
       "summary": "deferrable send 与 restart",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "send_header_data_test",
+        "tagged_message_test"
+      ],
       "profiles": [
         "AI_FULL"
-      ]
+      ],
+      "evidence_note": "Target compatibility under§3.4.4.6.1 accepts deferrable SEND0x08 as SEND and deferrable TSEND0x0b as tagged SEND, ignoring restart-token address bits. Immediate processing returns full/default acceptance or NO_MATCH/0 in RUD/ROD; no ROD unexpected buffer or false zero-length deferral. Tagged faults/NSCC and ordinary header-data tests cover this path. Source stop/defer, unique restart tokens, header capture, RTR, reserved buffers and partial restart transactions remain missing. See DEFERRABLE-AS-SEND.md."
     },
     {
       "id": "SES-RNDV",

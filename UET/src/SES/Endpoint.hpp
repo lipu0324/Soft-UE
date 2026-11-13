@@ -76,6 +76,7 @@ struct EndpointCapabilities {
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
+    bool deferrable_tagged_send_as_send=true; // Target compatibility; not source deferral/RTR support.
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
         IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
         IntegerAtomicDatatype::Uint32,IntegerAtomicDatatype::Int64,IntegerAtomicDatatype::Uint64};
@@ -848,7 +849,7 @@ private:
         // Deferrable-as-SEND instead signals acceptance with OK/full length
         // (§3.4.4.6.1); the source still needs results for every data packet.
         const bool incomplete_end=!explicit_response && request.pkt.bth_header.Standard_Header.eom &&
-            request.pkt.bth_header.Standard_Header.opcode!=0x08;
+            request.pkt.bth_header.Standard_Header.opcode!=0x08 && request.pkt.bth_header.Standard_Header.opcode!=0x0b;
         semantic_header.opcode=explicit_response?1:(incomplete_end?3:0);
         semantic_header.version=0; semantic_header.return_code=incomplete_end?0:code;
         semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
@@ -882,6 +883,12 @@ private:
         case MemoryError::Alignment: return SemanticReturnCode::AtomicUnaligned;
         }
         return SemanticReturnCode::Uncorrectable;
+    }
+    static uint8_t nondeferring_send_opcode(uint8_t opcode) {
+        // §3.4.4.6.1 applies to both nonmatching and tagged deferrable SEND.
+        // This target policy ignores restart tokens and accepts only full
+        // delivery or NO_MATCH; it never promises a later RTR.
+        return opcode==0x08?0x05:opcode==0x0b?0x09:opcode;
     }
     static ResourceSpace message_space(uint8_t opcode) {
         return opcode==5?ResourceSpace::Send:opcode==9?ResourceSpace::Tagged:ResourceSpace::Rma;
@@ -1038,7 +1045,7 @@ private:
             return Runtime::SemanticAdmission::Rejected;
         }
         if (!existing) {
-            const uint8_t opcode=header.opcode==0x08?static_cast<uint8_t>(OperationType::Send):header.opcode;
+            const uint8_t opcode=nondeferring_send_opcode(header.opcode);
             Incoming message{opcode,static_cast<uint32_t>(header.request_length),header.match_bits,header.buffer_offset,0,0};
             message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
             incoming_.emplace(key,std::move(message));
@@ -1220,12 +1227,12 @@ private:
         if (request.pkt.bth_header.Standard_Header.opcode==2) { receive_read(request); return; }
         if (request.pkt.bth_header.Standard_Header.opcode==4) { receive_fetching_atomic(request); return; }
         auto interpreted_header=request.pkt.bth_header.Standard_Header;
-        // §3.3.5 / §3.4.4.6.1: AI Base accepts DEFERRABLE_SEND (0x08) as SEND.
-        // Interpret a copy: restart tokens remain intact in the captured wire
-        // request, but cannot become an RMA address or a posted-buffer offset.
-        const bool deferrable_as_send=interpreted_header.opcode==0x08;
+        // §3.3.5 / §3.4.4.6.1: a non-deferring target treats deferrable
+        // SEND/TSEND as their ordinary forms. Interpret a copy: restart tokens
+        // remain intact on the wire but are never an RMA or placement offset.
+        const bool deferrable_as_send=interpreted_header.opcode==0x08 || interpreted_header.opcode==0x0b;
         if (deferrable_as_send) {
-            interpreted_header.opcode=static_cast<uint8_t>(OperationType::Send);
+            interpreted_header.opcode=nondeferring_send_opcode(interpreted_header.opcode);
             if (interpreted_header.som) trace_.record(node_,"deferrable_as_send",interpreted_header.msg_id);
         }
         const auto& header=interpreted_header;
