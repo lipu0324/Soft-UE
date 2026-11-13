@@ -21,6 +21,9 @@ struct Connection {
 class ICongestionControl {
 public:
     virtual ~ICongestionControl()=default;
+    // §3.6.8.1.1: bind a CCC when the PDC's peer/mode/epoch are known,
+    // including a control-only connection that has not sent any data.
+    virtual void opened(const Connection&) {}
     virtual bool can_send(const Connection& connection)=0;
     virtual uint32_t transmitted(const Connection& connection,PDStoNET_pkt& packet)=0;
     // Select the forward control path without charging data admission/bytes.

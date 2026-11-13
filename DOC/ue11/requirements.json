@@ -384,14 +384,15 @@
         "uet_wire_test",
         "packet_trimming_test",
         "mac_timing_test",
-        "simulation_scenarios"
+        "simulation_scenarios",
+        "nscc_lifecycle_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md."
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md."
     },
     {
       "id": "NET-BASE",

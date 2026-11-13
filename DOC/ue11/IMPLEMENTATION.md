@@ -22,6 +22,9 @@ The portable default is UET-over-UDP/4793. Native IP requires an explicit
 protocol number; see [network defaults](NETWORK-DEFAULTS.md) and
 [UDP encapsulation](UDP-ENCAPSULATION.md).
 
+PDS binds NSCC congestion contexts when a connection is created, including
+control-only connections; see [CCC lifecycle](NSCC-LIFECYCLE.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating

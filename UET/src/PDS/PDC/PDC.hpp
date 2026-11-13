@@ -1027,6 +1027,10 @@ public:
      * @param src Source IP address Source IP address
      */
     void setFep(uint32_t dst, uint32_t src);
+    // Bind only after setFep and the starting PSN are initialized. The
+    // initiator knows its delivery mode at allocation; the target learns it
+    // from the validated SYN (§3.5.8.2 / §3.6.8.1.1).
+    void bindCongestionContext(pdc_mode delivery_mode);
 };
 
 // Default parameter definitions (using macro definitions to avoid duplicate definition errors) Default parameter definitions (using macro definitions to avoid duplicate definition errors)

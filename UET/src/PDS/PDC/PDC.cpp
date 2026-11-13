@@ -191,6 +191,12 @@ void PDC::releaseCongestionState() {
     admission_deferred_retries_.clear();
 }
 
+void PDC::bindCongestionContext(pdc_mode delivery_mode) {
+    mode=delivery_mode;
+    if (runtime_ && runtime_->congestion_control)
+        runtime_->congestion_control->opened(congestionConnection());
+}
+
 void PDC::rejectTrimmed(const PDStoNET_pkt& packet) {
     auto reply=UET::PDS::trimmed_negative_ack(packet,SPDCID,rx_cur_psn+1);
     if (public_net_queue) public_net_queue->push(reply); else tx_pkt_q.push(std::move(reply));

@@ -156,6 +156,7 @@ void T_PDC::establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_m
     rx_cur_psn=start_psn-1; cack_psn=rx_cur_psn; rx_clear_psn=rx_cur_psn;
     tx_cur_psn=start_psn; clear_psn=start_psn-1;
     bad_psn=false; state=ESTABLISHED;
+    bindCongestionContext(delivery_mode);
 }
 
 void T_PDC::processOpen2(PDStoNET_pkt *pkt)

@@ -14,6 +14,11 @@ public:
     NsccEngine(NsccConfig config,Runtime::IClock& clock,std::function<void()> wake,
                NetworkLayer::WireOptions wire,Runtime::Trace* trace=nullptr,uint32_t node=0)
         :config_(config),clock_(clock),wake_(std::move(wake)),wire_(wire),trace_(trace),node_(node) { config_.validate(); }
+    void opened(const Connection& connection) override {
+        const auto previous_connections=sources_.size();
+        source(connection);
+        if (sources_.size()!=previous_connections) record("nscc_pdc_bound",connection.local_pdc);
+    }
     bool can_send(const Connection& connection) override {
         const bool ready=source(connection).controller->can_send();
         if (!ready) record("nscc_blocked",connection.local_pdc);
