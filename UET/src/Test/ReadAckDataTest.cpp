@@ -230,6 +230,13 @@ void query_and_clear(uint32_t initial_sequence,pdc_mode mode) {
     auto& control=query.PDS_header.RUOD_cp_header;
     control.type=CP; control.ctl_type=ACK_req; control.flags.ar=1;
     control.psn=initial_sequence; control.payload=9u<<16; control.spdcid=1; control.dpdcid=512;
+    auto probe=query; auto& probe_control=probe.PDS_header.RUOD_cp_header;
+    probe_control.ctl_type=Probe; probe_control.psn=0; probe_control.payload=initial_sequence&~uint32_t{7};
+    target.netRxCm(&probe); CHECK(target.tx_pkt_q.size()==1);
+    const auto& probe_reply=target.tx_pkt_q.front();
+    const uint32_t bitmap_base=probe_reply.PDS_header.RUOD_ack_header.cack_psn+probe_reply.congestion_ack.sack_psn_offset;
+    CHECK((probe_reply.congestion_ack.sack_bitmap&(uint64_t{1}<<(initial_sequence-bitmap_base)))!=0);
+    target.tx_pkt_q.pop();
     target.netRxCm(&query); CHECK(target.tx_pkt_q.size()==1);
     CHECK(target.tx_pkt_q.front().PDS_type==nack_header &&
         target.tx_pkt_q.front().PDS_header.nack_header.nack_code==UET_ACK_WITH_DATA);

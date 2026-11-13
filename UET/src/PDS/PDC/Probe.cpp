@@ -118,6 +118,9 @@ void PDC::receiveProbe(const PDStoNET_pkt& packet) {
     if (selective_base==cack_psn && cack_psn-start_psn<0x80000000u) include(cack_psn);
     for (const auto sequence:completed_rx_psns_) include(sequence);
     for (const auto& cached:tx_ack_buffer) include(cached.first);
+    // READ ACK data is not cached, but its required-delivery PSN is still a
+    // processed packet and belongs in Probe's bitmap (§3.5.16.5/§3.5.17).
+    for (const auto sequence:uncached_read_responses_) include(sequence);
     decorateAcknowledgmentNetwork(0,&packet,response);
     if (public_net_queue) public_net_queue->push(response); else tx_pkt_q.push(std::move(response));
 }
