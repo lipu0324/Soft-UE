@@ -21,9 +21,20 @@ void waits_for_end(OperationType type,pdc_mode mode,bool late_posting=false,uint
         if (type==OperationType::TaggedSend) target.post_tagged_receive(1,1,region.key,0,64,{0x1234,0,{}},77);
     };
     if (!late_posting) post();
-    size_t responses=0;
+    size_t responses=0; bool clear_requested=false;
+    fabric.set_capture([&](Time,const Frame& frame) {
+        const auto packet=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        if (frame.source==2 && packet.PDS_type==RUOD_ack_header && packet.SESpkt.bth_type==Semantic_Response_Header &&
+            packet.SESpkt.bth_header.Semantic_Response_Header.return_code==1)
+            clear_requested|=bool(packet.PDS_header.RUOD_ack_header.flags.req&1);
+    });
     source_host.set_response_handler([&](const PDC_SES_rsp& response) {
         CHECK(response.pkt.bth_type==Semantic_Response_Header && response.pkt.bth_header.Semantic_Response_Header.return_code==1);
+        // §3.4.4.3/Table3-26: successful results retain one encoding/list.
+        // Expected payload uses DEFAULT; tracked unexpected uses OVERFLOW
+        // RESPONSE, even when a posting arrives before the final marker.
+        const auto& semantic=response.pkt.bth_header.Semantic_Response_Header;
+        CHECK(semantic.opcode==(late_posting?1:0) && semantic.list==(late_posting?1:0));
         ++responses;
     });
     SES_PDS_req request{}; request.src_fep=1; request.dst_fep=2; request.source_pid=1;
@@ -51,7 +62,7 @@ void waits_for_end(OperationType type,pdc_mode mode,bool late_posting=false,uint
     CHECK(target.poll_completion(completion) && completion.receive && completion.status==CompletionStatus::Success &&
         completion.context==(type==OperationType::Write?0:77) && completion.length==length && completion.immediate_data==42);
     CHECK(completion.tag==(type==OperationType::TaggedSend?std::optional<uint64_t>{0x1234}:std::nullopt));
-    CHECK(!target.poll_completion(completion) && !target.retained_receive_messages() && responses==2);
+    CHECK(!target.poll_completion(completion) && !target.retained_receive_messages() && responses==2 && clear_requested);
     target.close(); source_host.close(); target_host.close(); CHECK(!loop.pending());
 }
 int main() {

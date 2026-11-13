@@ -68,6 +68,9 @@ SACK 只证明交付，CACK 严格高于某包 PSN 时才允许推断其 DEFAULT
 buffer_offset 都是受检区域内的偏移。注册应用真实缓冲区只发生在本地 API，远端
 无法指定主机指针。libfabric 适配器的进程路径见 [PROVIDER.md](PROVIDER.md)。
 
+同消息的成功响应编码与 unexpected list 保持一致；DEFAULT 的保证交付标记仍可请求
+Clear，见[语义结果](SEMANTIC-RESULTS.md)。
+
 WRITE immediate 的 `header_data` 随消息保存；全部数据落地且 EOM 已到达后，产生单独
 的远端完成。字节覆盖、EOM 和 Clear 的区别见[末包边界](RECEIVE-END-MARKER.md)。
 普通 WRITE 不消耗 SEND 的接收缓冲区。非取回原子操作经过同一条路径，原子扩展头

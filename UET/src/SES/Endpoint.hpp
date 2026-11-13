@@ -381,6 +381,7 @@ private:
         // explicitly, without creating additional guaranteed responses.
         bool error_response_generated=false;
         uint8_t error_generation=0;
+        uint8_t response_list=0; // Table3-26: EXPECTED0 / OVERFLOW1; survives late placement.
         CompletionStatus target_error=CompletionStatus::RemoteError;
         std::shared_ptr<SparseMemory> unexpected;
         uint64_t receive_order=0,tag=0;
@@ -836,11 +837,10 @@ private:
                 semantic_header.return_code,it->second.returned_generation);
     }
     enum class ResponseDelivery { Guaranteed, BestEffort };
-    void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool explicit_response=true,
+    void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool report_message_result=true,
                 std::optional<uint8_t> returned_generation={},ResponseDelivery delivery=ResponseDelivery::Guaranteed) {
         SES_PDS_rsp response{}; response.PDCID=request.PDCID;
         response.rx_pkt_handle=request.rx_pkt_handle; response.rsp_len=12;
-        response.gtd_del=explicit_response && delivery==ResponseDelivery::Guaranteed;
         response.rsp.bth_type=Semantic_Response_Header;
         auto& semantic_header=response.rsp.bth_header.Semantic_Response_Header;
         // A fully processed intermediate packet can return DEFAULT immediately
@@ -848,21 +848,35 @@ private:
         // as NO_RESPONSE (Table 3-24, RC_NULL); it cannot finish the message.
         // Deferrable-as-SEND instead signals acceptance with OK/full length
         // (§3.4.4.6.1); the source still needs results for every data packet.
-        const bool incomplete_end=!explicit_response && request.pkt.bth_header.Standard_Header.eom &&
+        const bool incomplete_end=!report_message_result && request.pkt.bth_header.Standard_Header.eom &&
             request.pkt.bth_header.Standard_Header.opcode!=0x08 && request.pkt.bth_header.Standard_Header.opcode!=0x0b;
-        semantic_header.opcode=explicit_response?1:(incomplete_end?3:0);
         semantic_header.version=0; semantic_header.return_code=incomplete_end?0:code;
         semantic_header.job_id=request.pkt.bth_header.Standard_Header.job_id;
         semantic_header.message_id=request.pkt.bth_header.Standard_Header.msg_id;
-        semantic_header.modified_length=!explicit_response && !incomplete_end?
+        semantic_header.modified_length=!report_message_result && !incomplete_end?
             request.pkt.bth_header.Standard_Header.request_length:length;
         semantic_header.ri_generation=returned_generation.value_or(request.pkt.bth_header.Standard_Header.ri_generation);
+        const auto received_message=incoming_.find(receive_message_key(request));
+        if (received_message!=incoming_.end()) semantic_header.list=received_message->second.response_list;
+        // §3.4.4.3: all non-error results of one message retain the same
+        // encoding. A full EXPECTED success is DEFAULT even at EOM; its
+        // guaranteed-delivery marker still requests Clear to retire state.
+        // Buffered unexpected payload uses OVERFLOW throughout, including
+        // after late placement. Its non-default list requires RESPONSE and
+        // guaranteed delivery; it must never be hidden by ACK coalescing.
+        const auto& request_header=request.pkt.bth_header.Standard_Header;
+        const bool default_result=!incomplete_end && code==1 && !semantic_header.list &&
+            semantic_header.modified_length==request_header.request_length &&
+            semantic_header.ri_generation==request_header.ri_generation;
+        semantic_header.opcode=incomplete_end?3:default_result?0:1;
+        response.gtd_del=!incomplete_end && delivery==ResponseDelivery::Guaranteed &&
+            (report_message_result || !default_result);
         if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected semantic response");
         host_.wake();
     }
-    void reply(const PDC_SES_req& request,SemanticReturnCode code,uint32_t length,bool explicit_response=true,
+    void reply(const PDC_SES_req& request,SemanticReturnCode code,uint32_t length,bool report_message_result=true,
                 std::optional<uint8_t> returned_generation={},ResponseDelivery delivery=ResponseDelivery::Guaranteed) {
-        reply(request,static_cast<uint8_t>(code),length,explicit_response,returned_generation,delivery);
+        reply(request,static_cast<uint8_t>(code),length,report_message_result,returned_generation,delivery);
     }
     void reply_error(const PDC_SES_req& request,Incoming& message) {
         const auto delivery=message.error_response_generated?ResponseDelivery::BestEffort:ResponseDelivery::Guaranteed;
@@ -1321,6 +1335,7 @@ private:
                             disabled_generations_[{selected.absolute_pid,selected.resource_index,message_space(header.opcode)}]=generation;
                             reject(SemanticReturnCode::DisabledGeneration,generation); return;
                         }
+                        message.response_list=1;
                         message.unexpected=std::make_shared<SparseMemory>(message.total);
                         message.receive_order=++next_receive_order_;
                         unexpected_order_.emplace(message.receive_order,key);
