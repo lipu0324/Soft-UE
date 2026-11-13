@@ -31,3 +31,34 @@ jobs:
         with:
           name: large-message-evidence-${{ matrix.congestion }}
           path: build/large-message/
+  read-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        congestion: [disabled, nscc]
+        carrier: [return-request, data-ack]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build byte-verified streaming READ from clean source
+        run: |
+          cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/release --target streaming_read_test -j2
+      - name: Verify every returned byte at the 32-bit message boundary
+        shell: bash
+        run: |
+          read_options=()
+          if [ "${{ matrix.congestion }}" = "nscc" ]; then
+            read_options+=(--nscc)
+          fi
+          if [ "${{ matrix.carrier }}" = "data-ack" ]; then
+            read_options+=(--ack-data)
+          fi
+          python3 scripts/test_large_read.py --binary build/release/streaming_read_test --output build/read-boundary "${read_options[@]}"
+      - name: Preserve READ source, byte counts and resource bounds
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: read-boundary-evidence-${{ matrix.carrier }}-${{ matrix.congestion }}
+          path: build/read-boundary/
