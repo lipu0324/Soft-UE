@@ -23,6 +23,7 @@ class ResourceDirectory {
 public:
     ResourceDirectory() {
         configure_resource(1,1,ResourceSpace::Send);
+        configure_resource(1,1,ResourceSpace::Tagged);
         configure_resource(1,1,ResourceSpace::Rma);
     }
     void configure_resource(uint16_t absolute_pid,uint16_t resource_index,ResourceSpace space,

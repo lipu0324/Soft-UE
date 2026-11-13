@@ -36,7 +36,8 @@ int main() {
             endpoint.memory().add_job(1);
             std::vector<uint8_t> receive_buffer(64);
             const auto receive_region=endpoint.memory().register_buffer(1,1,receive_buffer.data(),receive_buffer.size(),7);
-            endpoint.post_receive(1,1,receive_region.key,0,receive_buffer.size(),77);
+            endpoint.post_receive(1,1,receive_region.key,0,16,77);
+            endpoint.post_tagged_receive(1,1,receive_region.key,48,16,{0x0123456789abcdefULL,0,{}},78);
             std::cerr<<"READY "<<port.local_port()<<std::endl;
             uint16_t target_port=0,target_pid=0,target_resource=0; uint64_t target_key=0;
             CHECK(static_cast<bool>(std::cin>>target_port>>target_key>>target_pid>>target_resource));
@@ -72,9 +73,12 @@ int main() {
             Operation send; send.type=OperationType::Send; send.peer=2; send.target_pid=target_pid;
             send.target_resource=target_resource; send.payload={'a','b','c'};
             endpoint.submit(send);
+            Operation tagged=send; tagged.type=OperationType::TaggedSend;
+            tagged.tag=0xfedcba9876543210ULL; tagged.payload={7,8,9};
+            endpoint.submit(tagged);
             size_t sends=0,receives=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
-            while ((sends!=6 || receives!=1 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
+            while ((sends!=7 || receives!=2 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
                 port.progress(); runtime.progress(10000);
                 Completion completion{};
                 while (endpoint.poll_completion(completion)) {
@@ -83,17 +87,22 @@ int main() {
                             <<" code="<<unsigned(completion.remote_code)<<'\n';
                         return 1;
                     }
-                    if (completion.receive) { CHECK(completion.context==77); ++receives; }
+                    if (completion.receive) {
+                        CHECK((completion.context==77 && !completion.tag) ||
+                            (completion.context==78 && completion.tag==0x0123456789abcdefULL));
+                        ++receives;
+                    }
                     else ++sends;
                 }
                 pollfd readiness{port.descriptor(),POLLIN,0}; ::poll(&readiness,1,1);
             }
-            if (sends!=6 || receives!=1 || endpoint.retained_receive_messages()!=0) {
+            if (sends!=7 || receives!=2 || endpoint.retained_receive_messages()!=0) {
                 std::cerr<<"FAIL Soft-UE interop timeout sends="<<sends<<" receives="<<receives<<'\n';
                 for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                 return 1;
             }
             CHECK(receive_buffer[0]==6 && receive_buffer[1]==5 && receive_buffer[2]==4);
+            CHECK(receive_buffer[48]==3 && receive_buffer[49]==2 && receive_buffer[50]==1);
             for (size_t byte=0;byte<16;++byte) CHECK(receive_buffer[16+byte]==static_cast<uint8_t>((13+byte)*7));
             for (size_t byte=0;byte<8;++byte) {
                 CHECK(receive_buffer[32+byte]==(byte?0:1)); CHECK(receive_buffer[40+byte]==(byte?0:2));

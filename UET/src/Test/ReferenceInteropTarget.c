@@ -94,7 +94,7 @@ int main(void) {
     struct fid_fabric fabric={0}; struct fid_domain fabric_domain={0};
     struct fid_ep fabric_endpoint={0}; struct fid_cq fabric_cq={0};
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
-    uint8_t memory[4096]={0},receive_buffer[32]={0};
+    uint8_t memory[4096]={0},receive_buffer[32]={0},tagged_buffer[16]={0};
     setenv("UET_PDS","pds",1); setenv("UET_PDS_ACK_TYPE","ack",1);
     /* The pinned reference defaults to a 5 ms wall-clock timeout. An ASan
      * process sharing a CPU with stress tests can be descheduled longer than
@@ -103,7 +103,7 @@ int main(void) {
      * The SES/PDS implementation and all transmitted frames remain unchanged. */
     setenv("UET_PDS_TX_TIMEOUT","100",1);
     REQUIRE_SUCCESS(uet_initialize(&instance));
-    hints->caps=FI_MSG|FI_RMA|FI_ATOMIC;
+    hints->caps=FI_MSG|FI_TAGGED|FI_RMA|FI_ATOMIC;
     REQUIRE_SUCCESS(uet_getinfo(instance,NULL,hints,&info));
     info->rx_attr->size=16; info->tx_attr->size=16; info->tx_attr->msg_order=FI_ORDER_SAS;
     info->tx_attr->op_flags=FI_DELIVERY_COMPLETE;
@@ -113,11 +113,15 @@ int main(void) {
         UET_MR_KEY_NONE,0,NULL,&region));
     REQUIRE_SUCCESS(uet_endpoint(domain,info,&fabric_endpoint,NULL,&endpoint));
     REQUIRE_SUCCESS(uet_ep_bind_mr(endpoint,region,0));
-    struct fi_cq_attr attributes={0}; attributes.format=FI_CQ_FORMAT_DATA; attributes.size=32;
+    struct fi_cq_attr attributes={0}; attributes.format=FI_CQ_FORMAT_TAGGED; attributes.size=32;
     REQUIRE_SUCCESS(uet_ep_bind_cq(endpoint,&attributes,&fabric_cq,FI_SEND,NULL,&send_cq));
     REQUIRE_SUCCESS(uet_ep_bind_cq(endpoint,&attributes,&fabric_cq,FI_RECV,NULL,&receive_cq));
     REQUIRE_SUCCESS(uet_mr_enable(region)); REQUIRE_SUCCESS(uet_ep_enable(endpoint));
     REQUIRE_SUCCESS(uet_recv(endpoint,UET_JOB_ID_ANY,receive_buffer,sizeof(receive_buffer),NULL,NULL,(void*)1));
+    /* Exact tagged matching is supported by the pinned reference. Its API
+     * explicitly rejects ignore bits, so wildcard coverage stays native. */
+    REQUIRE_SUCCESS(uet_trecv(endpoint,UET_JOB_ID_ANY,tagged_buffer,sizeof(tagged_buffer),NULL,NULL,
+        UINT64_C(0xfedcba9876543210),0,(void*)3));
     struct uet_addr local_identity={0}; REQUIRE_SUCCESS(uet_getname(endpoint,&local_identity));
     fprintf(stderr,"READY %u %llu %u %u\n",tunnel_port,(unsigned long long)uet_mr_key(region),
         local_identity.pid_on_fep,local_identity.start_index); fflush(stderr);
@@ -130,14 +134,18 @@ int main(void) {
     peer_identity.num_indices=1; peer_identity.initiator_id=1;
     REQUIRE_SUCCESS(uet_av_insert(domain,&peer_identity,&peer));
     const time_t deadline=time(NULL)+8;
-    bool receive_complete=false,reply_started=false,reply_complete=false;
-    uint8_t reply[3]={6,5,4};
-    while (time(NULL)<deadline && (!reply_complete || !clear_commands_sent)) {
-        struct fi_cq_data_entry entry;
+    bool receive_complete=false,tagged_received=false,reply_started=false,reply_complete=false,tagged_reply_complete=false;
+    uint8_t reply[3]={6,5,4},tagged_reply[3]={3,2,1};
+    while (time(NULL)<deadline && (!reply_complete || !tagged_reply_complete || !clear_commands_sent)) {
+        struct fi_cq_tagged_entry entry;
         ssize_t count=uet_cq_read(receive_cq,&entry,1);
         if (count>0 && entry.op_context==(void*)1) receive_complete=true;
+        if (count>0 && entry.op_context==(void*)3) {
+            if (entry.tag!=UINT64_C(0xfedcba9876543210) || !(entry.flags&FI_TAGGED) || entry.len!=3) return 1;
+            tagged_received=true;
+        }
         if (count<0 && count!=-FI_EAGAIN) { fprintf(stderr,"FAIL reference receive CQ: %zd\n",count); return 1; }
-        if (receive_complete && !reply_started) {
+        if (receive_complete && tagged_received && !reply_started) {
             for (size_t byte=0;byte<2049;++byte) if (memory[byte]!=(uint8_t)(byte*7)) {
                 fprintf(stderr,"FAIL reference target memory at %zu: %u\n",byte,memory[byte]); return 1;
             }
@@ -146,20 +154,24 @@ int main(void) {
                 fprintf(stderr,"FAIL reference atomic byte %zu: %u\n",byte,memory[3072+byte]); return 1;
             }
             REQUIRE_SUCCESS((int)uet_send(endpoint,1,reply,sizeof(reply),NULL,peer,(void*)2));
+            if (tagged_buffer[0]!=7 || tagged_buffer[1]!=8 || tagged_buffer[2]!=9) return 1;
+            REQUIRE_SUCCESS((int)uet_tsend(endpoint,1,tagged_reply,sizeof(tagged_reply),NULL,peer,
+                UINT64_C(0x0123456789abcdef),(void*)4));
             reply_started=true;
         }
         count=uet_cq_read(send_cq,&entry,1);
         if (count>0 && entry.op_context==(void*)2) reply_complete=true;
+        if (count>0 && entry.op_context==(void*)4) tagged_reply_complete=true;
         if (count<0 && count!=-FI_EAGAIN) { fprintf(stderr,"FAIL reference send CQ: %zd\n",count); return 1; }
         struct pollfd readiness={tunnel_socket,POLLIN,0}; poll(&readiness,1,1);
     }
-    if (!reply_complete || !clear_commands_sent) { fprintf(stderr,"FAIL reference timeout received=%d reply=%d clear=%u\n",
+    if (!reply_complete || !tagged_reply_complete || !clear_commands_sent) { fprintf(stderr,"FAIL reference timeout received=%d reply=%d clear=%u\n",
         receive_complete,reply_started,clear_commands_sent); return 1; }
     REQUIRE_SUCCESS(uet_ep_close(endpoint)); REQUIRE_SUCCESS(uet_av_remove(peer));
     REQUIRE_SUCCESS(uet_cq_close(send_cq));
     REQUIRE_SUCCESS(uet_cq_close(receive_cq)); REQUIRE_SUCCESS(uet_mr_close(region));
     REQUIRE_SUCCESS(uet_domain_close(domain)); REQUIRE_SUCCESS(uet_finalize(instance));
     fi_freeinfo(info); fi_freeinfo(hints);
-    puts("PASS reference: unchanged SES/PDS received WRITE/READ/SEND/AMO/FETCH/CAS and sent a verified reply");
+    puts("PASS reference: unchanged SES/PDS received WRITE/READ/SEND/AMO/FETCH/CAS/TAGGED and sent verified untagged/tagged replies");
     return 0;
 }

@@ -484,12 +484,16 @@
       "id": "SES-TAG",
       "reference": "Tables 3-1 to 3-4",
       "summary": "精确/通配 tag 与队列匹配",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "tagged_message_test",
+        "reference_process_interop"
+      ],
       "profiles": [
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public tagged mapping, optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md."
     },
     {
       "id": "SES-DEFER",

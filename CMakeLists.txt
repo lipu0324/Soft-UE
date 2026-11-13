@@ -129,6 +129,7 @@ if(BUILD_TESTING)
   softue_test(target_close_test TargetCloseTest.cpp)
   softue_test(message_completion_test MessageCompletionTest.cpp)
   softue_test(send_header_data_test SendHeaderDataTest.cpp)
+  softue_test(tagged_message_test TaggedMessageTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
   softue_test(streaming_read_test StreamingReadTest.cpp)
   # Boundary reports reject a stale binary instead of assigning current HEAD

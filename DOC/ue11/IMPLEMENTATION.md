@@ -39,6 +39,12 @@ local-ID separation; see [initial sequences](INITIAL-SEQUENCES.md).
 Standard SES requests reserve bounded message state before PDS receipt and use
 resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
 
+Native tagged matching keeps tag, Job-level rank and RMA keys separate. Exact and
+wildcard postings share FIFO selection within their own resource space; see
+[tagged messages](TAGGED-MESSAGES.md). Real-time adapters anchor late callbacks to
+the live injected clock; virtual simulations keep event-time stepping unchanged.
+See [real-time progress](REALTIME-PROGRESS.md).
+
 ## What runs
 
 - The original `PDS_Manager`, `I_PDC` and `T_PDC` run with an injected nanosecond
@@ -47,16 +53,19 @@ resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
   legacy-wire regression.
 - A new asynchronous SES entry point supports NO_OP, SEND into a posted receive
   region, fragmented WRITE, WRITE with immediate completion data, single-packet
-  DATAGRAM_SEND, fragmented native READ, SEND/DGRAM CQ header data, receiver-side deferrable-as-SEND, and non-fetching 8/16/32/64-bit integer atomics.
+  DATAGRAM_SEND, fragmented native READ, exact/wildcard tagged SEND, SEND/DGRAM CQ header data, receiver-side deferrable-as-SEND, non-fetching 8/16/32/64-bit integer atomics, and single-element 8–128-bit integer fetching/CAS.
   It uses the existing PDS/PDC implementation, not a replacement transport.
 - Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
   immediate. Native integer bytes remain little endian while atomic operand fields
 are encoded in network byte order, checked against an independent reference
 endpoint. Network atomics support signed/unsigned integer types and min, max,
-  sum, difference, product, logical/bitwise operations and atomic write. Fetching,
-  compare-and-swap, floating-point types and semantic-control hints remain outside
-  this increment's advertised atomic capabilities.
+  sum, difference, product, logical/bitwise operations and atomic write. Fetching
+  and compare-and-swap use a distinct result path with cached old values, including
+  zero-byte put/get; see [fetching atomics](FETCHING-ATOMICS.md) and
+  [zero-byte operations](ZERO-ATOMIC.md). Floating-point and complete semantic-control
+  support remain open. Private local placement registrations cannot authorize
+  direct remote RMA; see [placement authority](LOCAL-PLACEMENT.md).
 - A standard-wire subset explicitly encodes Ethernet, IPv4/IPv6, native UET/UDP,
   CRC32C, RUD/ROD/UUD request headers, ACK, NACK, CP, standard SES requests and
   semantic responses. Encoding a header does not establish its complete protocol

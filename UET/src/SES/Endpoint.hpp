@@ -12,7 +12,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7, TaggedSend=9 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -35,6 +35,8 @@ struct Operation {
     uint64_t remote_key = 0;
     uint64_t remote_offset = 0;
     uint64_t context = 0;
+    uint64_t tag=0; // Tagged SEND match bits; an RMA key remains a separate API value.
+    std::optional<uint32_t> initiator_id; // Job-level rank (§3.4.2.3.4); default node ID is simulator policy.
     std::vector<uint8_t> payload;
     IntegerAtomicOperation atomic_operation = IntegerAtomicOperation::Sum;
     IntegerAtomicDatatype atomic_datatype = IntegerAtomicDatatype::Uint64;
@@ -48,6 +50,12 @@ struct Operation {
     std::optional<AtomicResultBuffer> atomic_result;
     bool zero_length_atomic=false; // §3.4.2.12: explicit zero-byte put/get, distinct from READ's ignored input operand.
 };
+// Ignore bits apply to the tag only. An omitted initiator matches any source;
+// a specified rank is interpreted inside the posting's JobID, even with absolute addressing.
+struct TaggedReceiveMatch {
+    uint64_t tag=0,ignore=0;
+    std::optional<uint32_t> initiator;
+};
 struct Completion {
     uint64_t operation;
     uint64_t context;
@@ -58,13 +66,14 @@ struct Completion {
     std::optional<uint64_t> immediate_data;
     uint8_t remote_generation=0;
     uint32_t original_length=0; // Before receive truncation; never a placed-byte count.
+    std::optional<uint64_t> tag; // Actual received tag, including bits ignored by the posting.
 };
 struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
-    bool fetching_atomic=true, compare_atomic=true;
+    bool fetching_atomic=true, compare_atomic=true, tagged_send=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
@@ -134,7 +143,7 @@ public:
             complete_local(CompletionStatus::Unsupported); return id;
         }
         if (operation.type!=OperationType::Noop && operation.type!=OperationType::Send &&
-            operation.type!=OperationType::Write && !is_atomic && !is_datagram && !is_read) {
+            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read) {
             complete_local(CompletionStatus::Unsupported); return id;
         }
         uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
@@ -202,7 +211,7 @@ public:
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && !is_datagram) ||
+            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram) ||
             (operation.type==OperationType::Noop && payload_length)) {
             complete_local(CompletionStatus::InvalidRequest); return id;
         }
@@ -246,15 +255,11 @@ public:
     }
     void post_receive(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
                        uint32_t capacity, uint64_t context=0,uint16_t resource_index=1) {
-        if (closed_) throw std::logic_error("endpoint closed");
-        const auto registration=memory_.authorize_local(job,pid,key,offset,capacity,Access::Write,resource_index);
-        if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
-        posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration});
-        match_unexpected();
-        if (const auto disabled=disabled_generations_.find({pid,resource_index});disabled!=disabled_generations_.end()) {
-            resources_.recover_after_exhaustion(pid,resource_index,ResourceSpace::Send,disabled->second);
-            disabled_generations_.erase(disabled);
-        }
+        post_buffer(job,pid,key,offset,capacity,context,resource_index,{});
+    }
+    void post_tagged_receive(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint32_t capacity,
+                             TaggedReceiveMatch match,uint64_t context=0,uint16_t resource_index=1) {
+        post_buffer(job,pid,key,offset,capacity,context,resource_index,match);
     }
     bool poll_completion(Completion& completion) {
         if (completions_.empty()) return false;
@@ -347,7 +352,11 @@ private:
         bool requires_connection_retirement=false;
         bool connection_close_requested=false;
     };
-    struct Posted { uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity; uint64_t context; uint16_t resource_index; Region registration; };
+    struct Posted {
+        uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity;
+        uint64_t context; uint16_t resource_index; Region registration;
+        std::optional<TaggedReceiveMatch> match;
+    };
     struct Incoming {
         uint8_t opcode;
         uint32_t total;
@@ -372,7 +381,7 @@ private:
         uint8_t error_generation=0;
         CompletionStatus target_error=CompletionStatus::RemoteError;
         std::shared_ptr<SparseMemory> unexpected;
-        uint64_t receive_order=0;
+        uint64_t receive_order=0,tag=0;
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
         ReadCoverage read_requests;
@@ -403,7 +412,7 @@ private:
     size_t receive_message_limit_;
     uint64_t unexpected_limit_,unexpected_bytes_=0,next_receive_order_=0;
     std::map<uint64_t,MessageKey> unexpected_order_;
-    std::map<std::pair<uint16_t,uint16_t>,uint8_t> disabled_generations_;
+    std::map<std::tuple<uint16_t,uint16_t,ResourceSpace>,uint8_t> disabled_generations_;
     std::map<uint16_t,SourceMessage> sources_;
     std::deque<uint16_t> submission_order_;
     // A bounded target packet budget is independent of whole-message slots.
@@ -451,7 +460,9 @@ private:
             header.dc=!datagram; header.rel=operation.relative_addressing; header.ri_generation=operation.target_generation;
             header.msg_id=datagram?0:message; header.job_id=operation.job; header.PIDonFEP=operation.target_pid;
             header.resource_index=operation.target_resource; header.buffer_offset=operation.remote_offset;
-            header.initiator=node_; header.match_bits=operation.remote_key; header.request_length=transfer.length;
+            header.initiator=operation.initiator_id.value_or(node_);
+            header.match_bits=operation.type==OperationType::TaggedSend?operation.tag:operation.remote_key;
+            header.request_length=transfer.length;
             if (operation.immediate_data) {
                 header.hd=1;
                 if (!transfer.offset) header.diff.som_true.header_data=*operation.immediate_data;
@@ -871,6 +882,37 @@ private:
         }
         return SemanticReturnCode::Uncorrectable;
     }
+    static ResourceSpace message_space(uint8_t opcode) {
+        return opcode==5?ResourceSpace::Send:opcode==9?ResourceSpace::Tagged:ResourceSpace::Rma;
+    }
+    static bool posting_matches(const Posted& receive,uint32_t job,uint16_t pid,uint16_t resource_index,
+                                bool relative,bool tagged,uint64_t tag,uint32_t initiator) {
+        if (receive.match.has_value()!=tagged || (relative && receive.job!=job) ||
+            receive.pid!=pid || receive.resource_index!=resource_index) return false;
+        if (!tagged) return true;
+        const auto& match=*receive.match;
+        // §3.4.2.3.5: one FIFO among all matching exact/wildcard postings.
+        // A rank never acquires meaning outside its JobID (§3.4.2.3.4).
+        return !((tag^match.tag)&~match.ignore) &&
+            (!match.initiator || (receive.job==job && *match.initiator==initiator));
+    }
+    void post_buffer(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint32_t capacity,
+                     uint64_t context,uint16_t resource_index,std::optional<TaggedReceiveMatch> match) {
+        if (closed_) throw std::logic_error("endpoint closed");
+        const auto registration=memory_.authorize_local(job,pid,key,offset,capacity,Access::Write,resource_index);
+        if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
+        const auto space=match?ResourceSpace::Tagged:ResourceSpace::Send;
+        posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration,std::move(match)});
+        match_unexpected();
+        const auto disabled=disabled_generations_.find({pid,resource_index,space});
+        if (disabled!=disabled_generations_.end()) {
+            resources_.recover_after_exhaustion(pid,resource_index,space,disabled->second);
+            disabled_generations_.erase(disabled);
+        }
+    }
+    static std::optional<uint64_t> received_tag(const Incoming& message) {
+        return message.opcode==9?std::optional<uint64_t>{message.tag}:std::nullopt;
+    }
     void release_unexpected(Incoming& message) {
         if (!message.unexpected) return;
         unexpected_bytes_-=message.total;
@@ -887,8 +929,8 @@ private:
             if (found==incoming_.end() || !found->second.unexpected) { order=unexpected_order_.erase(order); continue; }
             auto& message=found->second;
             auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
-                return (!message.relative_addressing || receive.job==std::get<2>(key)) && receive.pid==message.pid &&
-                    receive.resource_index==message.resource_index;
+                return posting_matches(receive,std::get<2>(key),message.pid,message.resource_index,
+                    message.relative_addressing,message.opcode==9,message.tag,std::get<3>(key));
             });
             if (posted==posted_.end()) { ++order; continue; }
             const auto receive=*posted; posted_.erase(posted);
@@ -917,7 +959,7 @@ private:
                 }
                 if (message.received==message.total) {
                     message.completed=true; message.completion_reported=true;
-                    completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data});
+                    completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
                     if (message.deferred_response) {
                         message.completion_psn=message.deferred_response->orig_psn;
                         reply(*message.deferred_response,SemanticReturnCode::Ok,message.total);
@@ -937,12 +979,12 @@ private:
         // SEND still needs a matched receive to identify its completion. Its
         // header data must not create a separate unsolicited RMA notification.
         const bool has_header_data=message.has_immediate && message.immediate_data.has_value();
-        const bool unsolicited_completion=message.opcode!=static_cast<uint8_t>(OperationType::Send) && has_header_data;
+        const bool unsolicited_completion=message.opcode!=static_cast<uint8_t>(OperationType::Send) && message.opcode!=9 && has_header_data;
         if (!message.matched_receive && !unsolicited_completion) return;
         Completion completion{0,message.context,message.target_error,static_cast<uint32_t>(message.received),
             static_cast<uint8_t>(*message.first_error),true,
             has_header_data?message.immediate_data:std::optional<uint64_t>{},message.error_generation};
-        completion.original_length=message.total;
+        completion.original_length=message.total; completion.tag=received_tag(message);
         completions_.push_back(completion); message.completion_reported=true;
     }
     void reject_message(const PDC_SES_req& request,Incoming& message,SemanticReturnCode code,
@@ -994,7 +1036,7 @@ private:
         if (!existing) {
             const uint8_t opcode=header.opcode==0x08?static_cast<uint8_t>(OperationType::Send):header.opcode;
             Incoming message{opcode,static_cast<uint32_t>(header.request_length),header.match_bits,header.buffer_offset,0,0};
-            message.has_immediate=header.hd; message.error_generation=header.ri_generation;
+            message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
             incoming_.emplace(key,std::move(message));
         }
         // Reserve before PDS accepts a PSN. Even another packet of an existing
@@ -1213,11 +1255,11 @@ private:
             } else {
                 const auto original_opcode=message_error?message.opcode:static_cast<uint8_t>(header.opcode);
                 selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
-                    original_opcode==5?ResourceSpace::Send:ResourceSpace::Rma,header.ri_generation);
+                    message_space(original_opcode),header.ri_generation);
             }
         } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
-        if (header.version || (header.hd && header.opcode!=1 && header.opcode!=5 && !message_error) ||
-            (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && !message_error) ||
+        if (header.version || (header.hd && header.opcode!=1 && header.opcode!=5 && header.opcode!=9 && !message_error) ||
+            (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && header.opcode!=9 && !message_error) ||
             (message_error && !header.eom)) {
             reject(SemanticReturnCode::UnsupportedOperation); return;
         }
@@ -1251,10 +1293,10 @@ private:
                     if ((region.permissions&3u)!=3u) { reject(SemanticReturnCode::OperationViolation); return; }
                     message.atomic_operation=atomic_extension.atomic_opcode;
                     message.atomic_datatype=atomic_extension.atomic_datatype;
-                } else if (header.opcode==5) {
+                } else if (header.opcode==5 || header.opcode==9) {
                     auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
-                        return (!header.rel || receive.job==header.job_id) && receive.pid==selected.absolute_pid &&
-                            receive.resource_index==selected.resource_index;
+                        return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
+                            header.rel,header.opcode==9,header.match_bits,header.initiator);
                     });
                     if (posted==posted_.end()) {
                         if (poisoned) { reject(SemanticReturnCode::InitiatorError); return; }
@@ -1264,8 +1306,8 @@ private:
                         if (request.delivery_mode==RUD || deferrable_as_send) { reject(SemanticReturnCode::NoMatch); return; }
                         if (header.request_length>unexpected_limit_-unexpected_bytes_) {
                             const auto generation=resources_.disable_for_exhaustion(selected.absolute_pid,
-                                selected.resource_index,ResourceSpace::Send);
-                            disabled_generations_[{selected.absolute_pid,selected.resource_index}]=generation;
+                                selected.resource_index,message_space(header.opcode));
+                            disabled_generations_[{selected.absolute_pid,selected.resource_index,message_space(header.opcode)}]=generation;
                             reject(SemanticReturnCode::DisabledGeneration,generation); return;
                         }
                         message.unexpected=std::make_shared<SparseMemory>(message.total);
@@ -1298,6 +1340,9 @@ private:
             }
             if ((header.opcode==1 || header.opcode==3) &&
                 (message.key!=header.match_bits || message.base!=header.buffer_offset || message.has_immediate!=bool(header.hd))) {
+                reject(SemanticReturnCode::OperationViolation); return;
+            }
+            if (header.opcode==9 && (message.tag!=header.match_bits || message.has_immediate!=bool(header.hd))) {
                 reject(SemanticReturnCode::OperationViolation); return;
             }
             if (header.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
@@ -1342,7 +1387,7 @@ private:
             }
             if (message.received==message.total) {
                 message.completed=true; message.completion_reported=true; message.completion_psn=request.orig_psn;
-                if (header.opcode==5) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data});
+                if (header.opcode==5 || header.opcode==9) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
                 if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 trace_.record(node_,"memory_delivered",message.total);
@@ -1364,8 +1409,8 @@ private:
                 ResourceSpace::Send,header.ri_generation);
         } catch (const AddressingError&) { return; }
         auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
-            return (!header.rel || receive.job==header.job_id) && receive.pid==selected.absolute_pid &&
-                receive.resource_index==selected.resource_index;
+            return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
+                header.rel,false,0,header.initiator);
         });
         if (posted==posted_.end() || posted->capacity<request.pkt.payload.size()) return;
         try {

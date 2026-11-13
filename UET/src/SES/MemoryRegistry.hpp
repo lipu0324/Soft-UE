@@ -287,12 +287,16 @@ public:
     void write(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
         const auto& region=authorize(job,pid,key,offset,bytes.size(),Access::Write,resource_index,relative_addressing);
-        region.storage->write(offset,bytes.data(),bytes.size());
+        // §3.4.2.12: a zero-byte write authorizes the address but writes no
+        // memory. Storage adapters may observe calls, so do not call write(0).
+        if (!bytes.empty()) region.storage->write(offset,bytes.data(),bytes.size());
     }
     void write_registration(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
                const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={}) {
         const auto& region=authorize_registration(registration,job,pid,offset,bytes.size(),Access::Write,resource_index);
-        region.storage->write(offset,bytes.data(),bytes.size());
+        // §3.4.2.12: a zero-byte write authorizes the address but writes no
+        // memory. Storage adapters may observe calls, so do not call write(0).
+        if (!bytes.empty()) region.storage->write(offset,bytes.data(),bytes.size());
     }
     std::vector<uint8_t> read(uint32_t job,uint16_t pid,uint64_t key,
                              uint64_t offset,size_t length,std::optional<uint16_t> resource_index={},bool relative_addressing=true) const {
@@ -324,7 +328,9 @@ public:
         default: throw std::invalid_argument("unsupported atomic");
         }
         for (size_t i=0; i<8; ++i) bytes[i] = static_cast<uint8_t>(next >> (8*i));
-        region.storage->write(offset,bytes.data(),bytes.size());
+        // §3.4.2.12: a zero-byte write authorizes the address but writes no
+        // memory. Storage adapters may observe calls, so do not call write(0).
+        if (!bytes.empty()) region.storage->write(offset,bytes.data(),bytes.size());
         return previous;
     }
     std::vector<uint8_t> fetch_atomic_element(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
