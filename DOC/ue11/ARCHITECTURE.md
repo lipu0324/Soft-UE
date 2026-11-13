@@ -140,3 +140,10 @@ MR key 或指针。目标端捕获头的寿命也可能长于初始 Incoming。
 这些状态的具体变量、转换和可运行测试见
 [Deferrable SEND 事务](DEFERRABLE-TRANSACTIONS.md)。该文同时说明已选择的 J=0 捕获
 策略、MR 精确身份、源 token0、重启范围和取消后的远端状态，便于区分规范义务与模拟器策略。
+
+Rendezvous 则把同一用户事务连接到 eager 消息与反向 READ。两条线消息有不同 MID；
+目标内部 READ 使用私有 owner，不生成用户发送 CQ。源端必须等 READ payload 被实际
+ACK/Clear，目标端必须等结果实际放置；`ByteCoverage` 合并与 eager 的合法重叠。
+临时只读 MR 固定原源注册，捕获的头和 receive posting 固定目标注册，撤销后数值 key
+复用不能恢复旧授权。字段含义、状态图和独立完成竞态测试见
+[Rendezvous 事务](RENDEZVOUS.md)。

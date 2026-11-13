@@ -4,6 +4,8 @@
 #include "ResourceDirectory.hpp"
 #include "PayloadSource.hpp"
 #include "ReadCoverage.hpp"
+#include "ByteCoverage.hpp"
+#include "RendezvousMemory.hpp"
 #include "../PDS/DefaultSemanticResponse.hpp"
 #include "../Runtime/PdsHost.hpp"
 #include <deque>
@@ -12,7 +14,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7, DeferrableSend=8, TaggedSend=9, DeferrableTaggedSend=11 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -24,6 +26,14 @@ struct ReadResultBuffer {
 // Both operations use the same local registration descriptor. Their wire
 // response/recovery policies remain different (§3.5.17).
 using AtomicResultBuffer=ReadResultBuffer;
+// Trusted local source registration. The advertised rendezvous alias is a
+// separate, read-only registration bound to this exact original identity.
+struct RendezvousBuffer {
+    uint64_t key=0,offset=0;
+    uint32_t length=0;
+    uint16_t pid=1,resource_index=1;
+    uint8_t generation=0;
+};
 struct Operation {
     OperationType type = OperationType::Send;
     pdc_mode delivery_mode = ROD; // Reliable ordered by default; RUD permits packet reordering.
@@ -36,7 +46,7 @@ struct Operation {
     uint64_t remote_offset = 0;
     uint64_t context = 0;
     uint64_t tag=0; // Tagged SEND match bits; an RMA key remains a separate API value.
-    std::optional<uint32_t> peer_initiator_id; // Expected RTR sender rank; defaults to peer node proxy.
+    std::optional<uint32_t> peer_initiator_id; // Expected reverse RTR/READ rank; defaults to peer node proxy.
     std::optional<uint32_t> initiator_id; // Job-level rank (§3.4.2.3.4); default node ID is simulator policy.
     std::vector<uint8_t> payload;
     IntegerAtomicOperation atomic_operation = IntegerAtomicOperation::Sum;
@@ -49,6 +59,8 @@ struct Operation {
     std::optional<ReadResultBuffer> read_result;
     std::vector<uint8_t> atomic_compare; // One native little-endian compare/mask element, for dual-operand fetching only.
     std::optional<AtomicResultBuffer> atomic_result;
+    std::optional<RendezvousBuffer> rendezvous_source;
+    uint32_t rendezvous_eager_length=0;
     bool zero_length_atomic=false; // §3.4.2.12: explicit zero-byte put/get, distinct from READ's ignored input operand.
 };
 // Ignore bits apply to the tag only. An omitted initiator matches any source;
@@ -74,6 +86,7 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
+    bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
@@ -134,7 +147,9 @@ public:
         if (closed_) throw std::logic_error("endpoint closed");
         if (next_operation_==UINT64_MAX) throw std::overflow_error("operation ids exhausted");
         const auto application_operation_id=++next_operation_;
-        if (operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend)
+        if (operation.type==OperationType::RendezvousSend || operation.type==OperationType::RendezvousTaggedSend)
+            start_rendezvous_source(std::move(operation),application_operation_id);
+        else if (operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend)
             start_deferrable_source(std::move(operation),application_operation_id);
         else submit_message(std::move(operation),application_operation_id);
         return application_operation_id;
@@ -143,14 +158,17 @@ private:
     // A user operation and a wire message have different identities. Internal
     // continuations will retain the application's ID while allocating a fresh
     // MID and using the same original SES/PDS submission path.
-    uint16_t submit_message(Operation operation,uint64_t application_operation_id,uint32_t deferrable_token=0,uint32_t restart_owner=0) {
+    uint16_t submit_message(Operation operation,uint64_t application_operation_id,uint32_t deferrable_token=0,uint32_t restart_owner=0,uint64_t rendezvous_owner=0,uint64_t rendezvous_read_owner=0) {
         if (closed_) throw std::logic_error("endpoint closed");
         const auto complete_local=[&](CompletionStatus status) {
-            if (restart_owner) fail_deferred_target(restart_owner,status,0);
+            if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,0,0);
+            else if (rendezvous_owner) complete_rendezvous_source(rendezvous_owner,status,0,0);
+            else if (restart_owner) fail_deferred_target(restart_owner,status,0);
             else if (deferrable_token) complete_deferrable_source(deferrable_token,status,0,0);
             else completions_.push_back({application_operation_id,operation.context,status,0,0,false});
         };
         if (pending_.size() >= 4096) { complete_local(CompletionStatus::ResourceExhausted); return 0; }
+        const bool is_rendezvous=rendezvous_owner!=0;
         const bool is_restart=restart_owner!=0;
         const bool is_datagram=operation.type==OperationType::DatagramSend;
         const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic;
@@ -161,8 +179,11 @@ private:
             complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (operation.type!=OperationType::Noop && operation.type!=OperationType::Send &&
-            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read && !is_restart && !(is_deferrable && deferrable_token)) {
+            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read && !is_restart && !is_rendezvous && !(is_deferrable && deferrable_token)) {
             complete_local(CompletionStatus::Unsupported); return 0;
+        }
+        if (!is_rendezvous && (operation.rendezvous_source || operation.rendezvous_eager_length)) {
+            complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
         if (operation.zero_length_atomic && (!is_atomic || payload_length || operation.payload_source ||
@@ -178,6 +199,7 @@ private:
             complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         std::optional<Region> read_registration;
+        bool authorized_foreign_rendezvous_job=false;
         if (is_read && (operation.read_length || operation.read_result)) {
             if (!operation.read_result || operation.read_result->capacity<operation.read_length ||
                 operation.read_result->pid>0xfff || operation.read_result->resource_index>0xfff) {
@@ -185,7 +207,23 @@ private:
             }
             const auto& destination=*operation.read_result;
             try {
-                read_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
+                if (rendezvous_read_owner) {
+                    const auto owner=rendezvous_targets_.find(rendezvous_read_owner);
+                    if (owner==rendezvous_targets_.end() || !owner->second->receive)
+                        throw MemoryAccessError(MemoryError::InvalidKey);
+                    const auto& receive=*owner->second->receive;
+                    if (destination.key!=receive.key || destination.pid!=receive.pid || destination.resource_index!=receive.resource_index)
+                        throw MemoryAccessError(MemoryError::InvalidKey);
+                    read_registration=memory_.authorize_registration(receive.registration,operation.job,destination.pid,
+                        destination.offset,operation.read_length,Access::Write,destination.resource_index);
+                    // UE 1.1 §3.4.4.2: an absolute AnyJob posting can accept a
+                    // sender's Job without installing that Job locally. Only
+                    // this target-owned reverse READ inherits the validated
+                    // posting's authority; public submissions still need a
+                    // local Job, and the original registration remains pinned.
+                    authorized_foreign_rendezvous_job=!owner->second->header.rel &&
+                        owner->second->header.job_id==operation.job && read_registration->allow_any_job;
+                } else read_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
                     destination.offset,operation.read_length,Access::Write,destination.resource_index);
             } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return 0; }
         }
@@ -227,9 +265,9 @@ private:
                 }
             } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return 0; }
         }
-        if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
+        if (!operation.peer || (!memory_.has_job(operation.job) && !authorized_foreign_rendezvous_job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable) ||
+            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable && !is_rendezvous) ||
             (operation.type==OperationType::Noop && payload_length)) {
             complete_local(CompletionStatus::InvalidRequest); return 0;
         }
@@ -245,7 +283,8 @@ private:
         // generation instead of reporting zero after a nonzero-generation READ
         // or fetching atomic (e.g. following a provider BAD_GENERATION retry).
         pending.returned_generation=operation.target_generation; pending.deferrable_token=deferrable_token;
-        pending.restart_owner=restart_owner;
+        pending.restart_owner=restart_owner; pending.rendezvous_owner=rendezvous_owner;
+        pending.rendezvous_read_owner=rendezvous_read_owner;
         pending.is_datagram=is_datagram;
         pending.is_read=is_read; pending.read_result=operation.read_result;
         pending.read_registration=std::move(read_registration);
@@ -261,6 +300,19 @@ private:
                 transfer_length,0,0,false});
             sources_.at(message).deferrable_token=deferrable_token;
             sources_.at(message).restart_owner=restart_owner;
+            if (rendezvous_read_owner) rendezvous_targets_.at(rendezvous_read_owner)->active_read_message=message;
+            if (rendezvous_owner) {
+                const auto transaction=rendezvous_sources_.at(rendezvous_owner);
+                auto& transfer=sources_.at(message);
+                transaction->active_message=message; transfer.rendezvous_owner=rendezvous_owner;
+                transfer.rendezvous_total=transaction->total_length;
+                auto& extension=transfer.rendezvous_extension;
+                extension.eager_length=transaction->eager_length;
+                extension.read_PIDonFEP=transaction->original_operation.rendezvous_source->pid;
+                extension.read_resource_index=transaction->original_operation.rendezvous_source->resource_index;
+                extension.read_ri_generation=transaction->original_operation.rendezvous_source->generation;
+                extension.read_offset=0; extension.read_mem_key=transaction->alias_registration.key;
+            }
             if (deferrable_token) {
                 const auto transaction=deferred_sources_.at(deferrable_token);
                 transaction->active_message=message;
@@ -293,8 +345,9 @@ public:
         completion=completions_.front(); completions_.pop_front(); return true;
     }
     size_t pending() const {
-        size_t count=deferred_sources_.size();
-        for (const auto& operation:pending_) if (!operation.second.deferrable_token && !operation.second.restart_owner) ++count;
+        size_t count=deferred_sources_.size()+rendezvous_sources_.size();
+        for (const auto& operation:pending_) if (!operation.second.deferrable_token && !operation.second.restart_owner &&
+            !operation.second.rendezvous_owner && !operation.second.rendezvous_read_owner) ++count;
         return count;
     }
     // Simulator policy: enable bounded, header-only unexpected deferral (J=0).
@@ -306,13 +359,23 @@ public:
     }
     size_t captured_deferrable_headers() const { return deferred_targets_.size(); }
     size_t pending_deferrable_sends() const { return deferred_sources_.size(); }
+    bool cancel_rendezvous(uint64_t operation) {
+        if (!rendezvous_sources_.count(operation)) return false;
+        terminate_rendezvous_source(operation,CompletionStatus::Cancelled); return true;
+    }
     bool cancel_deferrable(uint64_t operation) {
         for (const auto& entry:deferred_sources_) if (entry.second->operation==operation) {
             terminate_deferrable_source(entry.first,CompletionStatus::Cancelled); return true;
         }
         return false;
     }
+    size_t retained_rendezvous_receives() const { return rendezvous_targets_.size(); }
+    void configure_rendezvous(size_t limit=64,std::optional<uint32_t> read_initiator={}) {
+        if (!limit || !rendezvous_targets_.empty()) throw std::invalid_argument("invalid rendezvous header limit/state");
+        rendezvous_target_limit_=limit; rendezvous_read_initiator_=read_initiator;
+    }
     bool cancel_read(uint64_t operation) {
+        if (!operation) return false; // ID0 is reserved for private protocol work.
         for (const auto& pending:pending_) if (pending.second.id==operation && pending.second.is_read) {
             // Local cancellation stops further placement, not packets already
             // on the fabric. Their reverse DEFAULTs still drain PDS state.
@@ -322,6 +385,8 @@ public:
         return false;
     }
     bool transport_pending(uint64_t operation) const {
+        if (!operation) return false;
+        if (rendezvous_sources_.count(operation)) return true;
         for (const auto& transaction:deferred_sources_) if (transaction.second->operation==operation) return true;
         for (const auto& pending:pending_) if (pending.second.id==operation) return true;
         for (const auto& lease:message_leases_) if (lease.second.operation==operation) return true;
@@ -354,8 +419,10 @@ public:
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!deferred_sources_.empty()) complete_deferrable_source(deferred_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
+        while (!rendezvous_sources_.empty()) complete_rendezvous_source(rendezvous_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!deferred_targets_.empty()) fail_deferred_target(deferred_targets_.begin()->first,CompletionStatus::Cancelled,0);
-        incoming_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
+        while (!rendezvous_targets_.empty()) fail_rendezvous_target(rendezvous_targets_.begin()->first,CompletionStatus::Cancelled,0,0);
+        incoming_.clear(); rendezvous_order_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
         posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
         read_returns_.clear(); read_packet_reservations_.clear();
     }
@@ -371,6 +438,9 @@ private:
         bool started=false; // Packet history, independent of byte offset for zero-byte markers.
         uint32_t deferrable_token=0,restart_owner=0;
         uint64_t restart_tokens=0;
+        uint64_t rendezvous_owner=0;
+        uint32_t rendezvous_total=0;
+        SES_Rendezvous_Extension_Header rendezvous_extension{};
     };
     struct Pending {
         uint64_t id,context; uint32_t length; Runtime::TimerId timer; uint32_t peer,job;
@@ -393,6 +463,7 @@ private:
         uint32_t completed_length=0;
         uint8_t returned_generation=0;
         uint32_t deferrable_token=0,restart_owner=0;
+        uint64_t rendezvous_owner=0,rendezvous_read_owner=0;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
     struct RestartRequest {
@@ -461,6 +532,9 @@ private:
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
         uint32_t captured_header=0,reserved_restart=0,deferrable_source_token=0;
+        uint64_t rendezvous_target=0;
+        bool rendezvous_eager=false;
+        uint32_t rendezvous_semantic_length=0; // Sticky result survives retiring the logical receive.
         ReadCoverage read_requests;
         size_t read_returns_pending=0;
     };
@@ -479,6 +553,55 @@ private:
     size_t deferred_header_limit_=0;
     uint32_t target_restart_initiator_=0; // Configured local Job rank; default node proxy is simulator policy.
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
+    struct RendezvousSourceTransaction {
+        enum class Phase { Eager, Backoff, WaitingForRead };
+        Operation original_operation;
+        std::shared_ptr<const PayloadSource> registered_source;
+        Region alias_registration;
+        uint64_t application_operation_id;
+        uint16_t source_absolute_pid=0,source_resource_index=1;
+        uint32_t total_length,eager_length,accepted_eager_length=0,attempt=0,retries=0;
+        uint16_t active_message=0,retiring_message=0;
+        Phase phase=Phase::Eager;
+        bool first_response_received=false,eager_completed=false,read_completed=false,backoff_ready=false;
+        uint8_t success_opcode=0,success_list=0,success_generation=0;
+        Runtime::TimerId deadline=0,backoff=0;
+        ByteCoverage confirmed_bytes;
+        struct ReadAcknowledgement {
+            uint32_t length;
+            ReadCoverage confirmed;
+            bool end_confirmed=false;
+        };
+        std::map<MessageKey,ReadAcknowledgement> reads;
+        std::set<ConnectionKey> connections;
+    };
+    struct RendezvousTargetTransaction {
+        uint64_t id,arrival_order;
+        MessageKey eager_message;
+        SES_Standard_Header header;
+        SES_Rendezvous_Extension_Header extension;
+        ResourceSelection selected;
+        uint32_t peer,accepted_eager,semantic_length;
+        std::optional<Posted> receive;
+        std::optional<uint64_t> immediate;
+        ReadCoverage eager_bytes,wire_eager_bytes;
+        ByteCoverage placed_bytes;
+        std::optional<uint32_t> sent_eager_length;
+        uint32_t highest_eager_end=0;
+        bool first_response_generated=false;
+        bool start_seen=false,end_seen=false,eager_completed=false,read_submitted=false,read_completed=false;
+        uint16_t active_read_message=0;
+        std::set<ConnectionKey> connections;
+    };
+    std::map<uint64_t,std::shared_ptr<RendezvousTargetTransaction>> rendezvous_targets_;
+    std::map<uint64_t,uint64_t> rendezvous_order_; // Semantic arrival -> target-owned transaction.
+    size_t rendezvous_target_limit_=64;
+    uint64_t next_rendezvous_target_=0;
+    std::optional<uint32_t> rendezvous_read_initiator_; // Internal READ sender rank; node proxy by default.
+    std::set<std::tuple<uint16_t,uint16_t,ResourceSpace>> rendezvous_disabled_resources_;
+    std::map<uint64_t,std::shared_ptr<RendezvousSourceTransaction>> rendezvous_sources_;
+    std::map<uint64_t,uint64_t> rendezvous_source_aliases_; // Advertised MR key -> local user operation ID.
+    size_t rendezvous_source_limit_=64;
     uint32_t node_;
     Runtime::PdsHost& host_;
     Runtime::EventLoop& loop_;
@@ -514,13 +637,482 @@ private:
     size_t read_response_limit_;
     size_t read_result_window_;
     uint16_t next_read_response_=0;
-    struct ReadReservation { MessageKey message; bool processed=false; };
+    struct ReadReservation {
+        MessageKey message; bool processed=false;
+        std::function<void()> data_confirmed; // Local rendezvous ownership only; empty for ordinary READ.
+        std::function<void()> data_failed;
+    };
     std::map<ReadPacketIdentity,ReadReservation> read_packet_reservations_;
     struct ReadReturn {
         PDC_SES_req original;
         std::optional<uint32_t> sequence;
     };
     std::map<uint16_t,ReadReturn> read_returns_;
+
+    void recover_rendezvous_resources() {
+        if (rendezvous_targets_.size()>=rendezvous_target_limit_) return;
+        for (const auto& key:rendezvous_disabled_resources_) {
+            const auto disabled=disabled_generations_.find(key);
+            if (disabled==disabled_generations_.end()) continue;
+            resources_.recover_after_exhaustion(std::get<0>(key),std::get<1>(key),std::get<2>(key),disabled->second);
+            disabled_generations_.erase(disabled);
+        }
+        rendezvous_disabled_resources_.clear();
+    }
+    void retire_rendezvous_target(uint64_t id) {
+        const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
+        rendezvous_order_.erase(found->second->arrival_order); rendezvous_targets_.erase(found);
+        recover_rendezvous_resources();
+    }
+    static std::optional<uint64_t> rendezvous_tag(const RendezvousTargetTransaction& transaction) {
+        return transaction.header.opcode==10?std::optional<uint64_t>{static_cast<uint64_t>(transaction.header.match_bits)}:std::nullopt;
+    }
+    void fail_rendezvous_target(uint64_t id,CompletionStatus status,uint8_t code,uint32_t read_bytes) {
+        const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
+        const auto transaction=found->second;
+        const auto active=transaction->active_read_message;
+        if (const auto read=pending_.find(active);read!=pending_.end())
+            read_bytes=std::max(read_bytes,static_cast<uint32_t>(read->second.read_results.bytes()));
+        // Remove logical ownership before cancelling the private READ: its
+        // completion callback must not generate a second receive completion.
+        retire_rendezvous_target(id);
+        const auto incoming=incoming_.find(transaction->eager_message);
+        if (incoming!=incoming_.end() && !incoming->second.completed) {
+            auto& message=incoming->second;
+            if (!message.first_error) message.first_error=code?static_cast<SemanticReturnCode>(code):SemanticReturnCode::Undeliverable;
+            message.completed=message.end_seen;
+            if (message.deferred_response) {
+                reply_error(*message.deferred_response,message); message.deferred_response.reset();
+            }
+        }
+        if (pending_.count(active)) finish(active,CompletionStatus::Cancelled,read_bytes,0);
+        if (transaction->receive) {
+            const auto placed=static_cast<uint32_t>(transaction->placed_bytes.bytes());
+            completions_.push_back({0,transaction->receive->context,status,placed,code,true,transaction->immediate,0,
+                transaction->header.request_length,rendezvous_tag(*transaction)});
+        }
+    }
+    void maybe_complete_rendezvous_target(uint64_t id) {
+        const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
+        const auto transaction=found->second;
+        if (!transaction->receive || !transaction->eager_completed || !transaction->read_completed) return;
+        completions_.push_back({0,transaction->receive->context,CompletionStatus::Success,
+            transaction->header.request_length,1,true,transaction->immediate,0,0,rendezvous_tag(*transaction)});
+        retire_rendezvous_target(id);
+        trace_.record(node_,"rendezvous_receive_complete",id);
+    }
+    void rendezvous_read_complete(uint64_t id,CompletionStatus status,uint32_t length,uint8_t code) {
+        const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
+        const auto transaction=found->second;
+        transaction->active_read_message=0;
+        if (status!=CompletionStatus::Success) { fail_rendezvous_target(id,status,code,length); return; }
+        transaction->read_completed=true; maybe_complete_rendezvous_target(id);
+    }
+    void start_rendezvous_read(const std::shared_ptr<RendezvousTargetTransaction>& transaction) {
+        if (!transaction->receive || transaction->read_submitted) return;
+        transaction->read_submitted=true;
+        const auto& receive=*transaction->receive;
+        const auto& extension=transaction->extension;
+        Operation read; read.type=OperationType::Read; read.delivery_mode=RUD;
+        read.peer=transaction->peer; read.job=transaction->header.job_id;
+        read.source_pid=receive.pid; read.target_pid=extension.read_PIDonFEP;
+        read.target_resource=extension.read_resource_index; read.target_generation=extension.read_ri_generation;
+        // §3.4.5.3 permits reading more than strictly necessary. This native
+        // policy reads the whole message, so an early/truncated eager portion
+        // cannot leave a gap. Registered placement coverage merges overlaps.
+        read.remote_key=extension.read_mem_key; read.remote_offset=extension.read_offset;
+        read.read_length=transaction->header.request_length;
+        read.relative_addressing=transaction->header.rel;
+        read.initiator_id=rendezvous_read_initiator_.value_or(node_);
+        read.read_result=ReadResultBuffer{receive.key,receive.offset,
+            read.read_length,receive.pid,receive.resource_index};
+        // A real zero-length READ supplies the second completion point when
+        // eager covers the full message. The descriptor remains pinned too.
+        submit_message(std::move(read),0,0,0,0,transaction->id);
+        trace_.record(node_,"rendezvous_read_started",transaction->id);
+    }
+    bool bind_rendezvous_posting(const std::shared_ptr<RendezvousTargetTransaction>& transaction,const Posted& receive) {
+        transaction->receive=receive; rendezvous_order_.erase(transaction->arrival_order);
+        const auto incoming=incoming_.find(transaction->eager_message);
+        const auto fail=[&](SemanticReturnCode code,CompletionStatus status) {
+            if (incoming!=incoming_.end() && !incoming->second.first_error) incoming->second.first_error=code;
+            fail_rendezvous_target(transaction->id,status,static_cast<uint8_t>(code),0); return false;
+        };
+        if (receive.capacity<transaction->header.request_length)
+            return fail(SemanticReturnCode::UnsupportedSize,CompletionStatus::Truncated);
+        try {
+            memory_.authorize_registration(receive.registration,transaction->header.job_id,receive.pid,receive.offset,
+                transaction->header.request_length,Access::Write,receive.resource_index);
+        } catch (const MemoryAccessError& error) { return fail(memory_code(error.code),CompletionStatus::LocalError); }
+        return true;
+    }
+    void match_rendezvous_target(uint64_t id) {
+        const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
+        const auto transaction=found->second; if (transaction->receive) return;
+        const auto& header=transaction->header;
+        const auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+            return posting_matches(receive,header.job_id,transaction->selected.absolute_pid,transaction->selected.resource_index,
+                header.rel,header.opcode==10,header.match_bits,header.initiator);
+        });
+        if (posted==posted_.end()) return;
+        const auto receive=*posted; posted_.erase(posted);
+        // A late posting cannot change the original eager acceptance of zero.
+        if (bind_rendezvous_posting(transaction,receive)) start_rendezvous_read(transaction);
+    }
+    static PDC_SES_req rendezvous_response_handle(const PDC_SES_req& request) {
+        // Keep only the protocol handle/header while waiting for a RUD hole.
+        // Eager bytes have already been placed or intentionally discarded.
+        PDC_SES_req handle{};
+        handle.PDCID=request.PDCID; handle.rx_pkt_handle=request.rx_pkt_handle;
+        handle.orig_psn=request.orig_psn; handle.source_fep=request.source_fep;
+        handle.connection_start_psn=request.connection_start_psn; handle.delivery_mode=request.delivery_mode;
+        handle.pkt.bth_type=Standard_Header; handle.pkt.bth_header=request.pkt.bth_header;
+        return handle;
+    }
+    void receive_rendezvous(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        auto& message=incoming_.at(receive_message_key(request));
+        message.completion_reported=true; // Only the root owns an application CQ.
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
+        const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
+            reject_message(request,message,code,generation);
+            if (message.rendezvous_target) fail_rendezvous_target(message.rendezvous_target,
+                CompletionStatus::RemoteError,static_cast<uint8_t>(code),0);
+        };
+        if (message.first_error) { reject(*message.first_error); return; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        const bool abort=header.opcode==0x0f;
+        if (header.version || (!abort && header.opcode!=6 && header.opcode!=10) ||
+            (!abort && request.pkt.eth_type!=Rendezvous_Extension_Header) || (abort && !header.eom)) {
+            reject(SemanticReturnCode::UnsupportedOperation); return;
+        }
+        if (abort || header.ie) { reject(SemanticReturnCode::InitiatorError); return; }
+        const auto& extension=request.pkt.eth_header.Rendezvous_Extension_Header;
+        const uint32_t offset=header.som?0:header.diff.som_false.message_offset;
+        const auto count=request.pkt.payload.size();
+        if (extension.eager_length>header.request_length || extension.read_offset>UINT64_MAX-header.request_length ||
+            offset>extension.eager_length || count>extension.eager_length-offset ||
+            (!header.som && count!=header.diff.som_false.payload_length)) {
+            reject(SemanticReturnCode::UnsupportedSize); return;
+        }
+        std::shared_ptr<RendezvousTargetTransaction> transaction;
+        if (!message.rendezvous_target) {
+            ResourceSelection selected{};
+            try {
+                selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                    header.opcode==10?ResourceSpace::Tagged:ResourceSpace::Send,header.ri_generation);
+            } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
+            if (rendezvous_targets_.size()>=rendezvous_target_limit_ || next_rendezvous_target_==UINT64_MAX) {
+                if (request.delivery_mode==ROD) {
+                    const auto space=header.opcode==10?ResourceSpace::Tagged:ResourceSpace::Send;
+                    const auto generation=resources_.disable_for_exhaustion(selected.absolute_pid,selected.resource_index,space);
+                    const auto key=std::make_tuple(selected.absolute_pid,selected.resource_index,space);
+                    disabled_generations_[key]=generation; rendezvous_disabled_resources_.insert(key);
+                    reject(SemanticReturnCode::DisabledGeneration,generation);
+                } else reject(SemanticReturnCode::NoMatch);
+                return;
+            }
+            const auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+                return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
+                    header.rel,header.opcode==10,header.match_bits,header.initiator);
+            });
+            const bool expected=posted!=posted_.end();
+            transaction=std::make_shared<RendezvousTargetTransaction>();
+            transaction->id=++next_rendezvous_target_; transaction->arrival_order=++next_receive_order_;
+            transaction->eager_message=receive_message_key(request); transaction->header=header; transaction->extension=extension;
+            transaction->selected=selected; transaction->peer=request.source_fep;
+            transaction->accepted_eager=expected?static_cast<uint32_t>(extension.eager_length):0;
+            transaction->semantic_length=expected?static_cast<uint32_t>(header.request_length):0;
+            transaction->connections.insert({request.source_fep,request.PDCID,request.connection_start_psn});
+            rendezvous_targets_.emplace(transaction->id,transaction);
+            message.rendezvous_target=transaction->id; message.response_list=expected?0:1; message.initialized=true;
+            message.rendezvous_semantic_length=transaction->semantic_length;
+            message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
+            message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
+            if (expected) {
+                const auto receive=*posted; posted_.erase(posted);
+                if (!bind_rendezvous_posting(transaction,receive)) { reply_error(request,message); return; }
+            } else rendezvous_order_.emplace(transaction->arrival_order,transaction->id);
+        } else {
+            const auto found=rendezvous_targets_.find(message.rendezvous_target);
+            if (found==rendezvous_targets_.end()) {
+                if (message.completed) reply(request,SemanticReturnCode::Ok,message.rendezvous_semantic_length);
+                else reject(SemanticReturnCode::OperationViolation);
+                return;
+            }
+            transaction=found->second;
+        }
+        const auto& original=transaction->header; const auto& advertised=transaction->extension;
+        if (header.opcode!=original.opcode || header.request_length!=original.request_length || header.rel!=original.rel ||
+            header.PIDonFEP!=original.PIDonFEP || header.resource_index!=original.resource_index || header.ri_generation!=original.ri_generation ||
+            header.hd!=original.hd || (header.opcode==10 && header.match_bits!=original.match_bits) ||
+            extension.eager_length!=advertised.eager_length || extension.read_PIDonFEP!=advertised.read_PIDonFEP ||
+            extension.read_resource_index!=advertised.read_resource_index || extension.read_ri_generation!=advertised.read_ri_generation ||
+            extension.read_offset!=advertised.read_offset || extension.read_mem_key!=advertised.read_mem_key ||
+            (header.som && header.hd && transaction->start_seen && transaction->immediate!=
+                std::optional<uint64_t>{static_cast<uint64_t>(header.diff.som_true.header_data)})) {
+            reject(SemanticReturnCode::OperationViolation); return;
+        }
+        if (header.som) { transaction->start_seen=true; if (header.hd) transaction->immediate=header.diff.som_true.header_data; }
+        if (header.eom) transaction->end_seen=true;
+        const auto wire_end=static_cast<uint32_t>(offset+count);
+        if (count) {
+            if (transaction->wire_eager_bytes.add(offset,static_cast<uint32_t>(count),extension.eager_length)!=ReadCoverage::Addition::Added) {
+                reject(SemanticReturnCode::OperationViolation); return;
+            }
+            transaction->highest_eager_end=std::max(transaction->highest_eager_end,wire_end);
+        }
+        if (header.eom) {
+            if (transaction->sent_eager_length && *transaction->sent_eager_length!=wire_end) {
+                reject(SemanticReturnCode::OperationViolation); return;
+            }
+            transaction->sent_eager_length=wire_end;
+        }
+        if (transaction->sent_eager_length && transaction->highest_eager_end>*transaction->sent_eager_length) {
+            reject(SemanticReturnCode::OperationViolation); return;
+        }
+        const uint32_t placed=offset>=transaction->accepted_eager?0:static_cast<uint32_t>(
+            std::min<uint64_t>(count,transaction->accepted_eager-offset));
+        if (placed) {
+            if (transaction->eager_bytes.add(offset,placed,transaction->accepted_eager)!=ReadCoverage::Addition::Added) {
+                reject(SemanticReturnCode::OperationViolation); return;
+            }
+            try {
+                std::vector<uint8_t> bytes(request.pkt.payload.begin(),request.pkt.payload.begin()+placed);
+                const auto& receive=*transaction->receive;
+                memory_.write_registration(receive.registration,header.job_id,receive.pid,receive.offset+offset,bytes,receive.resource_index);
+                transaction->placed_bytes.cover(offset,placed,transaction->header.request_length);
+            } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); return; }
+        }
+        message.received=transaction->eager_bytes.bytes();
+        // Conservative native completion waits for all constructed eager
+        // bytes through the real EOM offset, including discarded bytes. The
+        // advertised cap can be larger after the sender shortens its transfer.
+        transaction->eager_completed=transaction->start_seen && transaction->end_seen && transaction->sent_eager_length &&
+            transaction->wire_eager_bytes.bytes()==*transaction->sent_eager_length &&
+            transaction->eager_bytes.bytes()==std::min(transaction->accepted_eager,*transaction->sent_eager_length);
+        message.completed=transaction->eager_completed;
+        if (header.eom && !transaction->eager_completed) message.deferred_response=rendezvous_response_handle(request);
+        else {
+            reply(request,SemanticReturnCode::Ok,transaction->semantic_length,
+                !transaction->first_response_generated || transaction->eager_completed || message.response_list);
+            transaction->first_response_generated=true;
+        }
+        if (transaction->eager_completed && message.deferred_response) {
+            reply(*message.deferred_response,SemanticReturnCode::Ok,transaction->semantic_length); message.deferred_response.reset();
+        }
+        // Eager and READ are separate wire messages (§3.4.5.3). Retiring this
+        // Incoming does not retire the retained header or complete the user.
+        if (transaction->receive) start_rendezvous_read(transaction);
+        maybe_complete_rendezvous_target(transaction->id);
+    }
+
+    void start_rendezvous_source(Operation operation,uint64_t application_operation_id) {
+        const auto local_failure=[&](CompletionStatus status) {
+            completions_.push_back({application_operation_id,operation.context,status,0,0,false});
+        };
+        if (!operation.rendezvous_source || !operation.payload.empty() || operation.payload_source ||
+            operation.read_length || operation.read_result || operation.atomic_result || !operation.atomic_compare.empty() ||
+            operation.zero_length_atomic || operation.remote_offset || operation.remote_key ||
+            !operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff ||
+            operation.target_resource>0xfff || (operation.delivery_mode!=RUD && operation.delivery_mode!=ROD)) {
+            local_failure(CompletionStatus::InvalidRequest); return;
+        }
+        const auto source=*operation.rendezvous_source;
+        if (source.pid>0xfff || source.resource_index>0xfff || operation.rendezvous_eager_length>source.length) {
+            local_failure(CompletionStatus::InvalidRequest); return;
+        }
+        if (rendezvous_sources_.size()>=rendezvous_source_limit_) { local_failure(CompletionStatus::ResourceExhausted); return; }
+        std::shared_ptr<RendezvousSourceTransaction> transaction;
+        try {
+            const auto selected=resources_.resolve(operation.job,operation.relative_addressing,source.pid,source.resource_index,
+                ResourceSpace::Rma,source.generation);
+            const auto registration=memory_.authorize(operation.job,selected.absolute_pid,source.key,source.offset,source.length,
+                Access::Read,selected.resource_index,operation.relative_addressing);
+            transaction=std::make_shared<RendezvousSourceTransaction>();
+            transaction->registered_source=std::make_shared<RegisteredReadPayload>(memory_,registration,operation.job,
+                selected.absolute_pid,selected.resource_index,source.offset,source.length);
+            transaction->source_absolute_pid=selected.absolute_pid; transaction->source_resource_index=selected.resource_index;
+        } catch (const MemoryAccessError&) { local_failure(CompletionStatus::LocalError); return; }
+        catch (const AddressingError&) { local_failure(CompletionStatus::LocalError); return; }
+        catch (const std::bad_alloc&) { local_failure(CompletionStatus::ResourceExhausted); return; }
+        transaction->application_operation_id=application_operation_id;
+        transaction->total_length=source.length; transaction->eager_length=operation.rendezvous_eager_length;
+        transaction->original_operation=std::move(operation);
+        rendezvous_sources_.emplace(application_operation_id,transaction);
+        std::weak_ptr<int> life=lifetime_;
+        transaction->deadline=loop_.after(timeout_,[this,life,application_operation_id] {
+            if (!life.expired()) terminate_rendezvous_source(application_operation_id,CompletionStatus::Timeout);
+        });
+        queue_rendezvous_attempt(application_operation_id);
+    }
+    void queue_rendezvous_attempt(uint64_t operation) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end() || closed_) return;
+        const auto transaction=found->second;
+        // A retry advertises a fresh key. Old READ acknowledgements keep their
+        // attempt number and cannot complete this new eager/READ transaction.
+        rendezvous_source_aliases_.erase(transaction->alias_registration.key);
+        memory_.deregister(transaction->alias_registration);
+        try {
+            RegionOptions options; options.resource_index=transaction->source_resource_index; options.bind_zero_pid=true;
+            transaction->alias_registration=memory_.register_storage(transaction->original_operation.job,
+                transaction->source_absolute_pid,std::make_shared<ReadOnlyPayloadStorage>(transaction->registered_source),
+                static_cast<uint8_t>(Access::Read),options);
+        } catch (const MemoryAccessError&) { complete_rendezvous_source(operation,CompletionStatus::LocalError,0,0); return; }
+        catch (const std::exception&) { complete_rendezvous_source(operation,CompletionStatus::ResourceExhausted,0,0); return; }
+        rendezvous_source_aliases_.emplace(transaction->alias_registration.key,operation);
+        ++transaction->attempt; transaction->phase=RendezvousSourceTransaction::Phase::Eager;
+        transaction->first_response_received=false; transaction->eager_completed=false; transaction->read_completed=false;
+        transaction->backoff_ready=false; transaction->confirmed_bytes=ByteCoverage{}; transaction->reads.clear();
+        auto request=transaction->original_operation;
+        request.payload_source=std::make_shared<SlicedPayload>(transaction->registered_source,0,transaction->eager_length);
+        submit_message(std::move(request),operation,0,0,operation);
+        trace_.record(node_,"rendezvous_eager_started",operation);
+    }
+    void complete_rendezvous_source(uint64_t operation,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation=0) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end()) return;
+        const auto transaction=found->second; rendezvous_sources_.erase(found);
+        loop_.cancel(transaction->deadline); loop_.cancel(transaction->backoff);
+        rendezvous_source_aliases_.erase(transaction->alias_registration.key);
+        memory_.deregister(transaction->alias_registration);
+        transaction->registered_source.reset();
+        completions_.push_back({operation,transaction->original_operation.context,status,
+            status==CompletionStatus::Success?transaction->total_length:length,code,false,{},generation});
+        trace_.record(node_,"operation_complete",operation);
+    }
+    void terminate_rendezvous_source(uint64_t operation,CompletionStatus status) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end()) return;
+        const auto active=found->second->active_message;
+        if (active && pending_.count(active)) { finish(active,status,0,0); feed_submissions(); }
+        else complete_rendezvous_source(operation,status,0,0);
+    }
+    void maybe_complete_rendezvous_source(uint64_t operation) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end()) return;
+        const auto transaction=found->second;
+        if (transaction->eager_completed && transaction->read_completed && transaction->reads.empty() &&
+            transaction->confirmed_bytes.bytes()==transaction->total_length)
+            complete_rendezvous_source(operation,CompletionStatus::Success,transaction->total_length,1,
+                transaction->success_generation);
+    }
+    void rendezvous_eager_complete(uint64_t operation,uint16_t message,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end()) return;
+        const auto transaction=found->second;
+        if (transaction->active_message!=message) return;
+        transaction->active_message=0; transaction->retiring_message=message;
+        if (status==CompletionStatus::Success) {
+            transaction->success_generation=generation;
+            transaction->eager_completed=true; transaction->phase=RendezvousSourceTransaction::Phase::WaitingForRead;
+            transaction->confirmed_bytes.cover(0,transaction->accepted_eager_length,transaction->total_length);
+            trace_.record(node_,"rendezvous_eager_complete",operation); maybe_complete_rendezvous_source(operation); return;
+        }
+        if (status==CompletionStatus::RemoteError && code>=2 && code<=5) {
+            if (code==2 || code==4) transaction->original_operation.target_generation=generation;
+            transaction->phase=RendezvousSourceTransaction::Phase::Backoff;
+            const auto exponent=std::min(transaction->retries++,uint32_t{4});
+            const auto delay=std::min<Runtime::Time>(10*Runtime::kMillisecond,Runtime::kMillisecond<<exponent);
+            std::weak_ptr<int> life=lifetime_;
+            transaction->backoff=loop_.after(delay,[this,life,operation] {
+                if (life.expired()) return;
+                const auto retry=rendezvous_sources_.find(operation); if (retry==rendezvous_sources_.end()) return;
+                retry->second->backoff=0; retry->second->backoff_ready=true; drive_rendezvous_sources();
+            });
+            feed_submissions(); return;
+        }
+        complete_rendezvous_source(operation,status,length,code,generation);
+    }
+    void drive_rendezvous_sources() {
+        if (closed_) return;
+        std::vector<uint64_t> ready;
+        for (const auto& entry:rendezvous_sources_) {
+            const auto& transaction=*entry.second;
+            if (transaction.phase==RendezvousSourceTransaction::Phase::Backoff && transaction.backoff_ready &&
+                !message_leases_.count(transaction.retiring_message) && !sources_.count(transaction.retiring_message)) ready.push_back(entry.first);
+        }
+        for (const auto operation:ready) queue_rendezvous_attempt(operation);
+    }
+    void handle_rendezvous_result(uint16_t message,const SES_Semantic_Response_Header& semantic) {
+        const auto pending=pending_.find(message); if (pending==pending_.end()) return;
+        const auto found=rendezvous_sources_.find(pending->second.rendezvous_owner); if (found==rendezvous_sources_.end()) return;
+        const auto transaction=found->second;
+        // Table3-26 reports processed bytes, never a count beyond the
+        // original message. Reject malformed error results too: otherwise an
+        // untrusted response could expose an impossible application CQ length.
+        if (semantic.opcode==1 && semantic.modified_length>transaction->total_length) {
+            finish(message,CompletionStatus::RemoteError,0,static_cast<uint8_t>(SemanticReturnCode::OperationViolation));
+            feed_submissions(); return;
+        }
+        if (semantic.return_code!=1) {
+            finish(message,CompletionStatus::RemoteError,semantic.modified_length,semantic.return_code,semantic.ri_generation);
+            feed_submissions(); return;
+        }
+        const auto modified=semantic.opcode==0?transaction->total_length:static_cast<uint32_t>(semantic.modified_length);
+        const auto accepted=std::min(transaction->eager_length,modified);
+        if (modified>transaction->total_length || (transaction->first_response_received &&
+            (transaction->accepted_eager_length!=accepted || transaction->success_opcode!=semantic.opcode ||
+                transaction->success_list!=semantic.list))) {
+            finish(message,CompletionStatus::RemoteError,0,static_cast<uint8_t>(SemanticReturnCode::OperationViolation));
+            feed_submissions(); return;
+        }
+        pending->second.returned_generation=semantic.ri_generation;
+        if (!transaction->first_response_received) {
+            transaction->first_response_received=true; transaction->accepted_eager_length=accepted;
+            transaction->success_opcode=semantic.opcode; transaction->success_list=semantic.list;
+            feed_submissions();
+        }
+        const auto active=pending_.find(message);
+        if (active!=pending_.end() && active->second.end_of_message_transmitted && active->second.awaiting_semantic_responses.empty())
+            finish(message,CompletionStatus::Success,accepted,1,semantic.ri_generation);
+    }
+    void confirm_rendezvous_read(uint64_t operation,uint32_t attempt,MessageKey message,
+                                 uint32_t message_offset,uint32_t original_offset,uint32_t count,bool end) {
+        const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end() || found->second->attempt!=attempt) return;
+        const auto transaction=found->second;
+        const auto read=transaction->reads.find(message); if (read==transaction->reads.end()) return;
+        if (read->second.confirmed.add(message_offset,count,read->second.length)==ReadCoverage::Addition::Invalid ||
+            !transaction->confirmed_bytes.cover(original_offset,count,transaction->total_length))
+            throw std::logic_error("invalid locally tracked rendezvous READ confirmation");
+        read->second.end_confirmed|=end;
+        if (read->second.end_confirmed && read->second.confirmed.bytes()==read->second.length) {
+            transaction->read_completed=true; transaction->reads.erase(read);
+        }
+        trace_.record(node_,"rendezvous_read_confirmed",operation); maybe_complete_rendezvous_source(operation);
+    }
+    bool bind_rendezvous_read(const PDC_SES_req& request,uint32_t offset,uint32_t count) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto owner=rendezvous_source_aliases_.find(header.match_bits);
+        if (owner==rendezvous_source_aliases_.end()) return true; // Ordinary MR READ.
+        const auto application_operation=owner->second;
+        const auto found=rendezvous_sources_.find(application_operation); if (found==rendezvous_sources_.end()) throw std::logic_error("orphaned rendezvous MR alias");
+        const auto transaction=found->second; const auto& operation=transaction->original_operation;
+        auto& incoming=incoming_.at(receive_message_key(request));
+        const auto reject=[&](SemanticReturnCode code) { reject_message(request,incoming,code); return false; };
+        if (header.job_id!=operation.job) return reject(SemanticReturnCode::PermissionViolation);
+        if (request.source_fep!=operation.peer || header.initiator!=operation.peer_initiator_id.value_or(operation.peer))
+            return reject(SemanticReturnCode::OperationViolation);
+        const auto& source=*operation.rendezvous_source;
+        if (header.rel!=operation.relative_addressing || header.PIDonFEP!=source.pid || header.resource_index!=source.resource_index)
+            return reject(SemanticReturnCode::OperationViolation);
+        if (header.buffer_offset>transaction->total_length || header.request_length>transaction->total_length-header.buffer_offset) {
+            reject(SemanticReturnCode::BadAddress); terminate_rendezvous_source(application_operation,CompletionStatus::RemoteError); return false;
+        }
+        const auto key=receive_message_key(request);
+        auto [read,inserted]=transaction->reads.try_emplace(key,RendezvousSourceTransaction::ReadAcknowledgement{static_cast<uint32_t>(header.request_length)});
+        if (!inserted && read->second.length!=header.request_length) return reject(SemanticReturnCode::OperationViolation);
+        transaction->connections.insert({request.source_fep,request.PDCID,request.connection_start_psn});
+        const auto attempt=transaction->attempt;
+        const auto original_offset=static_cast<uint32_t>(header.buffer_offset)+offset;
+        const bool end=header.eom;
+        auto& credit=read_packet_reservations_.at(ReadPacketIdentity::from(request));
+        credit.data_confirmed=[this,application_operation,attempt,key,offset,original_offset,count,end] {
+            confirm_rendezvous_read(application_operation,attempt,key,offset,original_offset,count,end);
+        };
+        credit.data_failed=[this,application_operation,attempt] {
+            const auto active=rendezvous_sources_.find(application_operation);
+            if (active!=rendezvous_sources_.end() && active->second->attempt==attempt)
+                terminate_rendezvous_source(application_operation,CompletionStatus::RemoteError);
+        };
+        return true;
+    }
 
     void start_deferrable_source(Operation operation,uint64_t application_operation_id) {
         const auto local_failure=[&](CompletionStatus status) {
@@ -687,6 +1279,13 @@ private:
                 deferred=transaction->second;
                 if (transfer.started && !deferred->first_response_seen) break;
             }
+            std::shared_ptr<RendezvousSourceTransaction> rendezvous;
+            if (transfer.rendezvous_owner && !transfer.aborting) {
+                const auto transaction=rendezvous_sources_.find(transfer.rendezvous_owner);
+                if (transaction==rendezvous_sources_.end()) throw std::logic_error("missing rendezvous source transaction");
+                rendezvous=transaction->second;
+                if (transfer.started && !rendezvous->first_response_received) break;
+            }
             const bool datagram=operation.type==OperationType::DatagramSend;
             const bool fetching_atomic=operation.type==OperationType::FetchingAtomic;
             const bool atomic=operation.type==OperationType::Atomic || fetching_atomic;
@@ -696,7 +1295,9 @@ private:
             const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
             const auto fragment_capacity=mtu_-(mtu_%atomic_width);
             const bool deferred_end=deferred && deferred->deferred && transfer.started;
-            auto count=(transfer.aborting || deferred_end || restart)?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
+            const auto transfer_end=rendezvous && rendezvous->first_response_received?rendezvous->accepted_eager_length:transfer.length;
+            const auto remaining=transfer.offset>=transfer_end?uint64_t{0}:transfer_end-transfer.offset;
+            auto count=(transfer.aborting || deferred_end || restart)?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,remaining));
             SES_PDS_req request{};
             request.src_fep=node_; request.dst_fep=operation.peer;
             request.source_pid=operation.source_pid;
@@ -706,7 +1307,8 @@ private:
             auto& header=request.pkt.bth_header.Standard_Header;
             header.opcode=transfer.aborting?0x0f:static_cast<uint8_t>(operation.type); header.version=0;
             header.som=!transfer.started;
-            header.eom=transfer.aborting || deferred_end || restart || (transfer.offset+count==transfer.length && (!deferred || deferred->first_response_seen));
+            header.eom=transfer.aborting || deferred_end || restart || (transfer.offset+count>=transfer_end && (!deferred || deferred->first_response_seen) &&
+                (!rendezvous || rendezvous->first_response_received));
             header.dc=!datagram; header.rel=operation.relative_addressing; header.ri_generation=operation.target_generation;
             header.msg_id=datagram?0:message; header.job_id=operation.job; header.PIDonFEP=operation.target_pid;
             header.resource_index=operation.target_resource;
@@ -714,8 +1316,12 @@ private:
             // has released its source, so a reserved target can retire too.
             header.buffer_offset=transfer.deferrable_token?transfer.restart_tokens:operation.remote_offset;
             header.initiator=operation.initiator_id.value_or(node_);
-            header.match_bits=(operation.type==OperationType::TaggedSend || operation.type==OperationType::DeferrableTaggedSend)?operation.tag:operation.remote_key;
-            header.request_length=transfer.length;
+            header.match_bits=(operation.type==OperationType::TaggedSend || operation.type==OperationType::DeferrableTaggedSend || operation.type==OperationType::RendezvousTaggedSend)?operation.tag:operation.remote_key;
+            header.request_length=transfer.rendezvous_owner?transfer.rendezvous_total:transfer.length;
+            if (transfer.rendezvous_owner && !transfer.aborting) {
+                request.pkt.eth_type=Rendezvous_Extension_Header;
+                request.pkt.eth_header.Rendezvous_Extension_Header=transfer.rendezvous_extension;
+            }
             if (operation.immediate_data) {
                 header.hd=1;
                 if (header.som) header.diff.som_true.header_data=*operation.immediate_data;
@@ -746,7 +1352,7 @@ private:
             // fields are padded16B slots, not a vector of datatype elements.
             if (atomic && !fetching_atomic && !transfer.aborting)
                 convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
-            request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:0)+request.pkt.payload.size());
+            request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+request.pkt.payload.size());
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
@@ -786,7 +1392,9 @@ private:
         }
         const auto deferrable_token=it->second.deferrable_token;
         const auto restart_owner=it->second.restart_owner;
-        if (!deferrable_token && !restart_owner) {
+        const auto rendezvous_owner=it->second.rendezvous_owner;
+        const auto rendezvous_read_owner=it->second.rendezvous_read_owner;
+        if (!deferrable_token && !restart_owner && !rendezvous_owner && !rendezvous_read_owner) {
             completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
             trace_.record(node_,"operation_complete",it->second.id);
         } else trace_.record(node_,"wire_message_complete",message);
@@ -803,6 +1411,8 @@ private:
         const bool finish_read_tail=it->second.is_read && status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess;
         pending_.erase(it);
         if (deferrable_token) deferrable_message_complete(deferrable_token,message,status,length,code,remote_generation);
+        if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,length,code);
+        if (rendezvous_owner) rendezvous_eager_complete(rendezvous_owner,message,status,length,code,remote_generation);
         if (restart_owner && status!=CompletionStatus::Success) fail_deferred_target(restart_owner,status,code);
         if (finish_read_tail) feed_submissions();
     }
@@ -813,12 +1423,24 @@ private:
             for (const auto& transaction:deferred_sources_)
                 if (transaction.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) failed.push_back(transaction.first);
             for (const auto token:failed) {
-                const auto transaction=deferred_sources_.at(token);
+                const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end()) continue;
+                const auto transaction=found->second;
                 const auto active=pending_.find(transaction->active_message);
                 if (active!=pending_.end() && ConnectionKey{active->second.peer,active->second.local_pdc,
                     active->second.connection_start_psn}==ConnectionKey{event.peer,event.local_pdc,event.connection_start_psn})
                     discard_source(transaction->active_message); // This PDC cannot carry an abort tail.
                 terminate_deferrable_source(token,event.failure==Runtime::PdcFailureReason::RetryExhausted?
+                    CompletionStatus::Timeout:CompletionStatus::RemoteError);
+            }
+            std::vector<uint64_t> rendezvous_failed;
+            for (const auto& transaction:rendezvous_sources_)
+                if (transaction.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) rendezvous_failed.push_back(transaction.first);
+            for (const auto operation:rendezvous_failed) {
+                const auto found=rendezvous_sources_.find(operation); if (found==rendezvous_sources_.end()) continue;
+                const auto active=pending_.find(found->second->active_message);
+                if (active!=pending_.end() && ConnectionKey{active->second.peer,active->second.local_pdc,active->second.connection_start_psn}==
+                    ConnectionKey{event.peer,event.local_pdc,event.connection_start_psn}) discard_source(active->first);
+                terminate_rendezvous_source(operation,event.failure==Runtime::PdcFailureReason::RetryExhausted?
                     CompletionStatus::Timeout:CompletionStatus::RemoteError);
             }
             failed.clear();
@@ -827,6 +1449,12 @@ private:
                     failed.push_back(target.first);
             for (const auto token:failed) fail_deferred_target(token,CompletionStatus::RemoteError,
                 static_cast<uint8_t>(SemanticReturnCode::Undeliverable));
+            std::vector<uint64_t> failed_receives;
+            for (const auto& receive:rendezvous_targets_)
+                if (receive.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) failed_receives.push_back(receive.first);
+            for (const auto receive:failed_receives) fail_rendezvous_target(receive,
+                event.failure==Runtime::PdcFailureReason::RetryExhausted?CompletionStatus::Timeout:CompletionStatus::RemoteError,
+                static_cast<uint8_t>(SemanticReturnCode::Undeliverable),0);
         }
         if (event.kind==Runtime::PdcEventKind::ReceiveCleared || event.kind==Runtime::PdcEventKind::ConnectionClosed) {
             for (auto credit=read_packet_reservations_.begin();credit!=read_packet_reservations_.end();) {
@@ -834,7 +1462,11 @@ private:
                 const bool context=packet.peer==event.peer && packet.local_pdc==event.local_pdc &&
                     packet.connection_start_psn==event.connection_start_psn;
                 if (context && (event.kind==Runtime::PdcEventKind::ConnectionClosed || event.sequence-packet.sequence<0x80000000u))
+                {
+                    const auto confirmed=credit->second.data_confirmed;
                     credit=read_packet_reservations_.erase(credit);
+                    if (confirmed && (event.kind==Runtime::PdcEventKind::ReceiveCleared || event.failure==Runtime::PdcFailureReason::None)) confirmed();
+                }
                 else ++credit;
             }
             if (event.kind==Runtime::PdcEventKind::ConnectionClosed) {
@@ -878,7 +1510,7 @@ private:
             // Rejection either precedes transmission or follows context teardown.
             // PDS has removed all queued fragments and retired the incarnation.
             message_leases_.erase(event.message_id);
-            feed_submissions(); drive_deferrable_sources();
+            feed_submissions(); drive_deferrable_sources(); drive_rendezvous_sources();
             return;
         }
         const ConnectionKey connection{event.peer,event.local_pdc,event.connection_start_psn};
@@ -888,6 +1520,14 @@ private:
                 if (operation->second.deferrable_token) {
                     const auto transaction=deferred_sources_.find(operation->second.deferrable_token);
                     if (transaction!=deferred_sources_.end()) transaction->second->connections.insert(connection);
+                }
+                if (operation->second.rendezvous_owner) {
+                    const auto transaction=rendezvous_sources_.find(operation->second.rendezvous_owner);
+                    if (transaction!=rendezvous_sources_.end()) transaction->second->connections.insert(connection);
+                }
+                if (operation->second.rendezvous_read_owner) {
+                    const auto owner=rendezvous_targets_.find(operation->second.rendezvous_read_owner);
+                    if (owner!=rendezvous_targets_.end()) owner->second->connections.insert(connection);
                 }
                 operation->second.local_pdc=event.local_pdc;
                 operation->second.connection_start_psn=event.connection_start_psn;
@@ -934,6 +1574,8 @@ private:
                         unfinished.target_error=event.failure==Runtime::PdcFailureReason::RetryExhausted?
                             CompletionStatus::Timeout:CompletionStatus::RemoteError;
                         report_receive_error(unfinished);
+                        if (unfinished.rendezvous_target) fail_rendezvous_target(unfinished.rendezvous_target,
+                            unfinished.target_error,static_cast<uint8_t>(SemanticReturnCode::Undeliverable),0);
                         if (unfinished.reserved_restart) retire_deferred_target(unfinished.reserved_restart);
                     }
                     release_unexpected(message->second);
@@ -958,7 +1600,7 @@ private:
                 feed_submissions();
             }
         }
-        drive_deferrable_sources();
+        drive_deferrable_sources(); drive_rendezvous_sources();
     }
     void complete_read_return(const PDC_SES_rsp& response) {
         if (response.pkt.bth_type!=Semantic_Response_Header) return;
@@ -971,7 +1613,12 @@ private:
             response.original_sequence!=*found->second.sequence || header.job_id!=original.pkt.bth_header.Standard_Header.job_id)
             return;
         read_returns_.erase(found);
+        const auto credit=read_packet_reservations_.find(ReadPacketIdentity::from(original));
+        const auto confirmed=credit==read_packet_reservations_.end()?std::function<void()>{}:credit->second.data_confirmed;
+        const auto failed=credit==read_packet_reservations_.end()?std::function<void()>{}:credit->second.data_failed;
         read_packet_reservations_.erase(ReadPacketIdentity::from(original));
+        if (header.return_code==1 && confirmed) confirmed();
+        if (header.return_code!=1 && failed) failed();
         const auto incoming=incoming_.find(receive_message_key(original));
         if (incoming==incoming_.end()) return;
         auto& message=incoming->second;
@@ -1059,6 +1706,11 @@ private:
         } catch (const MemoryAccessError&) {
             finish(message,CompletionStatus::LocalError,previous_bytes,0); return;
         }
+        if (addition==ReadCoverage::Addition::Added && operation.rendezvous_read_owner) {
+            const auto owner=rendezvous_targets_.find(operation.rendezvous_read_owner);
+            if (owner!=rendezvous_targets_.end()) owner->second->placed_bytes.cover(offset,
+                static_cast<uint32_t>(packet.payload.size()),owner->second->header.request_length);
+        }
         trace_.record(node_,"read_result_placed",operation.read_results.bytes());
         maybe_complete_returned_data(message);
         feed_submissions();
@@ -1099,6 +1751,9 @@ private:
         if (response.PDCID!=it->second.local_pdc || response.connection_start_psn!=it->second.connection_start_psn) return;
         if (semantic_header.opcode>1) return;
         if (!it->second.awaiting_semantic_responses.erase(response.original_sequence)) return;
+        if (it->second.rendezvous_owner) {
+            handle_rendezvous_result(semantic_header.message_id,semantic_header); return;
+        }
         if (it->second.deferrable_token) {
             handle_deferrable_result(semantic_header.message_id,semantic_header);
             return;
@@ -1235,10 +1890,16 @@ private:
         // §3.4.4.7.2.2: ROD unexpected messages preserve acceptance order.
         // Buffering is internal SES storage; placement into an application MR
         // still requires a posting and the ordinary JobID/key/bounds checks.
-        std::map<uint64_t,uint32_t> arrivals=deferred_order_;
-        for (const auto& entry:unexpected_order_) arrivals.emplace(entry.first,0);
+        // All buffered message kinds compete in one semantic arrival order.
+        // The kind is local metadata, not a wire token or an MR namespace.
+        enum class BufferedKind { Payload, DeferrableHeader, RendezvousHeader };
+        std::map<uint64_t,std::pair<BufferedKind,uint64_t>> arrivals;
+        for (const auto& entry:deferred_order_) arrivals.emplace(entry.first,std::make_pair(BufferedKind::DeferrableHeader,entry.second));
+        for (const auto& entry:rendezvous_order_) arrivals.emplace(entry.first,std::make_pair(BufferedKind::RendezvousHeader,entry.second));
+        for (const auto& entry:unexpected_order_) arrivals.emplace(entry.first,std::make_pair(BufferedKind::Payload,0));
         for (const auto& arrival:arrivals) {
-            if (arrival.second) { match_deferred_target(arrival.second); continue; }
+            if (arrival.second.first==BufferedKind::DeferrableHeader) { match_deferred_target(static_cast<uint32_t>(arrival.second.second)); continue; }
+            if (arrival.second.first==BufferedKind::RendezvousHeader) { match_rendezvous_target(arrival.second.second); continue; }
             const auto order=unexpected_order_.find(arrival.first);
             if (order==unexpected_order_.end()) continue;
             const auto key=order->second;
@@ -1316,6 +1977,14 @@ private:
         message.completed=message.end_seen && (message.opcode!=2 || !message.read_returns_pending);
         report_receive_error(message);
         if (message.reserved_restart) retire_deferred_target(message.reserved_restart);
+        if (message.opcode==2) {
+            const auto credit=read_packet_reservations_.find(ReadPacketIdentity::from(request));
+            if (credit!=read_packet_reservations_.end()) {
+                const auto failed=credit->second.data_failed;
+                credit->second.data_confirmed={}; credit->second.data_failed={};
+                if (failed) failed(); // An error ACK never confirms payload delivery.
+            }
+        }
         // The packet that exposed the error gets the first guarantee. A
         // previously held EOM may also need an explicit result, but it must
         // not steal that guarantee merely because its handle was deferred.
@@ -1352,9 +2021,11 @@ private:
             return Runtime::SemanticAdmission::Rejected;
         }
         if (!existing) {
-            const uint8_t opcode=nondeferring_send_opcode(header.opcode);
+            const uint8_t opcode=header.opcode==6?5:header.opcode==10?9:nondeferring_send_opcode(header.opcode);
             Incoming message{opcode,static_cast<uint32_t>(header.request_length),header.match_bits,header.buffer_offset,0,0};
             message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
+            message.rendezvous_eager=header.opcode==6 || header.opcode==10;
+            if (message.rendezvous_eager) message.completion_reported=true; // The transaction owns the single receive CQ.
             incoming_.emplace(key,std::move(message));
         }
         // Reserve before PDS accepts a PSN. Even another packet of an existing
@@ -1653,6 +2324,7 @@ private:
             message.relative_addressing!=bool(header.rel) || message.error_generation!=header.ri_generation)) {
             reject(SemanticReturnCode::OperationViolation); return;
         }
+        if (!bind_rendezvous_read(request,offset,count)) return;
         try {
             if (!message.initialized) {
                 memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,header.buffer_offset,
@@ -1773,6 +2445,8 @@ private:
         if (request.pkt.bth_type==Semantic_Response_with_Data_Header) { receive_return_data(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
         if (request.pkt.bth_header.Standard_Header.opcode==0x0c) { receive_restart(request); return; }
+        const auto incoming=incoming_.find(receive_message_key(request));
+        if (incoming!=incoming_.end() && incoming->second.rendezvous_eager) { receive_rendezvous(request); return; }
         if (receive_deferrable_target(request)) return;
         if (request.pkt.bth_header.Standard_Header.opcode==2) { receive_read(request); return; }
         if (request.pkt.bth_header.Standard_Header.opcode==4) { receive_fetching_atomic(request); return; }

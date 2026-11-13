@@ -523,12 +523,21 @@
       "summary": "rendezvous 与 unexpected 消息",
       "status": "partial",
       "tests": [
-        "rendezvous_header_test"
+        "rendezvous_header_test",
+        "rendezvous_source_test",
+        "rendezvous_transaction_test",
+        "rendezvous_target_eager_test",
+        "rendezvous_fault_test",
+        "rendezvous_isolation_test",
+        "rendezvous_boundary_test",
+        "rendezvous_lifecycle_test",
+        "rendezvous_malformed_test",
+        "rendezvous_addressing_test"
       ],
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Only24byte Figure3-21 extension encoding/decoding is implemented for every standard opcode0x06/0x0a fragment. Independent golden bytes cover32 opcode/SOM/IP/carrier/CRC combinations, truncated frames and wrong extension type; existing wire regression and ASan/UBSan/leak unit checks pass. Native/public rendezvous source/target semantics, eager policy, pinned source MR, real READ completion and unexpected/resource/error/cancellation integration remain missing. No rendezvous API capability or Profile claim. See RENDEZVOUS-HEADERS.md."
+      "evidence_note": "Native registered-buffer rendezvous SEND/TSEND now connects standard24-byte extensions, bounded eager acceptance/header capture, real RUD READ with both carriers, exact source/result MR identity and independent eager/READ completion. Source completion waits for real READ payload ACK/Clear and union coverage; target completion waits for actual placement and eager SOM/EOM/wire holes. Independent source oracle, native expected/late/NSCC matrices, packet faults, cancellation/deadlines/close, MR revoke/reuse, Job/FEP/rank/read-only alias isolation, absolute AnyJob authority, resource pressure/shared FIFO, malformed fields/results and mapped addressing/generation retries are covered. The4GiB-1 logical descriptor/last-byte test is not a full rendezvous transfer. Public provider selection, optimized headers, complete Sync Group/TSS/Profile acceptance and full large rendezvous experiments remain open. See RENDEZVOUS.md."
     },
     {
       "id": "SES-FETCH",
@@ -818,7 +827,7 @@
         "AI_BASE",
         "HPC"
       ],
-      "evidence_note": "Narrow receiver compatibility behavior only: opcode 0x08, token/address separation, posting/NoMatch in both ROD and RUD, explicit retry and header data. Full deferral/RTR/restart and tagged deferrable sends remain unimplemented."
+      "evidence_note": "Narrow default receiver compatibility behavior: opcode0x08, token/address separation, posting/NoMatch in both ROD and RUD, explicit retry and header data. Optional native deferral/RTR/restart and tagged transactions are tracked separately by SES-DEFER; this verified fallback does not establish complete deferrable semantics."
     }
   ]
 }
