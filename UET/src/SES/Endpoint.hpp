@@ -1386,7 +1386,10 @@ private:
                 return;
             }
             if (message.received==message.total) {
-                message.completed=true; message.completion_reported=true; message.completion_psn=request.orig_psn;
+                // §3.4.2.14 / §3.5.11.4.3: the packet filling the last RUD
+                // hole may precede EOM in PSN order. Retire only when Clear
+                // reaches the EOM recorded on arrival, not this last placement.
+                message.completed=true; message.completion_reported=true;
                 if (header.opcode==5 || header.opcode==9) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
                 if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});

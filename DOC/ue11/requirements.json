@@ -710,14 +710,15 @@
       "tests": [
         "message_completion_test",
         "message_retirement_test",
-        "context_reuse_test"
+        "context_reuse_test",
+        "receive_eom_retirement_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "66000 exactly-once integer operations cross the 16-bit message-ID space; EOM-scoped default responses, explicit full-length RUD completion and error-path ID leases are checked independently."
+      "evidence_note": "66000 exactly-once integer operations cross the 16-bit message-ID space; EOM-scoped default responses, explicit full-length RUD completion and error-path ID leases are checked independently. A delayed RUD SOM fills the last hole after EOM; real partial Clear CPs must retain WRITE/SEND/tagged message state until the actual EOM PSN is cleared. The baseline premature-retirement failure and three-path fix are recorded in RECEIVE-EOM-RETIREMENT.md."
     },
     {
       "id": "SES-FIRST-ERROR",

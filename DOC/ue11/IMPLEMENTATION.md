@@ -142,12 +142,14 @@ wake callback without polling. Closing a host detaches both callbacks.
 
 `Endpoint::submit()` returns an operation ID; `poll_completion()` returns one
 completion per local operation, with a caller context and remote status where
-applicable. Unsupported READ requests and unadvertised atomic operations/types
+applicable. Invalid local result descriptors and unadvertised atomic operations/types
 are rejected before transmission. `LocalSuccess` for UUD means the local port
 accepted the datagram; it makes no claim about target receipt. `Success` for a
 reliable operation follows the semantic response. WRITE immediate data is
 delivered through a separate target completion without consuming a SEND receive.
-Posted SEND receive completions are separate from sender completions. A timeout
+Posted SEND receive completions are separate from sender completions. RUD target
+state waits for the actual EOM PSN to be cleared, even when an earlier fragment
+fills the last byte hole; see [EOM retirement](RECEIVE-EOM-RETIREMENT.md). A timeout
 does not prove that no remote bytes were written. Application code must not
 destroy its own endpoint or host reentrantly from a handler; it may close them
 and defer destruction to a later event.
