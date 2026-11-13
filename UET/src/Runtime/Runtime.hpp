@@ -94,6 +94,11 @@ struct Services {
     bool actual_transmit_notifications=false; // Set by a port with a first-bit departure boundary.
     uint64_t next_pdc_incarnation=0;
     PDS::ReceiveErrorCounters pds_error_counters;
+    // Per-FEP SES authority survives replacing the Endpoint on this host.
+    // Use a 64-bit cursor so exhaustion of the 32-bit wire token cannot wrap
+    // silently onto a stale deferred transaction. Simulation may inject it.
+    uint64_t next_semantic_restart_token=1;
+
 };
 
 class EventLoop final : public IClock, public ITimerQueue {

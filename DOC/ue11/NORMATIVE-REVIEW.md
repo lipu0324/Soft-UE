@@ -138,7 +138,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0131-001 | §2.2.10.4，optimized 原子条件项 | 原子操作使用与 RMA 相同的 optimized 头前提；使用该头的建议另列 SHOULD。 | optimized 未实现。该段将 SMALL 表示 optimized non-matching；与后续 small-message 表题须按正式 SES 格式区分。 |
 | UE11-p0132-001 | §2.2.10.4，small RMA 原子条件项 | 原子也采用 small RMA 的适用前提。 | small RMA 未实现；与 optimized 条件分开，不把两类紧凑头合并。 |
 | UE11-p0132-002 | 表 2-43，small RMA 映射 | hd 必须为零，其余 opcode/dc/rel/index/generation/Job/PID/长度/offset/initiator/key 按各自来源映射。 | 未实现；无 CQ data 是必要前提，不能静默丢弃调用者提供的 CQ data 来选择该头。 |
-| UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | M5 缺失；需要跨 endpoint/并发/取消/复用的唯一性与迟到 RTR 回归。 |
+| UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | 原生源/目标 token 使用 FEP Services 的64位游标，32位耗尽拒绝回绕；并发、取消、替换 Endpoint 与迟到 RTR 有回归。实际 reference RTR 互通仍待验；见 DEFERRABLE-TRANSACTIONS.md。 |
 | UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | M5 缺失；源 MR 撤销、偏移边界及全消息 READ 必须共同验证。 |
 | UE11-p0133-002 | §2.2.10.4，原子映射 | libfabric datatype/op 映射至 SES 对应 mnemonic。 | 当前支持的 8 种整数类型、12 种非取回操作已有 native/wire/provider 回归；fetching/CAS 另有8～128位整数、固定双操作数格式与旧值缓存/公开掩码转换证据；浮点和完整类型矩阵仍未验收。 |
 | UE11-p0133-003 | §2.2.10.4，CAS 扩展 | compare/swap 来自 API，每个值尺寸不超过 16 字节，并带正确 opcode/datatype。 | CAS 未实现；后续还需类型允许集、单单位和目标对齐/权限检查。 |
@@ -256,7 +256,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0220-001 | 表 3-9 续，地址/DS/长度 | buffer base+offset+消息偏移寻址；初始 DS 的 initiator token 唯一、target 半部0；每包都填 request_length，零长度合法。 | native 受检偏移、零长度和重复长度字段已有测试；DS token 与 FI_MR_VIRT_ADDR 未实现，当前不声明 VIRT_ADDR。 |
 | UE11-p0221-001 | 表 3-10，非 SOM payload | 十八位 reserved 为零，十四位 payload_length 正确，其余字段继承标准头。 | 显式 codec 和多包 WRITE 有覆盖；新增 reserved 忽略/重编码测试保留有效 payload_length/offset。 |
 | UE11-p0222-001 | 表 3-10 续，长度重复 | 非 SOM 也携带完整 request_length 和消息 offset。 | native READ 分片也保留完整总长与 offset，请求 payload_length0；重启消息格式仍另验。 |
-| UE11-p0222-002 | §3.4.3.1，RTR 与重启跨页 | target 不分配 token 时置0，可再次 defer；非零 token 对应重启恰好一次且之后不再 defer；重启 SOM=1，offset 0..2^32−2。 | M5 缺失；已阅读下一页续文，资源耗尽重试不计作 DS deferral。需要区分协议重启和网络重传。 |
+| UE11-p0222-002 | §3.4.3.1，RTR 与重启跨页 | target 不分配 token 时置0，可再次 defer；非零 token 对应重启恰好一次且之后不再 defer；重启 SOM=1，offset 0..2^32−2。 | 原生源支持零 token 再次延期、非零 token 一次重启、新 SOM/RUD MID、原 metadata 和请求后缀；拒绝 offset2^32−1，验证2^32−2。真实 PDS 处理网络重传，独立对端检查控制重放。 |
 | UE11-p0223-001 | §3.4.3.1，重启字段保持 | 每次 DS 重启保留原请求地址和 header data；request_length 使用 RTR 指定值。 | M5 缺失；重启新 message offset 与目标保留的原始偏移必须分开跟踪。 |
 | UE11-p0226-001 | §3.4.3.3，本地 packing 首消息 | 首个 optimized local 头 ac=0；单消息时 ac=0 且 mm=0。 | M8 未实现；不能把多个标准头直接拼接成 local packing。 |
 
@@ -323,9 +323,9 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
-| UE11-p0247-004 | §3.4.4.6，DS 初始传输 | OK/length0 后仍发至少一个 EOM 包；OK/full length 发送全部 payload；初始窗口上限为 SHOULD。 | 完整 DS 发起端未实现，目标 DS-as-SEND 子集不能代替。 |
-| UE11-p0248-001 | §3.4.4.6，DS header 耗尽 | DS 必须实现 header 耗尽时 backoff/retry，buffered header 为 SHOULD。 | M5 缺失，需与已捕获 header 等待 RTR 的情况区分。 |
-| UE11-p0248-002 | §3.4.4.6，restart token | 初始 target token0；非零 target token 保证重启可匹配；defer 后等待 RTR，只重发请求部分；backoff 不产生 RTR。 | M5 缺失；32+32 位 token 生命周期、陈旧/重复 RTR 和再次 defer 均待测。 |
+| UE11-p0247-004 | §3.4.4.6，DS 初始传输 | OK/length0 后仍发至少一个 EOM 包；OK/full length 发送全部 payload；初始窗口上限为 SHOULD。 | 原生源首包不置 EOM，OK/0 后零 EOM 并等待 RTR，OK/full 后发完；0字节、MTU/多包、NSCC 和丢响应有端到端回归。源首包上限1 MTU为保守策略。 |
+| UE11-p0248-001 | §3.4.4.6，DS header 耗尽 | DS 必须实现 header 耗尽时 backoff/retry，buffered header 为 SHOULD。 | 原生源对无捕获 NO_MATCH 退避重试；目标有界头耗尽不发送 RTR。等待 RTR、旧 MID/Clear、资源恢复和总 deadline 分别验证。完整 Sync Group/跨退避顺序仍待验。 |
+| UE11-p0248-002 | §3.4.4.6，restart token | 初始 target token0；非零 target token 保证重启可匹配；defer 后等待 RTR，只重发请求部分；backoff 不产生 RTR。 | 原生源与可选捕获目标已有32+32位 token、原始身份/范围验证、陈旧/重复 RTR、零 token 再次延期和保留 MR 撤销/重用回归。目标采用 J=0/非零 token 策略；J>0/零 token 由独立真实 PDS 对端验证。 |
 | UE11-p0249-001 | §3.4.4.6.1，DS-as-SEND | 忽略 restart token 时，返回 NO_MATCH/0 或 OK/request length。 | `send_header_data_test` 覆盖目标兼容路径，真正 defer 与 RTR 不在此能力内。 |
 | UE11-p0249-002 | §3.4.4.7.1，RUD unexpected | 至少选择 backoff、buffered header、buffered message 中一种，可组合降级。 | native RUD 返回 NO_MATCH；provider 拥有操作副本并重试。原生低层调用者仍需履行重试合同。 |
 | UE11-p0250-001 | §3.4.4.7.1.1，NO_MATCH | NO_MATCH modified_length0；initiator 重发整条消息，软件 provider 可承担。 | provider 重试/源缓冲所有权已有回归；native API 当前直接报错误，完整发起端层次合同需继续补全。 |

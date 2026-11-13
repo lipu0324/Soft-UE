@@ -129,3 +129,14 @@ RUDI 与 RODL 不能直接套用这三种路径；它们仍在后续实施范围
 这些测试说明对应行为有证据，不能替代整份 Profile 的规范验收。
 
 READ 的 ACK 数据路径、内存授权与重读恢复参见 [READ-ACK-DATA.md](READ-ACK-DATA.md)。
+
+## 一条事务为什么可能使用多个消息 ID
+
+Deferrable SEND 的用户操作可以经历“初始消息 → 等待 RTR → 后缀重启消息”，其中
+NO_MATCH 还会引入退避重试。每条线消息有独立 MID 与 EOM/Clear，用户操作 ID 则保持
+不变且只生成一次最终 CQ。FEP 范围 restart token 用于定位逻辑事务，不能拿来当作
+MR key 或指针。目标端捕获头的寿命也可能长于初始 Incoming。
+
+这些状态的具体变量、转换和可运行测试见
+[Deferrable SEND 事务](DEFERRABLE-TRANSACTIONS.md)。该文同时说明已选择的 J=0 捕获
+策略、MR 精确身份、源 token0、重启范围和取消后的远端状态，便于区分规范义务与模拟器策略。

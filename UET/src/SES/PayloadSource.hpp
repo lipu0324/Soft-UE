@@ -29,6 +29,25 @@ private:
     std::vector<uint8_t> bytes_;
 };
 
+// A restarted transaction reads a checked suffix of its original source.
+// No full-message copy is made; ownership stays shared with the transaction.
+class SlicedPayload final : public PayloadSource {
+public:
+    SlicedPayload(std::shared_ptr<const PayloadSource> original,uint64_t offset,uint64_t length)
+        :original_(std::move(original)),offset_(offset),length_(length) {
+        if (!original_ || offset>original_->size() || length>original_->size()-offset)
+            throw std::out_of_range("payload slice range");
+    }
+    uint64_t size() const override { return length_; }
+    void read(uint64_t offset,uint8_t* destination,size_t length) const override {
+        if (offset>length_ || length>length_-offset) throw std::out_of_range("payload slice range");
+        original_->read(offset_+offset,destination,length);
+    }
+private:
+    std::shared_ptr<const PayloadSource> original_;
+    uint64_t offset_,length_;
+};
+
 class StoragePayload final : public PayloadSource {
 public:
     StoragePayload(std::shared_ptr<const MemoryStorage> storage,uint64_t offset,uint64_t length)

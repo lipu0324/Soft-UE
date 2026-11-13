@@ -24,3 +24,6 @@ payload 缓冲。RUD 的 EOM 若先于空洞到达，当前包仍返回普通默
 全长接受、NO_MATCH/0、无 unexpected 缓冲、ACK 丢失/重复、EOM先到和 tag 篡改。
 适配器不提供匹配、确认或恢复服务，所有状态仍由原 SES/PDS 执行。实际结果以
 生成报告为准。
+
+独立源端/RTR 与可选捕获目标现见 [DEFERRABLE-TRANSACTIONS.md](DEFERRABLE-TRANSACTIONS.md)。
+本页两个兼容能力位仍只描述默认目标策略，完整源 API 使用单独能力位。

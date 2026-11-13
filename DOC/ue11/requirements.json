@@ -506,12 +506,16 @@
       "status": "partial",
       "tests": [
         "send_header_data_test",
-        "tagged_message_test"
+        "tagged_message_test",
+        "deferrable_transaction_test",
+        "deferrable_restart_test",
+        "deferrable_fault_test",
+        "deferrable_boundary_test"
       ],
       "profiles": [
         "AI_FULL"
       ],
-      "evidence_note": "Target compatibility under§3.4.4.6.1 accepts deferrable SEND0x08 as SEND and deferrable TSEND0x0b as tagged SEND, ignoring restart-token address bits. Immediate processing returns full/default acceptance or NO_MATCH/0 in RUD/ROD; no ROD unexpected buffer or false zero-length deferral. Tagged faults/NSCC and ordinary header-data tests cover this path. Source stop/defer, unique restart tokens, header capture, RTR, reserved buffers and partial restart transactions remain missing. See DEFERRABLE-AS-SEND.md."
+      "evidence_note": "Native deferrable SEND0x08/TSEND0x0b sources use FEP-scoped unique tokens, one transaction ID/deadline across fresh-MID backoff/restarts, checked RTR identity/ranges and lazy suffix slices. Optional bounded target header capture J=0 reserves exact posted registration with nonzero target token and sends real RUD RTR through original PDS. Both source zero-token re-deferral/J>0 and early/duplicate/invalid RTR are tested with an independent real-PDS SES peer. Native matrices cover zero/MTU/multifragment, NSCC, targeted packet faults, cancellation/deadline/close, revoked/reused MR, truncation, header exhaustion/FIFO, reader failure, PDC lifecycle, token exhaustion/Endpoint replacement and bounded concurrency. Default target retains as-SEND compatibility. Full Profile review, Sync Groups/cross-backoff ordering, TSS and pinned-reference actual RTR interoperability remain open. See DEFERRABLE-TRANSACTIONS.md; feature tests do not claim M5 or Profile completion."
     },
     {
       "id": "SES-RNDV",

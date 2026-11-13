@@ -12,7 +12,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7, TaggedSend=9 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, DatagramSend=7, DeferrableSend=8, TaggedSend=9, DeferrableTaggedSend=11 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -36,6 +36,7 @@ struct Operation {
     uint64_t remote_offset = 0;
     uint64_t context = 0;
     uint64_t tag=0; // Tagged SEND match bits; an RMA key remains a separate API value.
+    std::optional<uint32_t> peer_initiator_id; // Expected RTR sender rank; defaults to peer node proxy.
     std::optional<uint32_t> initiator_id; // Job-level rank (§3.4.2.3.4); default node ID is simulator policy.
     std::vector<uint8_t> payload;
     IntegerAtomicOperation atomic_operation = IntegerAtomicOperation::Sum;
@@ -76,6 +77,7 @@ struct EndpointCapabilities {
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
+    bool deferrable_send=true, deferrable_tagged_send=true,deferrable_header_capture=false;
     bool deferrable_tagged_send_as_send=true; // Target compatibility; not source deferral/RTR support.
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
         IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
@@ -131,58 +133,73 @@ public:
     uint64_t submit(Operation operation) {
         if (closed_) throw std::logic_error("endpoint closed");
         if (next_operation_==UINT64_MAX) throw std::overflow_error("operation ids exhausted");
-        const auto id=++next_operation_;
+        const auto application_operation_id=++next_operation_;
+        if (operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend)
+            start_deferrable_source(std::move(operation),application_operation_id);
+        else submit_message(std::move(operation),application_operation_id);
+        return application_operation_id;
+    }
+private:
+    // A user operation and a wire message have different identities. Internal
+    // continuations will retain the application's ID while allocating a fresh
+    // MID and using the same original SES/PDS submission path.
+    uint16_t submit_message(Operation operation,uint64_t application_operation_id,uint32_t deferrable_token=0,uint32_t restart_owner=0) {
+        if (closed_) throw std::logic_error("endpoint closed");
         const auto complete_local=[&](CompletionStatus status) {
-            completions_.push_back({id,operation.context,status,0,0,false});
+            if (restart_owner) fail_deferred_target(restart_owner,status,0);
+            else if (deferrable_token) complete_deferrable_source(deferrable_token,status,0,0);
+            else completions_.push_back({application_operation_id,operation.context,status,0,0,false});
         };
-        if (pending_.size() >= 4096) { complete_local(CompletionStatus::ResourceExhausted); return id; }
+        if (pending_.size() >= 4096) { complete_local(CompletionStatus::ResourceExhausted); return 0; }
+        const bool is_restart=restart_owner!=0;
         const bool is_datagram=operation.type==OperationType::DatagramSend;
         const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic;
         const bool is_atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
         const bool is_read=operation.type==OperationType::Read;
+        const bool is_deferrable=operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend;
         if (!is_datagram && operation.delivery_mode!=ROD && operation.delivery_mode!=RUD) {
-            complete_local(CompletionStatus::Unsupported); return id;
+            complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (operation.type!=OperationType::Noop && operation.type!=OperationType::Send &&
-            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read) {
-            complete_local(CompletionStatus::Unsupported); return id;
+            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read && !is_restart && !(is_deferrable && deferrable_token)) {
+            complete_local(CompletionStatus::Unsupported); return 0;
         }
         uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
         if (operation.zero_length_atomic && (!is_atomic || payload_length || operation.payload_source ||
             (operation.atomic_operation!=IntegerAtomicOperation::Read && operation.atomic_operation!=IntegerAtomicOperation::Write))) {
-            complete_local(CompletionStatus::InvalidRequest); return id;
+            complete_local(CompletionStatus::InvalidRequest); return 0;
         }
-        if ((!is_read && (operation.read_length || operation.read_result)) ||
+        if ((!is_read && !is_restart && (operation.read_length || operation.read_result)) ||
             (!is_fetching_atomic && (operation.atomic_result || !operation.atomic_compare.empty())) ||
             (is_read && (payload_length || operation.payload_source || operation.immediate_data))) {
-            complete_local(CompletionStatus::InvalidRequest); return id;
+            complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         if (operation.payload_source && !operation.payload.empty()) {
-            complete_local(CompletionStatus::InvalidRequest); return id;
+            complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         std::optional<Region> read_registration;
         if (is_read && (operation.read_length || operation.read_result)) {
             if (!operation.read_result || operation.read_result->capacity<operation.read_length ||
                 operation.read_result->pid>0xfff || operation.read_result->resource_index>0xfff) {
-                complete_local(CompletionStatus::InvalidRequest); return id;
+                complete_local(CompletionStatus::InvalidRequest); return 0;
             }
             const auto& destination=*operation.read_result;
             try {
                 read_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
                     destination.offset,operation.read_length,Access::Write,destination.resource_index);
-            } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
+            } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return 0; }
         }
         size_t atomic_width=1;
         if (is_atomic) {
             if (static_cast<uint8_t>(operation.atomic_datatype)>(is_fetching_atomic?9:7) ||
                 static_cast<uint8_t>(operation.atomic_operation)>(is_fetching_atomic?0x13:12) ||
                 (!is_fetching_atomic && operation.atomic_operation==IntegerAtomicOperation::Read)) {
-                complete_local(CompletionStatus::Unsupported); return id;
+                complete_local(CompletionStatus::Unsupported); return 0;
             }
             atomic_width=integer_atomic_width(operation.atomic_datatype);
             if ((!is_fetching_atomic && ((!payload_length && operation.atomic_operation!=IntegerAtomicOperation::Write) || payload_length%atomic_width)) ||
                 operation.remote_offset%atomic_width || mtu_<atomic_width) {
-                complete_local(CompletionStatus::InvalidRequest); return id;
+                complete_local(CompletionStatus::InvalidRequest); return 0;
             }
         }
         std::optional<Region> atomic_registration;
@@ -193,14 +210,14 @@ public:
                 (operation.atomic_result && (operation.atomic_result->capacity<result_length || operation.atomic_result->pid>0xfff ||
                 operation.atomic_result->resource_index>0xfff)) || mtu_<(dual_operand?32:atomic_width) ||
                 (operation.zero_length_atomic && !operation.atomic_compare.empty())) {
-                complete_local(CompletionStatus::InvalidRequest); return id;
+                complete_local(CompletionStatus::InvalidRequest); return 0;
             }
             if (!operation.zero_length_atomic && operation.atomic_operation==IntegerAtomicOperation::Read && operation.payload.empty())
                 operation.payload.resize(atomic_width); // Atomic READ still carries one element on the wire.
             try {
                 if (!operation.zero_length_atomic) operation.payload=fetching_atomic_wire_operands(operation.payload,operation.atomic_compare,
                     operation.atomic_operation,operation.atomic_datatype);
-            } catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return id; }
+            } catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return 0; }
             payload_length=operation.payload.size();
             try {
                 if (operation.atomic_result) {
@@ -208,26 +225,27 @@ public:
                     atomic_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
                         destination.offset,result_length,Access::Write,destination.resource_index);
                 }
-            } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
+            } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return 0; }
         }
         if (!operation.peer || !memory_.has_job(operation.job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram) ||
+            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable) ||
             (operation.type==OperationType::Noop && payload_length)) {
-            complete_local(CompletionStatus::InvalidRequest); return id;
+            complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         uint16_t message=0;
         for (size_t i=0; i<UINT16_MAX; ++i) {
             if (++next_message_==0) ++next_message_;
             if (!pending_.count(next_message_) && !message_leases_.count(next_message_)) { message=next_message_; break; }
         }
-        if (!message) { complete_local(CompletionStatus::ResourceExhausted); return id; }
-        const uint32_t transfer_length=is_read?operation.read_length:static_cast<uint32_t>(payload_length);
-        Pending pending{id,operation.context,transfer_length,0,operation.peer,operation.job};
+        if (!message) { complete_local(CompletionStatus::ResourceExhausted); return 0; }
+        const uint32_t transfer_length=(is_read || is_restart)?operation.read_length:static_cast<uint32_t>(payload_length);
+        Pending pending{application_operation_id,operation.context,transfer_length,0,operation.peer,operation.job};
         // Data ACK has no RI-generation field. Preserve the admitted request's
         // generation instead of reporting zero after a nonzero-generation READ
         // or fetching atomic (e.g. following a provider BAD_GENERATION retry).
-        pending.returned_generation=operation.target_generation;
+        pending.returned_generation=operation.target_generation; pending.deferrable_token=deferrable_token;
+        pending.restart_owner=restart_owner;
         pending.is_datagram=is_datagram;
         pending.is_read=is_read; pending.read_result=operation.read_result;
         pending.read_registration=std::move(read_registration);
@@ -241,6 +259,13 @@ public:
             operation.payload_source.reset();
             sources_.emplace(message,SourceMessage{std::move(operation),std::move(source),
                 transfer_length,0,0,false});
+            sources_.at(message).deferrable_token=deferrable_token;
+            sources_.at(message).restart_owner=restart_owner;
+            if (deferrable_token) {
+                const auto transaction=deferred_sources_.at(deferrable_token);
+                transaction->active_message=message;
+                sources_.at(message).restart_tokens=(uint64_t{deferrable_token}<<32)|transaction->target_token;
+            }
             submission_order_.push_back(message);
             std::weak_ptr<int> life=lifetime_;
             pending_.at(message).timer=loop_.after(timeout_,[this,life,message] {
@@ -252,8 +277,9 @@ public:
             finish(message,CompletionStatus::ResourceExhausted,0,0);
             throw;
         }
-        return id;
+        return message;
     }
+public:
     void post_receive(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
                        uint32_t capacity, uint64_t context=0,uint16_t resource_index=1,std::optional<uint32_t> initiator={}) {
         post_buffer(job,pid,key,offset,capacity,context,resource_index,{},initiator);
@@ -266,7 +292,26 @@ public:
         if (completions_.empty()) return false;
         completion=completions_.front(); completions_.pop_front(); return true;
     }
-    size_t pending() const { return pending_.size(); }
+    size_t pending() const {
+        size_t count=deferred_sources_.size();
+        for (const auto& operation:pending_) if (!operation.second.deferrable_token && !operation.second.restart_owner) ++count;
+        return count;
+    }
+    // Simulator policy: enable bounded, header-only unexpected deferral (J=0).
+    // The default remains the interoperable non-deferring target of §3.4.4.6.1.
+    void enable_deferrable_capture(size_t header_limit=64,std::optional<uint32_t> initiator={}) {
+        if (!header_limit || !deferred_targets_.empty() || !incoming_.empty() || !pending_.empty() || !deferred_sources_.empty()) throw std::invalid_argument("invalid deferrable capture limit/state");
+        deferred_header_limit_=header_limit; target_restart_initiator_=initiator.value_or(node_);
+        capabilities_.deferrable_header_capture=true;
+    }
+    size_t captured_deferrable_headers() const { return deferred_targets_.size(); }
+    size_t pending_deferrable_sends() const { return deferred_sources_.size(); }
+    bool cancel_deferrable(uint64_t operation) {
+        for (const auto& entry:deferred_sources_) if (entry.second->operation==operation) {
+            terminate_deferrable_source(entry.first,CompletionStatus::Cancelled); return true;
+        }
+        return false;
+    }
     bool cancel_read(uint64_t operation) {
         for (const auto& pending:pending_) if (pending.second.id==operation && pending.second.is_read) {
             // Local cancellation stops further placement, not packets already
@@ -277,6 +322,7 @@ public:
         return false;
     }
     bool transport_pending(uint64_t operation) const {
+        for (const auto& transaction:deferred_sources_) if (transaction.second->operation==operation) return true;
         for (const auto& pending:pending_) if (pending.second.id==operation) return true;
         for (const auto& lease:message_leases_) if (lease.second.operation==operation) return true;
         return false;
@@ -307,7 +353,9 @@ public:
         host_.set_context_event_handler({});
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
-        incoming_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
+        while (!deferred_sources_.empty()) complete_deferrable_source(deferred_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
+        while (!deferred_targets_.empty()) fail_deferred_target(deferred_targets_.begin()->first,CompletionStatus::Cancelled,0);
+        incoming_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
         posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
         read_returns_.clear(); read_packet_reservations_.clear();
     }
@@ -320,6 +368,9 @@ private:
         size_t queued;
         bool all_submitted;
         bool aborting=false;
+        bool started=false; // Packet history, independent of byte offset for zero-byte markers.
+        uint32_t deferrable_token=0,restart_owner=0;
+        uint64_t restart_tokens=0;
     };
     struct Pending {
         uint64_t id,context; uint32_t length; Runtime::TimerId timer; uint32_t peer,job;
@@ -341,8 +392,30 @@ private:
         std::set<uint32_t> awaiting_semantic_responses;
         uint32_t completed_length=0;
         uint8_t returned_generation=0;
+        uint32_t deferrable_token=0,restart_owner=0;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
+    struct RestartRequest {
+        uint32_t target_token,offset,length;
+        bool operator==(const RestartRequest& other) const {
+            return target_token==other.target_token && offset==other.offset && length==other.length;
+        }
+    };
+    struct DeferredSource {
+        enum class Phase { Sending, WaitingForRestart, Backoff };
+        Operation original;
+        std::shared_ptr<const PayloadSource> payload;
+        uint64_t operation;
+        uint32_t token,total,offset=0,length=0,target_token=0;
+        uint16_t active_message=0,retiring_message=0;
+        Phase phase=Phase::Sending;
+        bool first_response_seen=false,deferred=false,restarted=false,backoff_ready=false;
+        uint8_t success_opcode=0,success_list=0;
+        uint32_t retries=0;
+        Runtime::TimerId deadline=0,backoff=0;
+        std::optional<RestartRequest> pending_restart,last_restart;
+        std::set<ConnectionKey> connections;
+    };
     struct MessageLease {
         ConnectionKey connection;
         uint32_t last_psn;
@@ -387,9 +460,24 @@ private:
         uint64_t receive_order=0,tag=0;
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
+        uint32_t captured_header=0,reserved_restart=0,deferrable_source_token=0;
         ReadCoverage read_requests;
         size_t read_returns_pending=0;
     };
+    struct DeferredTarget {
+        uint32_t token,source_token,peer;
+        SES_Standard_Header header;
+        ResourceSelection selected;
+        std::optional<uint64_t> immediate;
+        std::optional<Posted> receive;
+        uint64_t arrival_order;
+        bool initial_end=false,initial_start=false,restart_started=false,restart_sent=false;
+        std::optional<ConnectionKey> initial_connection;
+    };
+    std::map<uint32_t,std::shared_ptr<DeferredTarget>> deferred_targets_;
+    std::map<uint64_t,uint32_t> deferred_order_;
+    size_t deferred_header_limit_=0;
+    uint32_t target_restart_initiator_=0; // Configured local Job rank; default node proxy is simulator policy.
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
     uint32_t node_;
     Runtime::PdsHost& host_;
@@ -403,6 +491,8 @@ private:
     EndpointCapabilities capabilities_;
     std::shared_ptr<int> lifetime_=std::make_shared<int>(0);
     bool closed_=false;
+    std::map<uint32_t,std::shared_ptr<DeferredSource>> deferred_sources_;
+    size_t deferred_source_limit_=64;
     uint64_t next_operation_=0;
     uint16_t next_message_=0;
     std::map<uint16_t,Pending> pending_;
@@ -432,6 +522,153 @@ private:
     };
     std::map<uint16_t,ReadReturn> read_returns_;
 
+    void start_deferrable_source(Operation operation,uint64_t application_operation_id) {
+        const auto local_failure=[&](CompletionStatus status) {
+            completions_.push_back({application_operation_id,operation.context,status,0,0,false});
+        };
+        if (operation.payload_source && !operation.payload.empty()) { local_failure(CompletionStatus::InvalidRequest); return; }
+        const auto length=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        if (length>UINT32_MAX) { local_failure(CompletionStatus::InvalidRequest); return; }
+        auto& token_cursor=host_.services().next_semantic_restart_token;
+        if (deferred_sources_.size()>=deferred_source_limit_ || !token_cursor || token_cursor>UINT32_MAX) {
+            local_failure(CompletionStatus::ResourceExhausted); return;
+        }
+        auto transaction=std::make_shared<DeferredSource>();
+        transaction->payload=operation.payload_source?operation.payload_source:std::make_shared<VectorPayload>(std::move(operation.payload));
+        operation.payload.clear(); operation.payload_source=transaction->payload;
+        transaction->original=std::move(operation); transaction->operation=application_operation_id;
+        transaction->token=static_cast<uint32_t>(token_cursor++); transaction->total=static_cast<uint32_t>(length);
+        transaction->length=transaction->total;
+        deferred_sources_.emplace(transaction->token,transaction);
+        const auto token=transaction->token; std::weak_ptr<int> life=lifetime_;
+        // One deadline covers every wire message, backoff and RTR wait. A
+        // fresh MID must not reset the application's transaction timeout.
+        transaction->deadline=loop_.after(timeout_,[this,life,token] {
+            if (!life.expired()) terminate_deferrable_source(token,CompletionStatus::Timeout);
+        });
+        trace_.record(node_,"deferrable_started",application_operation_id);
+        queue_deferrable_attempt(token);
+    }
+    void queue_deferrable_attempt(uint32_t token) {
+        const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end() || closed_) return;
+        const auto transaction=found->second;
+        transaction->phase=DeferredSource::Phase::Sending;
+        transaction->first_response_seen=false; transaction->deferred=false; transaction->backoff_ready=false;
+        auto request=transaction->original;
+        request.payload_source=std::make_shared<SlicedPayload>(transaction->payload,transaction->offset,transaction->length);
+        // Table2-30: ordered initial/eager deferrable data can use ROD,
+        // while the restarted transfer uses RUD and its reserved target token.
+        if (transaction->restarted) request.delivery_mode=RUD;
+        submit_message(std::move(request),transaction->operation,token);
+    }
+    void complete_deferrable_source(uint32_t token,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation=0) {
+        const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end()) return;
+        const auto transaction=found->second; deferred_sources_.erase(found);
+        loop_.cancel(transaction->deadline); loop_.cancel(transaction->backoff);
+        completions_.push_back({transaction->operation,transaction->original.context,status,
+            status==CompletionStatus::Success?transaction->total:length,code,false,{},generation});
+        trace_.record(node_,"operation_complete",transaction->operation);
+        transaction->payload.reset(); transaction->original.payload_source.reset();
+    }
+    void terminate_deferrable_source(uint32_t token,CompletionStatus status) {
+        const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end()) return;
+        const auto transaction=found->second;
+        if (transaction->active_message && pending_.count(transaction->active_message)) {
+            finish(transaction->active_message,status,0,0);
+            // An early semantic error may have only one packet in flight;
+            // explicitly drive its MSG_ERROR/EOM tail before retiring the MID.
+            feed_submissions();
+        } else complete_deferrable_source(token,status,0,0);
+    }
+    void deferrable_message_complete(uint32_t token,uint16_t message,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation) {
+        const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end()) return;
+        const auto transaction=found->second;
+        if (transaction->active_message!=message) return;
+        transaction->active_message=0; transaction->retiring_message=message;
+        if (status==CompletionStatus::Success) {
+            if (transaction->deferred) {
+                transaction->phase=DeferredSource::Phase::WaitingForRestart;
+                trace_.record(node_,"deferrable_waiting_rtr",transaction->operation);
+                drive_deferrable_sources();
+            } else complete_deferrable_source(token,status,transaction->total,1,generation);
+            return;
+        }
+        if (status==CompletionStatus::RemoteError && !transaction->target_token && code>=2 && code<=5) {
+            if (code==2 || code==4) transaction->original.target_generation=generation;
+            transaction->phase=DeferredSource::Phase::Backoff;
+            transaction->pending_restart.reset(); transaction->backoff_ready=false;
+            const auto exponent=std::min(transaction->retries++,uint32_t{4});
+            const auto delay=std::min<Runtime::Time>(10*Runtime::kMillisecond,Runtime::kMillisecond<<exponent);
+            std::weak_ptr<int> life=lifetime_;
+            transaction->backoff=loop_.after(delay,[this,life,token] {
+                if (life.expired()) return;
+                const auto retry=deferred_sources_.find(token); if (retry==deferred_sources_.end()) return;
+                retry->second->backoff=0; retry->second->backoff_ready=true; drive_deferrable_sources();
+            });
+            feed_submissions();
+            return;
+        }
+        const auto processed=static_cast<uint32_t>(std::min<uint64_t>(transaction->total,uint64_t{transaction->offset}+length));
+        complete_deferrable_source(token,status,processed,code,generation);
+    }
+    void drive_deferrable_sources() {
+        if (closed_) return;
+        std::vector<uint32_t> ready;
+        for (const auto& entry:deferred_sources_) {
+            const auto& transaction=*entry.second;
+            if (transaction.phase==DeferredSource::Phase::WaitingForRestart && transaction.pending_restart) ready.push_back(entry.first);
+            else if (transaction.phase==DeferredSource::Phase::Backoff && transaction.backoff_ready &&
+                !message_leases_.count(transaction.retiring_message) && !sources_.count(transaction.retiring_message)) ready.push_back(entry.first);
+        }
+        for (const auto token:ready) {
+            const auto found=deferred_sources_.find(token); if (found==deferred_sources_.end()) continue;
+            const auto transaction=found->second;
+            if (transaction->phase==DeferredSource::Phase::WaitingForRestart) {
+                const auto restart=*transaction->pending_restart;
+                transaction->pending_restart.reset(); transaction->last_restart=restart;
+                transaction->offset=restart.offset; transaction->length=restart.length;
+                transaction->target_token=restart.target_token; transaction->restarted=true;
+                trace_.record(node_,"deferrable_restarted",transaction->operation);
+            }
+            queue_deferrable_attempt(token);
+        }
+    }
+    void handle_deferrable_result(uint16_t message,const SES_Semantic_Response_Header& semantic) {
+        const auto operation=pending_.find(message); if (operation==pending_.end()) return;
+        const auto found=deferred_sources_.find(operation->second.deferrable_token);
+        if (found==deferred_sources_.end()) return;
+        const auto transaction=found->second;
+        if (semantic.return_code!=1) {
+            finish(message,CompletionStatus::RemoteError,semantic.modified_length,semantic.return_code,semantic.ri_generation);
+            // Completion releases the application source immediately, but an
+            // early rejection still needs its metadata-only MSG_ERROR/EOM.
+            feed_submissions();
+            return;
+        }
+        operation->second.returned_generation=semantic.ri_generation;
+        // §3.4.4.3: one message cannot change its successful response
+        // encoding or its acceptance decision midway through transmission.
+        const auto modified=semantic.opcode==0?transaction->length:semantic.modified_length;
+        const bool deferred=semantic.opcode==1 && !modified && (transaction->length || semantic.list==1);
+        if ((!deferred && modified!=transaction->length) || (deferred && transaction->target_token) ||
+            (transaction->first_response_seen && (transaction->deferred!=deferred ||
+                transaction->success_opcode!=semantic.opcode || transaction->success_list!=semantic.list))) {
+            finish(message,CompletionStatus::RemoteError,0,static_cast<uint8_t>(SemanticReturnCode::OperationViolation));
+            feed_submissions(); return;
+        }
+        if (!transaction->first_response_seen) {
+            // DEFAULT reconstructs full length even for the compact query
+            // encoding. OVERFLOW distinguishes deferral from EXPECTED zero.
+            transaction->success_opcode=semantic.opcode; transaction->success_list=semantic.list;
+            transaction->first_response_seen=true; transaction->deferred=deferred;
+            if (deferred) trace_.record(node_,"deferrable_deferred",transaction->operation);
+            feed_submissions();
+        }
+        const auto still_pending=pending_.find(message);
+        if (still_pending!=pending_.end() && still_pending->second.end_of_message_transmitted && still_pending->second.awaiting_semantic_responses.empty())
+            finish(message,CompletionStatus::Success,transaction->deferred?0:transaction->length,1,still_pending->second.returned_generation);
+    }
+
     // This is a producer queue bound, not a second PDS window. The real PDC
     // still owns PSNs, outstanding packets, congestion/recovery and retransmits.
     // FIFO submission keeps all fragments of an ordered message ahead of the
@@ -443,14 +680,23 @@ private:
             if (found==sources_.end()) { submission_order_.pop_front(); continue; }
             auto& transfer=found->second;
             const auto& operation=transfer.operation;
+            std::shared_ptr<DeferredSource> deferred;
+            if (transfer.deferrable_token && !transfer.aborting) {
+                const auto transaction=deferred_sources_.find(transfer.deferrable_token);
+                if (transaction==deferred_sources_.end()) throw std::logic_error("missing deferred source transaction");
+                deferred=transaction->second;
+                if (transfer.started && !deferred->first_response_seen) break;
+            }
             const bool datagram=operation.type==OperationType::DatagramSend;
             const bool fetching_atomic=operation.type==OperationType::FetchingAtomic;
             const bool atomic=operation.type==OperationType::Atomic || fetching_atomic;
+            const bool restart=transfer.restart_owner!=0;
             const bool read=operation.type==OperationType::Read && !transfer.aborting;
             if (read && pending_.at(message).read_requests_awaiting_data.size()>=read_result_window_) break;
             const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
             const auto fragment_capacity=mtu_-(mtu_%atomic_width);
-            auto count=transfer.aborting?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
+            const bool deferred_end=deferred && deferred->deferred && transfer.started;
+            auto count=(transfer.aborting || deferred_end || restart)?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
             SES_PDS_req request{};
             request.src_fep=node_; request.dst_fep=operation.peer;
             request.source_pid=operation.source_pid;
@@ -459,16 +705,20 @@ private:
             request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
             auto& header=request.pkt.bth_header.Standard_Header;
             header.opcode=transfer.aborting?0x0f:static_cast<uint8_t>(operation.type); header.version=0;
-            header.som=transfer.offset==0; header.eom=transfer.aborting || transfer.offset+count==transfer.length;
+            header.som=!transfer.started;
+            header.eom=transfer.aborting || deferred_end || restart || (transfer.offset+count==transfer.length && (!deferred || deferred->first_response_seen));
             header.dc=!datagram; header.rel=operation.relative_addressing; header.ri_generation=operation.target_generation;
             header.msg_id=datagram?0:message; header.job_id=operation.job; header.PIDonFEP=operation.target_pid;
-            header.resource_index=operation.target_resource; header.buffer_offset=operation.remote_offset;
+            header.resource_index=operation.target_resource;
+            // MSG_ERROR must retain tokens even after the logical transaction
+            // has released its source, so a reserved target can retire too.
+            header.buffer_offset=transfer.deferrable_token?transfer.restart_tokens:operation.remote_offset;
             header.initiator=operation.initiator_id.value_or(node_);
-            header.match_bits=operation.type==OperationType::TaggedSend?operation.tag:operation.remote_key;
+            header.match_bits=(operation.type==OperationType::TaggedSend || operation.type==OperationType::DeferrableTaggedSend)?operation.tag:operation.remote_key;
             header.request_length=transfer.length;
             if (operation.immediate_data) {
                 header.hd=1;
-                if (!transfer.offset) header.diff.som_true.header_data=*operation.immediate_data;
+                if (header.som) header.diff.som_true.header_data=*operation.immediate_data;
             }
             if (atomic && !transfer.aborting) {
                 request.pkt.eth_type=Atomic_Operation_Extension_Header;
@@ -476,7 +726,7 @@ private:
                 extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
                 extension.atomic_datatype=static_cast<uint8_t>(operation.atomic_datatype);
             }
-            if (transfer.offset) {
+            if (!header.som) {
                 header.diff.som_false.payload_length=read?0:count;
                 header.diff.som_false.message_offset=static_cast<uint32_t>(transfer.offset);
             }
@@ -498,6 +748,7 @@ private:
                 convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:0)+request.pkt.payload.size());
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
+            transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
             if (header.eom) { transfer.all_submitted=true; submission_order_.pop_front(); }
@@ -533,8 +784,12 @@ private:
                 source->second.aborting=!source->second.all_submitted;
             }
         }
-        completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
-        trace_.record(node_,"operation_complete",it->second.id);
+        const auto deferrable_token=it->second.deferrable_token;
+        const auto restart_owner=it->second.restart_owner;
+        if (!deferrable_token && !restart_owner) {
+            completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
+            trace_.record(node_,"operation_complete",it->second.id);
+        } else trace_.record(node_,"wire_message_complete",message);
         if (!it->second.is_datagram && !closed_) {
             const ConnectionKey connection{it->second.peer,it->second.local_pdc,it->second.connection_start_psn};
             const auto cleared=transmit_clear_frontiers_.find(connection);
@@ -547,10 +802,32 @@ private:
         }
         const bool finish_read_tail=it->second.is_read && status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess;
         pending_.erase(it);
+        if (deferrable_token) deferrable_message_complete(deferrable_token,message,status,length,code,remote_generation);
+        if (restart_owner && status!=CompletionStatus::Success) fail_deferred_target(restart_owner,status,code);
         if (finish_read_tail) feed_submissions();
     }
 
     void context_event(const Runtime::PdcEvent& event) {
+        if (event.kind==Runtime::PdcEventKind::ConnectionClosed && event.failure!=Runtime::PdcFailureReason::None) {
+            std::vector<uint32_t> failed;
+            for (const auto& transaction:deferred_sources_)
+                if (transaction.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) failed.push_back(transaction.first);
+            for (const auto token:failed) {
+                const auto transaction=deferred_sources_.at(token);
+                const auto active=pending_.find(transaction->active_message);
+                if (active!=pending_.end() && ConnectionKey{active->second.peer,active->second.local_pdc,
+                    active->second.connection_start_psn}==ConnectionKey{event.peer,event.local_pdc,event.connection_start_psn})
+                    discard_source(transaction->active_message); // This PDC cannot carry an abort tail.
+                terminate_deferrable_source(token,event.failure==Runtime::PdcFailureReason::RetryExhausted?
+                    CompletionStatus::Timeout:CompletionStatus::RemoteError);
+            }
+            failed.clear();
+            for (const auto& target:deferred_targets_)
+                if (target.second->initial_connection==std::optional<ConnectionKey>{{event.peer,event.local_pdc,event.connection_start_psn}})
+                    failed.push_back(target.first);
+            for (const auto token:failed) fail_deferred_target(token,CompletionStatus::RemoteError,
+                static_cast<uint8_t>(SemanticReturnCode::Undeliverable));
+        }
         if (event.kind==Runtime::PdcEventKind::ReceiveCleared || event.kind==Runtime::PdcEventKind::ConnectionClosed) {
             for (auto credit=read_packet_reservations_.begin();credit!=read_packet_reservations_.end();) {
                 const auto& packet=credit->first;
@@ -601,13 +878,17 @@ private:
             // Rejection either precedes transmission or follows context teardown.
             // PDS has removed all queued fragments and retired the incarnation.
             message_leases_.erase(event.message_id);
-            feed_submissions();
+            feed_submissions(); drive_deferrable_sources();
             return;
         }
         const ConnectionKey connection{event.peer,event.local_pdc,event.connection_start_psn};
         if (event.kind==Runtime::PdcEventKind::RequestTransmitted) {
             if (auto operation=pending_.find(event.message_id);operation!=pending_.end() &&
                 operation->second.peer==event.peer && operation->second.job==event.job) {
+                if (operation->second.deferrable_token) {
+                    const auto transaction=deferred_sources_.find(operation->second.deferrable_token);
+                    if (transaction!=deferred_sources_.end()) transaction->second->connections.insert(connection);
+                }
                 operation->second.local_pdc=event.local_pdc;
                 operation->second.connection_start_psn=event.connection_start_psn;
                 operation->second.last_transmitted_psn=event.sequence;
@@ -653,6 +934,7 @@ private:
                         unfinished.target_error=event.failure==Runtime::PdcFailureReason::RetryExhausted?
                             CompletionStatus::Timeout:CompletionStatus::RemoteError;
                         report_receive_error(unfinished);
+                        if (unfinished.reserved_restart) retire_deferred_target(unfinished.reserved_restart);
                     }
                     release_unexpected(message->second);
                     message=incoming_.erase(message);
@@ -676,6 +958,7 @@ private:
                 feed_submissions();
             }
         }
+        drive_deferrable_sources();
     }
     void complete_read_return(const PDC_SES_rsp& response) {
         if (response.pkt.bth_type!=Semantic_Response_Header) return;
@@ -816,6 +1099,10 @@ private:
         if (response.PDCID!=it->second.local_pdc || response.connection_start_psn!=it->second.connection_start_psn) return;
         if (semantic_header.opcode>1) return;
         if (!it->second.awaiting_semantic_responses.erase(response.original_sequence)) return;
+        if (it->second.deferrable_token) {
+            handle_deferrable_result(semantic_header.message_id,semantic_header);
+            return;
+        }
         if (semantic_header.return_code!=1) {
             finish(semantic_header.message_id,CompletionStatus::RemoteError,
                 it->second.is_read?static_cast<uint32_t>(it->second.read_results.bytes()):semantic_header.modified_length,
@@ -948,22 +1235,27 @@ private:
         // §3.4.4.7.2.2: ROD unexpected messages preserve acceptance order.
         // Buffering is internal SES storage; placement into an application MR
         // still requires a posting and the ordinary JobID/key/bounds checks.
-        for (auto order=unexpected_order_.begin();order!=unexpected_order_.end();) {
+        std::map<uint64_t,uint32_t> arrivals=deferred_order_;
+        for (const auto& entry:unexpected_order_) arrivals.emplace(entry.first,0);
+        for (const auto& arrival:arrivals) {
+            if (arrival.second) { match_deferred_target(arrival.second); continue; }
+            const auto order=unexpected_order_.find(arrival.first);
+            if (order==unexpected_order_.end()) continue;
             const auto key=order->second;
             auto found=incoming_.find(key);
-            if (found==incoming_.end() || !found->second.unexpected) { order=unexpected_order_.erase(order); continue; }
+            if (found==incoming_.end() || !found->second.unexpected) { unexpected_order_.erase(order); continue; }
             auto& message=found->second;
             auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
                 return posting_matches(receive,std::get<2>(key),message.pid,message.resource_index,
                     message.relative_addressing,message.opcode==9,message.tag,std::get<3>(key));
             });
-            if (posted==posted_.end()) { ++order; continue; }
+            if (posted==posted_.end()) continue;
             const auto receive=*posted; posted_.erase(posted);
             message.key=receive.key; message.base=receive.offset; message.context=receive.context;
             message.receive_registration=receive.registration;
             message.matched_receive=true;
             auto buffered=message.unexpected;
-            ++order; release_unexpected(message); // Erases the old order entry, not the next iterator.
+            release_unexpected(message);
             const auto fail=[&](SemanticReturnCode code,CompletionStatus status=CompletionStatus::RemoteError) {
                 message.first_error=code; message.target_error=status; message.received=0; message.segments.clear();
                 message.completed=message.end_seen;
@@ -1023,6 +1315,7 @@ private:
         }
         message.completed=message.end_seen && (message.opcode!=2 || !message.read_returns_pending);
         report_receive_error(message);
+        if (message.reserved_restart) retire_deferred_target(message.reserved_restart);
         // The packet that exposed the error gets the first guarantee. A
         // previously held EOM may also need an explicit result, but it must
         // not steal that guarantee merely because its handle was deferred.
@@ -1086,6 +1379,247 @@ private:
             throw std::logic_error("cannot roll back a processed SES message");
         incoming_.erase(found);
     }
+    void retire_deferred_target(uint32_t token) {
+        const auto found=deferred_targets_.find(token); if (found==deferred_targets_.end()) return;
+        deferred_order_.erase(found->second->arrival_order);
+        deferred_targets_.erase(found);
+    }
+    void fail_deferred_target(uint32_t token,CompletionStatus status,uint8_t code) {
+        const auto found=deferred_targets_.find(token); if (found==deferred_targets_.end()) return;
+        const auto target=found->second;
+        if (target->receive && target->restart_started) {
+            // The restarted Incoming owns application delivery. Poison it
+            // before dropping token authority, so late data cannot place bytes
+            // after a fatal PDC/control failure or endpoint cancellation.
+            for (auto& incoming:incoming_) if (incoming.second.reserved_restart==token) {
+                auto& message=incoming.second;
+                if (!message.first_error) message.first_error=SemanticReturnCode::Undeliverable;
+                message.target_error=status; report_receive_error(message);
+            }
+        } else if (target->receive) {
+            const auto& receive=*target->receive;
+            completions_.push_back({0,receive.context,status,0,code,true,target->immediate,0,
+                target->header.request_length,target->header.opcode==0x0b?std::optional<uint64_t>{static_cast<uint64_t>(target->header.match_bits)}:std::nullopt});
+        }
+        retire_deferred_target(token);
+    }
+    void match_deferred_target(uint32_t token) {
+        const auto found=deferred_targets_.find(token); if (found==deferred_targets_.end()) return;
+        const auto target=found->second;
+        if (target->receive) return;
+        const auto& header=target->header;
+        const auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+            return posting_matches(receive,header.job_id,target->selected.absolute_pid,target->selected.resource_index,
+                header.rel,header.opcode==0x0b,header.match_bits,header.initiator);
+        });
+        if (posted==posted_.end()) return;
+        target->receive=*posted; posted_.erase(posted);
+        deferred_order_.erase(target->arrival_order);
+        if (target->initial_end && target->initial_start) send_restart(target);
+    }
+    void send_restart(const std::shared_ptr<DeferredTarget>& target) {
+        // §3.4.4.6 / Figure3-14: J=0 is a header-only capture policy. A
+        // nonzero target token reserves this exact posting, not a future key
+        // lookup. RTR itself uses the same reliable PDS/MID/Clear lifecycle.
+        if (target->restart_sent) return;
+        target->restart_sent=true;
+        Operation control;
+        control.type=static_cast<OperationType>(0x0c); control.delivery_mode=RUD;
+        control.peer=target->peer; control.job=target->header.job_id;
+        control.source_pid=target->selected.absolute_pid;
+        control.target_pid=target->header.PIDonFEP; control.target_resource=target->header.resource_index;
+        control.initiator_id=target_restart_initiator_;
+        control.remote_key=(uint64_t{target->token}<<32)|target->source_token;
+        control.remote_offset=0; control.read_length=target->header.request_length;
+        control.relative_addressing=target->header.rel;
+        // ID0 is private protocol work. Public submit cannot obtain the
+        // restart_owner capability or impersonate an internal RTR producer.
+        submit_message(std::move(control),0,0,target->token);
+        trace_.record(node_,"deferrable_rtr_sent",target->token);
+    }
+    bool deferred_metadata_matches(const DeferredTarget& target,const PDC_SES_req& request) const {
+        const auto& current=request.pkt.bth_header.Standard_Header;
+        const auto& original=target.header;
+        return request.source_fep==target.peer && current.job_id==original.job_id &&
+            current.initiator==original.initiator && (current.opcode==original.opcode || (current.opcode==0x0f && current.eom)) &&
+            current.rel==original.rel && current.PIDonFEP==original.PIDonFEP && current.resource_index==original.resource_index &&
+            current.match_bits==original.match_bits && current.request_length==original.request_length &&
+            current.ri_generation==original.ri_generation &&
+            current.hd==original.hd && (!current.som || !current.hd || !target.initial_start ||
+                target.immediate==std::optional<uint64_t>{current.diff.som_true.header_data});
+    }
+    bool receive_deferrable_target(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto found=incoming_.find(receive_message_key(request));
+        if (found==incoming_.end()) return false;
+        auto& message=found->second;
+        const bool deferrable=header.opcode==0x08 || header.opcode==0x0b;
+        const bool reserved_abort=header.opcode==0x0f && static_cast<uint32_t>(header.buffer_offset);
+        if (!message.captured_header && ((!deferrable && !reserved_abort) || !deferred_header_limit_)) return false;
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
+        const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
+            reject_message(request,message,code,generation);
+        };
+        if (message.first_error) { reject_message(request,message,*message.first_error); return true; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return true; }
+        const uint32_t source_token=static_cast<uint32_t>(header.buffer_offset>>32);
+        const uint32_t target_token=static_cast<uint32_t>(header.buffer_offset);
+        if (message.reserved_restart) {
+            if (target_token!=message.reserved_restart || source_token!=message.deferrable_source_token) {
+                reject(SemanticReturnCode::OperationViolation); return true;
+            }
+            return false;
+        }
+        std::shared_ptr<DeferredTarget> target;
+        if (message.captured_header) {
+            const auto captured=deferred_targets_.find(message.captured_header);
+            if (captured==deferred_targets_.end()) { reject(SemanticReturnCode::OperationViolation); return true; }
+            target=captured->second;
+        } else if (target_token) {
+            const auto captured=deferred_targets_.find(target_token);
+            if (captured==deferred_targets_.end() || captured->second->source_token!=source_token ||
+                !captured->second->receive || captured->second->restart_started || !captured->second->initial_end ||
+                !deferred_metadata_matches(*captured->second,request)) {
+                reject(SemanticReturnCode::OperationViolation); return true;
+            }
+            target=captured->second;
+            // The token pins one posting. Even a revoked/reused public MR key
+            // cannot replace the registration identity stored in this record.
+            const auto& receive=*target->receive;
+            message.pid=target->selected.absolute_pid; message.resource_index=target->selected.resource_index;
+            message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
+            message.key=receive.key; message.base=receive.offset; message.context=receive.context;
+            message.receive_registration=receive.registration; message.matched_receive=true;
+            message.initialized=true; message.reserved_restart=target_token; message.deferrable_source_token=source_token;
+            message.opcode=nondeferring_send_opcode(target->header.opcode);
+            target->restart_started=true;
+            if (header.opcode==0x0f || header.ie) return false; // Poisoned data never touches MR storage.
+            try {
+                if (receive.capacity<header.request_length) {
+                    message.target_error=CompletionStatus::Truncated; reject(SemanticReturnCode::UnsupportedSize); return true;
+                }
+                memory_.authorize_registration(receive.registration,header.job_id,receive.pid,receive.offset,
+                    header.request_length,Access::Write,receive.resource_index);
+            } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); return true; }
+            return false; // Ordinary data placement retains all per-fragment checks.
+        } else if (message.initialized) return false; // Sticky full acceptance.
+        else {
+            ResourceSelection selected{};
+            try {
+                selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                    header.opcode==0x0b?ResourceSpace::Tagged:ResourceSpace::Send,header.ri_generation);
+            } catch (const AddressingError& error) { reject(error.code,error.generation); return true; }
+            const auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+                return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
+                    header.rel,header.opcode==0x0b,header.match_bits,header.initiator);
+            });
+            if (posted!=posted_.end()) return false;
+            auto& token_cursor=host_.services().next_semantic_restart_token;
+            // Only the initial TARGET token is required to be zero. A peer
+            // may legitimately allocate source token0 (§3.4.3.1); its identity
+            // remains the checked FEP/Job/rank tuple, not a truthiness test.
+            if (deferred_targets_.size()>=deferred_header_limit_ || !token_cursor || token_cursor>UINT32_MAX) {
+                reject(SemanticReturnCode::NoMatch); return true;
+            }
+            const auto existing_token=std::find_if(deferred_targets_.begin(),deferred_targets_.end(),[&](const auto& captured) {
+                return captured.second->peer==request.source_fep && captured.second->source_token==source_token;
+            });
+            if (existing_token!=deferred_targets_.end()) {
+                reject(existing_token->second->header.job_id==header.job_id?
+                    SemanticReturnCode::OperationViolation:SemanticReturnCode::PermissionViolation);
+                return true;
+            }
+            // Reject malformed requests before allocating a transaction header.
+            const auto offset=header.som?0:header.diff.som_false.message_offset;
+            if (header.version || header.ie || offset>header.request_length || request.pkt.payload.size()>header.request_length-offset ||
+                (!header.som && header.diff.som_false.payload_length!=request.pkt.payload.size())) {
+                reject(header.ie?SemanticReturnCode::InitiatorError:SemanticReturnCode::UnsupportedSize); return true;
+            }
+            target=std::make_shared<DeferredTarget>();
+            target->token=static_cast<uint32_t>(token_cursor++); target->source_token=source_token;
+            target->peer=request.source_fep; target->header=header; target->selected=selected;
+            target->arrival_order=++next_receive_order_;
+            target->initial_connection=ConnectionKey{request.source_fep,request.PDCID,request.connection_start_psn};
+            deferred_targets_.emplace(target->token,target); deferred_order_.emplace(target->arrival_order,target->token);
+            message.captured_header=target->token; message.initialized=true;
+            message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
+            message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
+            message.response_list=1; message.completion_reported=true;
+            trace_.record(node_,"deferrable_header_captured",source_token);
+        }
+        if (header.opcode==0x0f || header.ie) {
+            fail_deferred_target(target->token,CompletionStatus::RemoteError,static_cast<uint8_t>(SemanticReturnCode::InitiatorError));
+            reject(SemanticReturnCode::InitiatorError); return true;
+        }
+        const auto offset=header.som?0:header.diff.som_false.message_offset;
+        if (!deferred_metadata_matches(*target,request) || source_token!=target->source_token || target_token ||
+            header.version || offset>header.request_length || request.pkt.payload.size()>header.request_length-offset ||
+            (!header.som && header.diff.som_false.payload_length!=request.pkt.payload.size())) {
+            fail_deferred_target(target->token,CompletionStatus::RemoteError,static_cast<uint8_t>(SemanticReturnCode::OperationViolation));
+            reject(SemanticReturnCode::OperationViolation); return true;
+        }
+        if (header.som) {
+            target->initial_start=true;
+            if (header.hd) target->immediate=header.diff.som_true.header_data;
+        }
+        if (header.eom) { target->initial_end=true; message.completed=true; }
+        // Header capture deliberately retains no eager bytes. All initial
+        // packets report the same OVERFLOW/OK/0, including the early EOM.
+        reply(request,SemanticReturnCode::Ok,0);
+        if (target->initial_end && target->initial_start) {
+            if (target->receive) send_restart(target); else match_unexpected();
+        }
+        return true;
+    }
+
+    void receive_restart(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto reserved=incoming_.find(receive_message_key(request));
+        if (reserved==incoming_.end()) throw std::logic_error("unreserved RTR control message");
+        auto& message=reserved->second;
+        message.completion_reported=true; // Protocol control never consumes a receive or posts its own CQ.
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
+        const auto reject=[&](SemanticReturnCode code) { reject_message(request,message,code); };
+        if (message.first_error) { reply_error(request,message); return; }
+        if (header.version || !header.som || !header.eom || !request.pkt.payload.empty()) {
+            reject(SemanticReturnCode::UnsupportedSize); return;
+        }
+        if (header.ie) { reject(SemanticReturnCode::InitiatorError); return; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        // Tokens are sender/receiver relative on each wire message. RTR is
+        // sent in the reverse direction: its low half identifies this FEP's
+        // original initiating transaction; the high half is the peer's token.
+        const auto source_token=static_cast<uint32_t>(header.match_bits);
+        const auto found=deferred_sources_.find(source_token);
+        if (found==deferred_sources_.end()) { reject(SemanticReturnCode::OperationViolation); return; }
+        const auto transaction=found->second;
+        const auto expected_peer_rank=transaction->original.peer_initiator_id.value_or(transaction->original.peer);
+        if (header.job_id!=transaction->original.job) { reject(SemanticReturnCode::PermissionViolation); return; }
+        if (request.source_fep!=transaction->original.peer || header.initiator!=expected_peer_rank) {
+            reject(SemanticReturnCode::OperationViolation); return;
+        }
+        if (header.buffer_offset>UINT32_MAX-1u || header.buffer_offset>transaction->total ||
+            header.request_length>transaction->total-header.buffer_offset) {
+            reject(SemanticReturnCode::BadAddress); return;
+        }
+        const RestartRequest restart{static_cast<uint32_t>(header.match_bits>>32),static_cast<uint32_t>(header.buffer_offset),
+            static_cast<uint32_t>(header.request_length)};
+        const bool same_reserved=restart.target_token && transaction->last_restart && *transaction->last_restart==restart;
+        if (!same_reserved) {
+            if (transaction->phase==DeferredSource::Phase::Backoff ||
+                (transaction->first_response_seen && !transaction->deferred && transaction->phase==DeferredSource::Phase::Sending) ||
+                (transaction->pending_restart && !(*transaction->pending_restart==restart))) {
+                reject(SemanticReturnCode::OperationViolation); return;
+            }
+            transaction->pending_restart=restart;
+        }
+        // All identity/range checks precede token consumption. A bad Job,
+        // rank or length must not steal another transaction's restart state.
+        message.initialized=true; message.completed=true;
+        reply(request,SemanticReturnCode::Ok,header.request_length);
+        drive_deferrable_sources();
+    }
+
     void receive_read(const PDC_SES_req& request) {
         const auto& header=request.pkt.bth_header.Standard_Header;
         auto& message=incoming_.at(receive_message_key(request));
@@ -1238,6 +1772,8 @@ private:
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type==Semantic_Response_with_Data_Header) { receive_return_data(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
+        if (request.pkt.bth_header.Standard_Header.opcode==0x0c) { receive_restart(request); return; }
+        if (receive_deferrable_target(request)) return;
         if (request.pkt.bth_header.Standard_Header.opcode==2) { receive_read(request); return; }
         if (request.pkt.bth_header.Standard_Header.opcode==4) { receive_fetching_atomic(request); return; }
         auto interpreted_header=request.pkt.bth_header.Standard_Header;
@@ -1426,6 +1962,7 @@ private:
                 if (header.opcode==5 || header.opcode==9) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
                 if (header.opcode==1 && message.immediate_data)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
+                if (message.reserved_restart) retire_deferred_target(message.reserved_restart);
                 trace_.record(node_,"memory_delivered",message.total);
                 reply(request,SemanticReturnCode::Ok,message.total);
             } else reply(request,SemanticReturnCode::Ok,0,false);
