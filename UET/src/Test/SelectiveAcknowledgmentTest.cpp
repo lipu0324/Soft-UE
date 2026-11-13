@@ -86,6 +86,39 @@ public:
     using PDC::received_rx_psns_;
 };
 
+void idle_default_ack_clears_without_a_request(uint32_t initial,pdc_mode mode,bool queued_request) {
+    EventLoop loop; Services services{loop,loop,[]{}};
+    I_PDC source(&services); CHECK(source.initPDC(1,initial));
+    source.state=ESTABLISHED; source.SYN=0; source.DPDCID=512;
+    PDS_PDC_req request{}; request.next_hdr=UET_HDR_REQUEST_STD; request.delivery_mode=mode;
+    request.som=request.eom=true; request.pkt.bth_type=Standard_Header;
+    auto& semantic=request.pkt.bth_header.Standard_Header;
+    semantic.opcode=0; semantic.som=semantic.eom=semantic.dc=1; semantic.job_id=7; semantic.msg_id=1;
+    source.sesTxReq(&request); CHECK(source.tx_pkt_q.size()==1); source.tx_pkt_q.pop(); source.gen_cm=NONE;
+    if (queued_request) { semantic.msg_id=2; source.tx_req_q.push(request); }
+    auto response=selective_ack(initial,initial,1,0,1); response.SESpkt.bth_header.Semantic_Response_Header.job_id=7;
+    CHECK(!response.PDS_header.RUOD_ack_header.flags.req);
+    source.rxAck(&response); CHECK(source.clear_psn==initial && source.tx_pkt_buffer.empty());
+    if (queued_request) {
+        CHECK(source.gen_cm==NONE); source.openChk(); CHECK(source.tx_pkt_q.size()==1);
+        const auto& data=source.tx_pkt_q.front(); CHECK(data.PDS_type==RUOD_req_header);
+        CHECK(uint32_t(data.PDS_header.RUOD_req_header.psn+data.PDS_header.RUOD_req_header.clear_psn_off)==initial);
+    } else {
+        CHECK(source.gen_cm==CLR_CMD); source.txCtrl(); CHECK(source.tx_pkt_q.size()==1);
+        const auto clear=source.tx_pkt_q.front(); source.tx_pkt_q.pop();
+        CHECK(clear.PDS_type==RUOD_cp_header && clear.PDS_header.RUOD_cp_header.ctl_type==Clear_cmd);
+        CHECK(!clear.PDS_header.RUOD_cp_header.psn && !clear.PDS_header.RUOD_cp_header.flags.ar);
+        CHECK(clear.PDS_header.RUOD_cp_header.payload==initial);
+        SelectiveTarget target(&services); CHECK(target.initPDC(MAX_PDC)); target.state=ESTABLISHED;
+        target.rx_cur_psn=target.cack_psn=initial; target.rx_clear_psn=initial-1;
+        auto delivered=clear; target.rxCtrlClearCmd(&delivered);
+        CHECK(target.rx_clear_psn==initial && target.tx_pkt_q.empty());
+        source.rxAck(&response); CHECK(source.gen_cm==NONE && source.tx_pkt_q.empty());
+        target.freePDC();
+    }
+    source.freePDC(); CHECK(loop.pending()==0);
+}
+
 void selective_bitmap_only_covers_processed_requests() {
     EventLoop loop; Services services{loop,loop,[]{}}; services.standard_wire=true;
     SelectiveTarget target(&services); CHECK(target.initPDC(MAX_PDC));
@@ -244,6 +277,8 @@ int main() {
         receipt_is_not_semantic_success(1000);
         receipt_is_not_semantic_success(UINT32_MAX-1);
         selective_bitmap_only_covers_processed_requests();
+        for (const uint32_t initial:{1000u,UINT32_MAX}) for (const auto mode:{RUD,ROD})
+            for (const bool queued:{false,true}) idle_default_ack_clears_without_a_request(initial,mode,queued);
         for (bool congestion:{false,true}) {
             for (bool permanent:{false,true}) end_default_cannot_hide_a_gap(permanent,congestion);
             lost_guaranteed_error_is_queried_after_selective_receipt(congestion);

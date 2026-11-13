@@ -450,7 +450,13 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
     }
     const uint32_t previous_clear=clear_psn;
     while (acknowledged_tx_.erase(clear_psn + 1)) ++clear_psn;
-    if (clear_psn!=previous_clear) emitPdcEvent(UET::Runtime::PdcEventKind::TransmitCleared,clear_psn);
+    if (clear_psn!=previous_clear) {
+        emitPdcEvent(UET::Runtime::PdcEventKind::TransmitCleared,clear_psn);
+        // §3.5.11.4.3: idle Clear progress is required even when the ACK
+        // did not request guaranteed-response cleanup. This implementation
+        // chooses the permitted immediate policy; queued data can piggyback.
+        if (runtime_ && runtime_->standard_wire && tx_req_q.empty()) gen_cm=CLR_CMD;
+    }
     // A guaranteed response may arrive ahead of a hole. Remember its request
     // until Clear can actually cover it; an earlier Clear command with the
     // old frontier does not release that response (§3.5.11/3.5.12.5).

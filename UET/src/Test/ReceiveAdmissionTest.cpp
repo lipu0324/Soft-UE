@@ -130,8 +130,9 @@ void admission_recovers(bool congestion,bool preopened,bool bad_key) {
     if (bad_key) CHECK(completion.remote_code==0x1c && test.error_sequences.size()==2 && test.guaranteed_errors.size()==1);
     const auto expected=bad_key?std::vector<uint8_t>(128,0):write.payload;
     CHECK(test.target.memory().read(1,1,test.region.key,128,128)==expected);
+    CHECK(test.target.retained_receive_messages()==0);
     Operation noop; noop.type=OperationType::Noop; noop.peer=2; noop.delivery_mode=RUD;
-    test.second.submit(noop); test.loop.run(100000); // Piggyback Clear can itself wait for the released SES credit.
+    test.second.submit(noop); test.loop.run(100000); // The same PDC remains usable after idle cleanup.
     CHECK(test.second.poll_completion(completion) && completion.status==CompletionStatus::Success);
     CHECK(!test.first.poll_completion(completion) && !test.second.poll_completion(completion) && !test.target.poll_completion(completion));
     CHECK(test.target.retained_receive_messages()==0 && test.first.leased_message_ids()==0 && test.second.leased_message_ids()==0);

@@ -383,6 +383,17 @@ public:
                 return;
             }
             if (!pdc_list[local_pdc_id].is_open) {
+                const bool ordered=is_request?received_packet.PDS_header.RUOD_req_header.type==ROD_REQ:
+                    received_packet.PDS_header.RUOD_cp_header.flags.pdc_type==1;
+                const auto initial_offset=is_request?received_packet.PDS_header.RUOD_req_header.psn_off:
+                    received_packet.PDS_header.RUOD_cp_header.psn_off;
+                // A new RUD receive window starts at Start_PSN-1. Reject a
+                // packet beyond that window before allocating a PDC: ordinary
+                // NACKs cannot create one (§3.5.8.2). ROD gaps are the explicit
+                // exception and are handled by the newly allocated T_PDC.
+                if (!ordered && initial_offset>=Default_MPR) {
+                    ++event_cnt; sendNack(&received_packet,UET_PSN_OOR_WINDOW); return;
+                }
                 std::optional<PDC_SES_req> reserved_message;
                 if (is_request && runtime_ && runtime_->semantic_admission) {
                     const auto& header=received_packet.PDS_header.RUOD_req_header;

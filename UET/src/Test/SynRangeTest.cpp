@@ -62,11 +62,50 @@ void established_syn_range(uint32_t start,pdc_mode mode,bool control,bool beyond
     CHECK(target_host.manager().getPDSStatus().open_cnt==1);
     target.close(); target_host.close(); CHECK(loop.pending()==0);
 }
+void initial_syn_admission(uint32_t start,pdc_mode mode,bool control,uint16_t offset) {
+    EventLoop loop; Trace trace(loop); Fabric fabric(loop,trace,42);
+    auto& source=fabric.add_host(1); auto& destination=fabric.add_host(2);
+    fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
+    PdsHost host(2,loop,trace,destination); Endpoint target(2,host,loop,trace); target.memory().add_job(1);
+    std::vector<PDStoNET_pkt> responses;
+    source.set_receiver([&](Frame frame) { responses.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet); });
+    const auto send=[&](const PDStoNET_pkt& packet) {
+        WireOptions wire; wire.source.ip[3]=1; wire.destination.ip[3]=2;
+        Frame frame; frame.source=1; frame.destination=2; frame.bytes=UetWireCodec::encode(packet,wire);
+        CHECK(source.try_send(frame)==SendResult::Accepted); loop.run(100000);
+        CHECK(responses.size()==1);
+    };
+    send(control?control_packet(start,offset,mode):data_packet(start,offset,mode));
+    const bool refused_window=mode==RUD && offset>=Default_MPR;
+    const bool ordered_gap=mode==ROD && offset;
+    if (refused_window || ordered_gap) {
+        CHECK(responses.front().PDS_type==nack_header); const auto& negative_ack=responses.front().PDS_header.nack_header;
+        CHECK(negative_ack.nack_code==(refused_window?UET_PSN_OOR_WINDOW:UET_ROD_OOO));
+        CHECK(negative_ack.nack_psn==uint32_t(start+offset));
+        CHECK((negative_ack.spdcid!=0)==ordered_gap);
+        if (ordered_gap) CHECK(negative_ack.payload==start);
+        CHECK(host.manager().getPDSStatus().open_cnt==(ordered_gap?1:0));
+        CHECK(target.retained_receive_messages()==0);
+        const auto retained_pdc=negative_ack.spdcid;
+        responses.clear(); send(control_packet(start,0,mode));
+        CHECK(responses.front().PDS_type==RUOD_ack_header);
+        if (ordered_gap) CHECK(responses.front().PDS_header.RUOD_ack_header.spdcid==retained_pdc);
+    } else {
+        CHECK(responses.front().PDS_type==RUOD_ack_header);
+        CHECK(host.manager().getPDSStatus().open_cnt==1);
+    }
+    target.close(); host.close(); CHECK(loop.pending()==0);
+}
+
 int main() {
     try {
         for (const uint32_t start:{1000u,UINT32_MAX-32}) for (const auto mode:{RUD,ROD})
             for (const bool control:{false,true}) for (const bool beyond:{false,true})
                 established_syn_range(start,mode,control,beyond);
+        for (const uint32_t start:{1000u,UINT32_MAX-32}) for (const auto mode:{RUD,ROD})
+            for (const bool control:{false,true})
+                for (const uint16_t offset:{0,1,Default_MPR-1,Default_MPR,Default_MPR+1})
+                    initial_syn_admission(start,mode,control,offset);
         std::cout<<"PASS established SYN data/control range, equality, wrap and RUD/ROD precedence\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

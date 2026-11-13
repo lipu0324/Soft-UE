@@ -48,6 +48,10 @@ PSN、不设置 SACK，也不把拒绝的字节计入 CMS 接收计数。I_PDC �
 piggyback Clear；其本地事件可能在本轮 manager progress 之后才释放 SES 信用，
 因此允许再 NACK 一次，随后正常重试。
 
+没有后续数据请求时，源端也按 §3.5.11.4.3 主动发送 Clear Command。错误尾部
+没有 REQ_CLEAR 位，不表示可以永久保留目标消息记录。定向测试同时检查空闲时
+已释放记录，以及后续同PDC操作可以继续。
+
 重传请求也必须带当前 Clear（§3.5.20.1）。`reTx()` 更新 `clear_psn_off`，保留
 原 PSN 和语义内容。否则前一消息的尾包稍晚完成时，后续重传会永远带旧 Clear，
 占住它自己所需的记录，形成死锁。`semantic_error_test` 的单槽场景检查重传线上

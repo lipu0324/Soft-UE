@@ -163,6 +163,13 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         establishContext(header.spdcid,header.psn-header.psn_off,header.type==RUD_REQ?RUD:ROD);
+        if (mode==ROD && header.psn_off) {
+            // §3.5.8.2 step 3.e: the first ROD arrival may be any later
+            // SYN packet. Retain the new context and request Start_PSN,
+            // before applying checks for an already established SYN.
+            sendNack(header.flags.retx,header.psn,UET_ROD_OOO,start_psn,nullptr,pkt);
+            return;
+        }
         LOG_INFO(__FUNCTION__, formatLogMessage("process2 running - SPDCID: " + std::to_string(SPDCID) + ", DPDCID: " + std::to_string(DPDCID) + ", cack_psn: " + std::to_string(cack_psn)));
     }
     else
@@ -511,6 +518,10 @@ void T_PDC::netRxCm(PDStoNET_pkt *pkt)
         // a PDC. No semantic request or application completion is fabricated.
         if (!header.flags.syn || (header.ctl_type!=Noop && header.ctl_type!=Negotiation) || header.flags.pdc_type>1) return;
         establishContext(header.spdcid,header.psn-header.psn_off,header.flags.pdc_type==1?ROD:RUD);
+        if (mode==ROD && header.psn_off) {
+            sendNack(header.flags.retx,header.psn,UET_ROD_OOO,start_psn,nullptr,pkt);
+            return;
+        }
     }
     if (pkt->PDS_header.RUOD_cp_header.ctl_type == 4){
         LOG_INFO(__FUNCTION__, formatLogMessage("TPDC received close command, PSN:" + std::to_string(pkt->PDS_header.RUOD_cp_header.psn)));

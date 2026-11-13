@@ -456,6 +456,34 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0333-004 | §3.5.10.1，禁分片 | FEP不做IP分片；IPv4 DF1、MF0、fragment_offset0。 | codec显式编码及拒绝分片有回归，网络MTU检查不等于所有扩展头已验收。 |
 | UE11-p0333-005 | §3.5.10.2，UFH32 | UFH32带专用entropy头，VLAN/CSIG标签在UET EtherType前。 | M7/M8缺失；普通IP entropy头不能代替UFH格式。 |
 
-复核进度为上述 320 个候选的分类与义务拆分；其余 409 个候选、表格/算法的额外
+## 第 321～340 个候选
+
+本批检查接收错误分类、Clear 总则、MPR 与反向数据限制。Clear 不能仅按保证响应的
+REQ_CLEAR 位解释：§3.5.11.4.3 和 PDS_Clear_Time 的定义还要求空闲时推进已更新的边界。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0347-001 | §3.5.11.1，未知type | 未识别PDS type递增PDS_TYPE_INVALID，丢弃且无响应。 | codec拒绝未知格式，但Host目前只有通用malformed trace，分类计数仍缺。 |
+| UE11-p0347-002 | §3.5.11.3，未知控制类型 | 未识别ctl_type递增PDS_CTL_TYPE_INVALID，丢弃且不改变PDC。 | 已发现unknown CP带SYN可能走通用错误NACK，需在建连/peer学习前明确分类和丢弃。 |
+| UE11-p0348-001 | §3.5.11.4.3，累计Clear | RUD/ROD/RODL支持Clear，表示≤该PSN的ACK均已收到。 | RUD/ROD语义完成与Clear区分已有覆盖；RODL未完成。 |
+| UE11-p0348-002 | §3.5.11.4.3，Clear初始化 | 两个方向初始化为Start_PSN−1。 | init与双向控制、回绕有覆盖，反向READ/RODL还需独立验收。 |
+| UE11-p0349-001 | §3.5.11.4.3，空闲Clear | 无请求捎带时立即或定时发送Clear Command；使用PDS_Clear_Time计时是SHOULD。 | 已补立即策略；普通及sanitizer定向回归验证req=0默认ACK也推进Clear、无额外应用请求即可释放错误尾部，延时合并未启用。 |
+| UE11-p0349-002 | §3.5.11.4.4，CACK表示 | RUD/ROD使用32位CACK，RODL使用规定的缩减格式。 | 普通codec与窗口覆盖，RODL未完成。 |
+| UE11-p0349-003 | §3.5.11.4.4，保证结果阻挡 | CACK不能越过未Clear的最低保证响应；不把接收成功当作语义成功。 | selective_acknowledgment_test和首错丢失/查询已有覆盖。 |
+| UE11-p0349-004 | §3.5.11.4.4，CACK初始化 | 创建PDC时为Start_PSN−1。 | 明文随机起点、双向控制及回绕已测试；TSS/RODL仍缺。 |
+| UE11-p0351-001 | §3.5.11.8.4，RETX | 重传请求设置RETX并触发ACK；优先接收为建议。 | RUD/ROD重传、trigger反馈和资源重试覆盖，RODL未完成。 |
+| UE11-p0351-002 | §3.5.11.8.5，ECN回显 | 当且仅当触发响应的包被ECN标记时设置M。 | PDS feedback、MAC时间戳和trim回归检查对应触发包；其他CMS/安全路径待补。 |
+| UE11-p0355-001 | §3.5.11.13，MPR解释跨页 | 非零mpr乘128更新发送区间；零按override选择忽略/替代；缩窗不再发区间外新包。 | 独立peer window与local receive容量、边界/缩窗已有覆盖。 |
+| UE11-p0355-002 | §3.5.11.13，MPR新鲜度 | 仅严格更新的CACK可更新MPR；override0时一旦非零后不可再发零。 | stale/equal CACK拒绝、非零本地MPR及override有回归；完整动态接收端配置仍待完成。 |
+| UE11-p0355-003 | §3.5.11.14，SACK零位 | 零位表示未知，不能推断丢失。 | 当前SACK只标记肯定收据，不直接把零位当丢包；所有早期丢失检测算法仍非完整。 |
+| UE11-p0356-001 | §3.5.12.1，返回方向限制 | 非RODL返回方向只支持READ/原子响应数据；SEND/WRITE/READ新请求及RTR走独立发起方向。 | 当前应用操作仅从initiator提交；完整READ返回与非法方向接收检查仍需M5补全，泛型PDS准入单测不构成语义能力声明。 |
+| UE11-p0356-002 | §3.5.12.1，READ响应承载 | ≤Max_ACK_Data_Size放ACK，大于阈值用原PDC返回方向的PDS Request。 | M5缺失；不能用无关WRITE模拟返回数据。 |
+| UE11-p0356-003 | §3.5.12.1，RODL响应 | 所有响应放ACK，不使用Max_ACK_Data_Size；请求/响应映射不同TC。 | M8缺失，不能复用RUD大READ返回路径。 |
+| UE11-p0357-001 | §3.5.12.2，ACK关联 | ACK对应触发请求/CP的PSN，Probe是例外，延迟SES响应允许。 | 当前普通/控制/Probe和缓存重放有对应测试；其他类型仍未完成。 |
+| UE11-p0358-001 | §3.5.12.2，ACK处理选择 | 基础ACK状态处理/MPR是SHOULD；RUD coalescing必须处理SACK，逐包模式为SHOULD；Probe ACK必须填SACK。 | 已选择逐包ACK并处理SACK/MPR，Probe另验；coalescing/ACK_CCX与RODL未实现。 |
+| UE11-p0359-001 | §3.5.12.2，响应entropy | 从触发包复制原生entropy或UDP源端口。 | native/UDP、重放、ECN/RETX和Probe有回归；未实现封装另验。 |
+| UE11-p0359-002 | §3.5.12.2，逐包ACK | 必须支持ACK per packet，可选coalescing。 | 当前逐包策略覆盖，不声明可选coalescing已经实现。 |
+
+复核进度为上述 340 个候选的分类与义务拆分；其余 389 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

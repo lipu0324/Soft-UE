@@ -27,6 +27,12 @@ anti-replay floor。同一源 PDCID 先访问另一个对端再返回时，新�
 
 ## 已建立连接的 SYN 范围
 
+初始包与已建立连接的检查顺序不同。新的 RUD 窗口以 Start_PSN−1 为累计起点，
+初始 offset 达到 MP_RANGE 时已越窗；manager 返回 SPDCID=0 的窗口 NACK，
+不创建 PDC。新的 ROD 首包若不是 Start_PSN，按 §3.5.8.2 步骤3.e分配上下文并
+返回 `ROD_OOO`，包括较大的 offset；该例外先于已建立连接的 SYN 检查。
+`syn_range_test` 分别检查两种状态，并在拒绝后发送合法起始控制包验证恢复。
+
 同一活动 PDC 的 SYN 包仍需恢复出相同起点，并满足
 `PSN − Start_PSN <= MP_RANGE`（§3.5.8.2）。该范围描述初始序号区间，不能用
 “距当前 Expected_PSN 不远”代替。超过上界返回 `UET_INVALID_SYN`，不进入 SES；

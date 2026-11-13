@@ -109,10 +109,9 @@ void first_error_owns_guarantee(pdc_mode mode,bool congestion,ErrorAuditPort::Lo
     if (loss==ErrorAuditPort::Loss::FirstGuaranteed && mode==RUD && congestion)
         CHECK(requests.response_queries>0); // SACK reports receipt, but not the missing error's semantics.
     CHECK(source.leased_message_ids()==0);
-    // Non-guaranteed tail responses do not request a standalone Clear. The
-    // next data request carries the source's cumulative Clear (§3.5.16.3),
-    // which retires the previous message without an extra error guarantee.
-    CHECK(target.retained_receive_messages()<=1);
+    // §3.5.11.4.3 also requires idle Clear progress after non-guaranteed
+    // tails. No extra application request is needed to retire the message.
+    CHECK(target.retained_receive_messages()==0);
     Operation noop; noop.type=OperationType::Noop; noop.peer=2; noop.delivery_mode=mode;
     const auto next_operation=source.submit(noop); loop.run(100000);
     CHECK(source.poll_completion(completion) && completion.operation==next_operation && completion.status==CompletionStatus::Success);

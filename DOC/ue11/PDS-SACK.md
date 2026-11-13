@@ -48,6 +48,15 @@ Probe 的专门基址规则及独立 bitmap 回归见 [PDS-PROBE.md](PDS-PROBE.m
 
 ## Clear 跨过缺口
 
+§3.5.11.4.3 的空闲 Clear 规则独立于 ACK 的 REQ_CLEAR 位：收到 ACK 后只要
+本地 Clear 已前移，且没有待发送请求捎带它，就需要发送 Clear Command。
+当前选择规范允许的立即策略；可选 PDS_Clear_Time 延时合并尚未启用。
+非保证错误尾包也遵守这条规则，不能把目标消息记录留到下一次应用提交。
+
+`selective_acknowledgment_test` 在 RUD/ROD、序号回绕及有/无待发送请求时检查
+这一分支：空闲时生成 PSN=0、AR=0 的 Clear Command，有请求时携带新 Clear。
+目的端不为 Clear 再生成 ACK，重复 ACK 不会导致重复 Clear 循环。
+
 Clear Request 只要求源端报告其 Clear，不能充当 ACK，也不能删除发送缓存。源端回报当前
 边界，并记住仍未满足的合法请求。Clear Command 只释放目的端已被源端清理的状态，依
 §3.5.16.3 不产生 ACK。
