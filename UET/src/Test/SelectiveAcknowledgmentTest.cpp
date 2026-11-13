@@ -25,8 +25,7 @@ PDStoNET_pkt selective_ack(uint32_t sequence,uint32_t cumulative,uint16_t messag
 
 void receipt_is_not_semantic_success(uint32_t first_sequence) {
     EventLoop loop; Services services{loop,loop,[]{}}; services.standard_wire=true;
-    I_PDC sender(&services); CHECK(sender.initPDC(1)); sender.src_fep=1; sender.dst_fep=2;
-    sender.start_psn=sender.tx_cur_psn=first_sequence; sender.clear_psn=first_sequence-1;
+    I_PDC sender(&services); CHECK(sender.initPDC(1,first_sequence)); sender.src_fep=1; sender.dst_fep=2;
     PDS_PDC_req request{}; request.next_hdr=UET_HDR_REQUEST_STD; request.delivery_mode=RUD;
     request.som=request.eom=true; request.pkt.bth_type=Standard_Header;
     auto& semantic=request.pkt.bth_header.Standard_Header;

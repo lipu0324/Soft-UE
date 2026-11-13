@@ -53,8 +53,7 @@ PDStoNET_pkt probe_ack(uint16_t opaque,uint32_t cumulative) {
 
 void probe_opaque_never_acknowledges_a_packet(uint16_t opaque) {
     EventLoop loop; Services services{loop,loop,[]{}}; services.next_probe_opaque=opaque-1;
-    I_PDC sender(&services); CHECK(sender.initPDC(1)); sender.state=ESTABLISHED; sender.DPDCID=MAX_PDC;
-    sender.start_psn=sender.tx_cur_psn=UINT32_MAX-1; sender.clear_psn=UINT32_MAX-2;
+    I_PDC sender(&services); CHECK(sender.initPDC(1,UINT32_MAX-1)); sender.state=ESTABLISHED; sender.DPDCID=MAX_PDC;
     PDS_PDC_req request{}; request.next_hdr=UET_HDR_REQUEST_STD; request.delivery_mode=RUD;
     request.som=request.eom=true; request.pkt.bth_type=Standard_Header;
     auto& semantic=request.pkt.bth_header.Standard_Header;
