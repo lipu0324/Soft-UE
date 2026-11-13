@@ -112,3 +112,4 @@ python3 scripts/test_large_read.py --binary build/release/streaming_read_test \
 脏工作树，保存二进制哈希、命令、逐字节校验计数与资源峰值。NSCC 下的反向
 PDS Request 还跨越24位累计收到字节计数器；数据 ACK 不计入这条请求计数。
 实际实验结果单独保存在生成的 `report.json`，本节不将测试入口当作通过证据。
+四个组合的实际通过记录见 [READ 边界证据](READ-BOUNDARY.md)。
