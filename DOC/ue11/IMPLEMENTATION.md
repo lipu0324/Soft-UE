@@ -149,7 +149,8 @@ reliable operation follows the semantic response. WRITE immediate data is
 delivered through a separate target completion without consuming a SEND receive.
 Posted SEND receive completions are separate from sender completions. RUD target
 state waits for the actual EOM PSN to be cleared, even when an earlier fragment
-fills the last byte hole; see [EOM retirement](RECEIVE-EOM-RETIREMENT.md). A timeout
+fills the last byte hole; see [EOM retirement](RECEIVE-EOM-RETIREMENT.md). Full byte
+coverage also waits for EOM before receive success; see [end markers](RECEIVE-END-MARKER.md). A timeout
 does not prove that no remote bytes were written. Application code must not
 destroy its own endpoint or host reentrantly from a handler; it may close them
 and defer destruction to a later event.

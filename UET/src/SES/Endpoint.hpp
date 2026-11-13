@@ -371,7 +371,7 @@ private:
         uint8_t atomic_operation=0, atomic_datatype=0;
         bool has_immediate=false;
         std::optional<uint64_t> immediate_data;
-        uint32_t completion_psn=0;
+        uint32_t end_of_message_psn=0; // Actual EOM PSN; the last placement can be an earlier RUD packet.
         uint16_t resource_index=1,wire_pid=1;
         bool relative_addressing=true;
         bool initialized=false,matched_receive=false,completion_reported=false,end_seen=false;
@@ -641,7 +641,7 @@ private:
                 const bool same_context=std::get<0>(key)==event.peer && std::get<1>(key)==event.local_pdc &&
                     std::get<5>(key)==event.connection_start_psn;
                 const bool retired=event.kind==Runtime::PdcEventKind::ConnectionClosed ||
-                    (message->second.completed && event.sequence-message->second.completion_psn<0x80000000u);
+                    (message->second.completed && event.sequence-message->second.end_of_message_psn<0x80000000u);
                 if (same_context && retired) {
                     if (event.kind==Runtime::PdcEventKind::ConnectionClosed && !message->second.completed) {
                         // §3.4.6.2: a PDC failure also terminates a matched
@@ -968,11 +968,11 @@ private:
                     buffered->read(interval.first,bytes.data(),bytes.size());
                     memory_.write_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base+interval.first,bytes,message.resource_index);
                 }
-                if (message.received==message.total) {
+                if (message.end_seen && message.received==message.total) {
                     message.completed=true; message.completion_reported=true;
                     completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
                     if (message.deferred_response) {
-                        message.completion_psn=message.deferred_response->orig_psn;
+                        message.end_of_message_psn=message.deferred_response->orig_psn;
                         reply(*message.deferred_response,SemanticReturnCode::Ok,message.total);
                         message.deferred_response.reset();
                     }
@@ -1075,7 +1075,7 @@ private:
     void receive_read(const PDC_SES_req& request) {
         const auto& header=request.pkt.bth_header.Standard_Header;
         auto& message=incoming_.at(receive_message_key(request));
-        if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
         const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
             reject_message(request,message,code,generation);
         };
@@ -1163,7 +1163,7 @@ private:
         const auto found=incoming_.find(receive_message_key(request));
         if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved fetching atomic");
         auto& message=found->second;
-        if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
         if (message.first_error) { reply_error(request,message); return; }
         // §3.5.17: completed fetching requests are replayed by the PDS unique
         // response cache. A READ-style re-execution must never reach this code.
@@ -1242,7 +1242,7 @@ private:
         auto& message=found->second;
         if (header.som && message.opcode==0x0f && header.opcode!=0x0f)
             message.opcode=header.opcode; // Late SOM identifies an earlier MSG_ERROR's resource space.
-        if (header.eom) { message.end_seen=true; message.completion_psn=request.orig_psn; }
+        if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
         if (header.som && header.hd) message.immediate_data=header.diff.som_true.header_data;
         if (message.first_error) {
             // A RUD EOM/MSG_ERROR may arrive before SOM and before its header
@@ -1389,14 +1389,21 @@ private:
             if (position!=message.segments.end() && offset+count==position->first) {
                 merged_length+=position->second; message.segments.erase(position);
             }
-            message.segments.emplace(merged_offset,merged_length); message.received+=count;
-            if (message.unexpected && message.received==message.total) {
+            // A zero-byte packet is a marker, not a covered byte interval.
+            // Recording [0,0) would make a later zero EOM look like a duplicate
+            // of a zero SOM and suppress its completion/semantic response.
+            if (merged_length) message.segments.emplace(merged_offset,merged_length);
+            message.received+=count;
+            if (message.unexpected && message.end_seen && message.received==message.total) {
                 // Delivery-complete SEND waits for application placement. Hold
                 // its real EOM request handle; ACK Request sees SES processing.
                 message.deferred_response=request;
                 return;
             }
-            if (message.received==message.total) {
+            // §3.4.2.14: byte coverage and EOM are independent. A sender
+            // can finish its bytes before a separate zero-payload end marker;
+            // never report application success or retire state before EOM.
+            if (message.end_seen && message.received==message.total) {
                 // §3.4.2.14 / §3.5.11.4.3: the packet filling the last RUD
                 // hole may precede EOM in PSN order. Retire only when Clear
                 // reaches the EOM recorded on arrival, not this last placement.

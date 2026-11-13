@@ -4,7 +4,8 @@ RUD 允许不同 PSN 的分片乱序交付给 SES。`received == total` 表示�
 却不意味着当前回调处理的分片就是消息末包。例如三包 WRITE 的线上 PSN 为
 `N,N+1,N+2`，EOM 在 N+2；若 SOM/N 最后到达，它是最后一次放置，但不是 EOM。
 
-原实现在完成放置时把 `completion_psn` 改成当前包 N。随后对端合法地只 Clear 到
+原实现在完成放置时把 `completion_psn` 改成当前包 N。现在该字段明确命名为
+`end_of_message_psn`。随后对端合法地只 Clear 到
 N，SES 就把完整消息记录回收，尽管 EOM/N+2 尚未被 Clear。这会过早丢失错误、
 匹配和消息身份状态，破坏后续重复/响应恢复的生命周期。
 
