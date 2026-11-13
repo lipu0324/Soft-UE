@@ -495,6 +495,7 @@ public:
     }
 
 protected:
+    bool admitSemanticRequest(const PDStoNET_pkt& packet);
     uint64_t transmit_incarnation_=0;
     bool beginTransmitIncarnation();
     bool waitsForTransmitNotification() const { return runtime_ && runtime_->actual_transmit_notifications && transmit_incarnation_; }

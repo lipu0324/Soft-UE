@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+struct PDC_SES_req;
 namespace UET::CMS { class ICongestionControl; }
 namespace UET::Runtime {
 
@@ -40,6 +41,7 @@ struct ITimerQueue {
     virtual bool cancel(TimerId id) = 0;
 };
 
+enum class SemanticAdmission { Rejected, ExistingMessage, ReservedMessage };
 // Injected per host. It outlives that host and its PDCs. wake must only enqueue
 // work, never re-enter a protocol state machine from a timer callback.
 struct Services {
@@ -51,6 +53,10 @@ struct Services {
     // No separate NACK limit is enabled, so this budget counts both causes.
     uint8_t maximum_packet_retries=kDefaultRetryLimit;
     uint64_t initial_sequence_seed=42; // Injected plaintext PRNG seed; TSS start negotiation is separate.
+    // Local SES credits, checked before PDS accepts a data PSN. Reserving a
+    // message slot must not match a buffer, touch MR memory, or send a reply.
+    std::function<SemanticAdmission(const PDC_SES_req&)> semantic_admission;
+    std::function<void(const PDC_SES_req&)> cancel_semantic_reservation;
     // §3.5.5 / §3.5.8.3: a lost SYN remains potentially live in the network.
     // Plaintext connections wait this long before closing; authenticated
     // anti-replay paths may explicitly configure zero when they are active.

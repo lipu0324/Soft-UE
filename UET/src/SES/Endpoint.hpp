@@ -67,6 +67,9 @@ public:
           memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit),
           unexpected_limit_(unexpected_buffer_bytes) {
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_) throw std::invalid_argument("invalid SES configuration");
+        host_.set_receive_admission(
+            [this](const PDC_SES_req& request) { return reserve_receive_message(request); },
+            [this](const PDC_SES_req& request) { cancel_receive_reservation(request); });
         host_.set_request_handler([this](const PDC_SES_req& request) { receive(request); });
         host_.set_response_handler([this](const PDC_SES_rsp& response) { respond(response); });
         host_.set_context_event_handler([this](const Runtime::PdcEvent& event) { context_event(event); });
@@ -189,13 +192,14 @@ public:
     void close() {
         if (closed_) return;
         closed_=true; lifetime_.reset();
+        host_.set_receive_admission({},{});
         host_.set_request_handler({}); host_.set_response_handler({});
         host_.set_datagram_transmit_handler({});
         host_.set_context_event_handler({});
         sources_.clear(); submission_order_.clear(); queued_fragments_=0;
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
         incoming_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
-        exhausted_contexts_.clear(); posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
+        posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
     }
 private:
     struct SourceMessage {
@@ -270,10 +274,6 @@ private:
     std::map<ConnectionKey,uint32_t> transmit_clear_frontiers_;
     std::deque<Posted> posted_;
     std::map<MessageKey,Incoming> incoming_;
-    // Simulator resource policy: if per-message bookkeeping fills up, refuse
-    // new messages on that bounded PDC until close. Never evict an error record
-    // and accidentally place its late fragments into a newly posted receive.
-    std::set<ConnectionKey> exhausted_contexts_;
     std::deque<Completion> completions_;
     size_t submission_window_,queued_fragments_=0;
     size_t receive_message_limit_;
@@ -465,7 +465,6 @@ private:
                         discard_source(lease->first); lease=message_leases_.erase(lease);
                     } else ++lease;
                 transmit_clear_frontiers_.erase(connection);
-                exhausted_contexts_.erase(connection);
                 feed_submissions();
             }
         }
@@ -639,6 +638,35 @@ private:
             message.deferred_response.reset();
         }
     }
+    static MessageKey receive_message_key(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        return {request.source_fep,request.PDCID,header.job_id,header.initiator,header.msg_id,request.connection_start_psn};
+    }
+    Runtime::SemanticAdmission reserve_receive_message(const PDC_SES_req& request) {
+        if (request.delivery_mode==UUD || request.pkt.bth_type!=Standard_Header)
+            return Runtime::SemanticAdmission::ExistingMessage;
+        const auto key=receive_message_key(request);
+        if (incoming_.count(key)) return Runtime::SemanticAdmission::ExistingMessage;
+        if (incoming_.size()>=receive_message_limit_) {
+            trace_.record(node_,"ses_admission_blocked",request.orig_psn);
+            return Runtime::SemanticAdmission::Rejected;
+        }
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const uint8_t opcode=header.opcode==0x08?static_cast<uint8_t>(OperationType::Send):header.opcode;
+        Incoming message{opcode,static_cast<uint32_t>(header.request_length),header.match_bits,header.buffer_offset,0,0};
+        message.has_immediate=header.hd; message.error_generation=header.ri_generation;
+        // Reserve now, not when the SES queue drains: several packets may be
+        // admitted during one manager pass. No matching or MR access here.
+        incoming_.emplace(key,std::move(message));
+        return Runtime::SemanticAdmission::ReservedMessage;
+    }
+    void cancel_receive_reservation(const PDC_SES_req& request) {
+        const auto found=incoming_.find(receive_message_key(request));
+        if (found==incoming_.end()) return;
+        if (found->second.initialized || found->second.first_error || found->second.received)
+            throw std::logic_error("cannot roll back a processed SES message");
+        incoming_.erase(found);
+    }
     void receive(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
@@ -652,21 +680,9 @@ private:
             if (interpreted_header.som) trace_.record(node_,"deferrable_as_send",interpreted_header.msg_id);
         }
         const auto& header=interpreted_header;
-        const MessageKey key{request.source_fep,request.PDCID,header.job_id,header.initiator,
-            header.msg_id,request.connection_start_psn};
-        const ConnectionKey connection{request.source_fep,request.PDCID,request.connection_start_psn};
+        const auto key=receive_message_key(request);
         auto found=incoming_.find(key);
-        if (found==incoming_.end()) {
-            if (exhausted_contexts_.count(connection) || incoming_.size()>=receive_message_limit_) {
-                exhausted_contexts_.insert(connection);
-                reply(request,SemanticReturnCode::Undeliverable,0); return;
-            }
-            Incoming incoming{static_cast<uint8_t>(header.opcode),static_cast<uint32_t>(header.request_length),
-                header.match_bits,header.buffer_offset,0,0};
-            incoming.has_immediate=header.hd;
-            incoming.error_generation=header.ri_generation;
-            found=incoming_.emplace(key,std::move(incoming)).first;
-        }
+        if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved standard SES message");
         auto& message=found->second;
         if (header.som && message.opcode==0x0f && header.opcode!=0x0f)
             message.opcode=header.opcode; // Late SOM identifies an earlier MSG_ERROR's resource space.

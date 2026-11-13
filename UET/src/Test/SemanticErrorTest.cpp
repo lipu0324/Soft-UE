@@ -18,6 +18,13 @@ public:
         if (packet.PDS_type!=RUOD_req_header || packet.SESpkt.bth_type!=Standard_Header)
             return lower_.try_send(frame);
         auto& header=packet.SESpkt.bth_header.Standard_Header;
+        if (header.msg_id==2) {
+            const auto& transport=packet.PDS_header.RUOD_req_header;
+            const uint32_t current_clear=transport.psn+transport.clear_psn_off;
+            if (!second_initial_clear) second_initial_clear=current_clear;
+            else if (transport.flags.retx && current_clear-*second_initial_clear &&
+                     current_clear-*second_initial_clear<0x80000000u) second_clear_advanced=true;
+        }
         if (header.msg_id!=1) return lower_.try_send(frame);
         first_pdc=packet.PDS_header.RUOD_req_header.spdcid;
         if (header.opcode==0x0f) ++aborts;
@@ -41,6 +48,8 @@ public:
     void set_writable_handler(Writable callback) override { lower_.set_writable_handler(std::move(callback)); }
     size_t aborts=0;
     uint16_t first_pdc=0;
+    std::optional<uint32_t> second_initial_clear;
+    bool second_clear_advanced=false;
 private:
     IPacketPort& lower_; EventLoop& loop_; Fault fault_;
 };
@@ -80,28 +89,28 @@ void rejected_message_cannot_take_later_posting(bool exhaust_records) {
     test.target.post_receive(1,1,region.key,0,64,123);
     send.payload_source.reset(); send.payload={1,2,3};
     test.source.submit(send);
-    test.loop.run_until(6*kMillisecond);
-    CHECK(test.source.poll_completion(completion));
     if (exhaust_records) {
-        CHECK(completion.status==CompletionStatus::RemoteError && completion.remote_code==0x1f);
-        CHECK(!test.target.poll_completion(completion));
+        test.loop.run_until(2*kMillisecond);
+        CHECK(!test.source.poll_completion(completion));
+        CHECK(test.target.retained_receive_messages()==1);
         CHECK(test.target.memory().read(1,1,region.key,0,64)==std::vector<uint8_t>(64,0));
-    } else {
-        CHECK(completion.status==CompletionStatus::Success);
-        CHECK(test.target.poll_completion(completion) && completion.status==CompletionStatus::Success && completion.context==123);
-        CHECK(test.target.memory().read(1,1,region.key,0,3)==std::vector<uint8_t>({1,2,3}));
-        CHECK(test.target.memory().read(1,1,region.key,3,61)==std::vector<uint8_t>(61,0));
     }
+    test.loop.run_until(12*kMillisecond);
+    CHECK(test.source.poll_completion(completion));
+    CHECK(completion.status==CompletionStatus::Success);
+    CHECK(test.target.poll_completion(completion) && completion.status==CompletionStatus::Success && completion.context==123);
+    CHECK(test.target.memory().read(1,1,region.key,0,3)==std::vector<uint8_t>({1,2,3}));
+    CHECK(test.target.memory().read(1,1,region.key,3,61)==std::vector<uint8_t>(61,0));
     test.loop.run(100000);
     CHECK(reads==reads_at_completion && reads<=16 && test.faults.aborts==1);
     CHECK(test.source.queued_fragments()==0 && test.source.leased_message_ids()==0 && test.target.retained_receive_messages()==0);
     if (exhaust_records) {
-        // Closing the exhausted PDC releases the conservative refusal policy;
-        // the posting remained available throughout both rejected messages.
-        CHECK(test.source_host.request_connection_close(test.faults.first_pdc)); test.loop.run(100000);
-        test.source.submit(send); test.loop.run(100000);
-        CHECK(test.source.poll_completion(completion) && completion.status==CompletionStatus::Success);
-        CHECK(test.target.poll_completion(completion) && completion.context==123);
+        // Bookkeeping pressure is a transient PDS NACK, not a permanent
+        // semantic failure or an eviction of the first message's error.
+        CHECK(std::any_of(test.trace.events().begin(),test.trace.events().end(),[](const auto& event) {
+            return event.node==2 && event.event=="ses_admission_blocked";
+        }));
+        CHECK(test.faults.second_clear_advanced);
     }
     test.close();
 }

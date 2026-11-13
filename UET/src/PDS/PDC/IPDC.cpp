@@ -358,6 +358,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
     }
     else{
         LOG_INFO(__FUNCTION__, "Packet normal, processing request");
+        if (!admitSemanticRequest(*pkt)) return;
         diagnostics() << getCurrentTimestamp() << "I_PDC packet received normally, start processing" << std::endl;
     
         uint16_t handle = processRxReq(pkt);

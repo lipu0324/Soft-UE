@@ -298,9 +298,9 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0243-001 | §3.4.4.1.4，直接寻址 | Job 选择地址上下文，线端地址从对应基址开始；允许仅一个 Job。 | M8 缺失；不能把收到的地址直接转换成本机指针。 |
 | UE11-p0243-002 | §3.4.4.2，buffer 授权 | 每个 buffer 同时支持 exact Job 和 any Job 两种配置。 | native MR 与 provider 默认 any Job 已有回归；不同权限与撤销仍受检查，完整管理配置尚未完成。 |
 | UE11-p0243-003 | §3.4.4.3，消息响应 | 每条消息至少一个语义响应；最后收到包的响应等待此前所有包完成语义处理。 | 当前同步 WRITE/原子与延迟接收有覆盖；异步操作/扩展消息组合仍需验收。 |
-| UE11-p0244-001 | §3.4.4.3，DEFAULT 与保证传递 | DEFAULT 前完成处理；无法用 DEFAULT 表达的结果保证传递，并结合后述首错例外。 | PDS 区分 delivery/semantic/Clear；普通消息已修正重复 gtd，实际 8 包场景检查单一保证归属；容量耗尽的无记录拒绝路径仍待完善。 |
+| UE11-p0244-001 | §3.4.4.3，DEFAULT 与保证传递 | DEFAULT 前完成处理；无法用 DEFAULT 表达的结果保证传递，并结合后述首错例外。 | PDS 区分 delivery/semantic/Clear；普通消息已修正重复 gtd，实际 8 包场景检查单一保证归属；标准请求记录耗尽已改为PDS接收前资源NACK，其他格式仍未完成。 |
 | UE11-p0244-002 | Informative Text | 重复说明每条消息需要响应，无新增独立规范义务。 | 归入解释材料，不重复计作 MUST。 |
-| UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | `reply_error` 独立选择显式错误和保证属性；RUD/ROD、丢失/重放及遇到顺序有针对性覆盖，容量耗尽 fallback 尚未完成。 |
+| UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | `reply_error` 独立选择显式错误和保证属性；RUD/ROD、丢失/重放及遇到顺序有针对性覆盖，标准请求容量耗尽通过资源NACK和记录准入处理，其他格式尚未完成。 |
 | UE11-p0245-001 | §3.4.4.3，提前 ACK | 未处理包提前 ACK 使用 NO_RESPONSE；DS 首包必须带实际语义响应。 | native RUD 缺口/DS-as-SEND 有回归；真正 DS/RTR M5 缺失。 |
 | UE11-p0245-002 | §3.4.4.3，DC | DC 等到整个消息 GO；“最后收到”不等同于带 EOM 的包。 | provider 各完成等级保守选择 GO，原生乱序缺口有回归；完整操作集尚未完成。 |
 | UE11-p0245-003 | §3.4.4.3，响应 ID | 回显 request message ID 或 read_request_message_id；请求无 ID 时响应 ID 为0。 | 标准请求路径回显已有覆盖；READ/紧凑格式缺失。 |
@@ -368,7 +368,7 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0272-005 | §3.4.6.3.2，目标可恢复错误跨页 | 使用 DS/发送 unexpected 规定流程；多包进行中可用 MSG_ERROR 提前结束。 | 普通 SEND/provider 重试与 abort 有覆盖；tagged/DS/rendezvous 缺失。 |
 | UE11-p0273-001 | §3.4.6.4.1，IE | 不访问目标内存，消息非 OK；若首错则 INITIATOR_ERROR；提供 CQ 时保留 header data。 | native malformed/乱序 IE、首错和 CQ data 有覆盖；完整 datatype/opcode 扩展仍待验收。 |
 | UE11-p0273-002 | §3.4.6.4.1，MSG_ERROR | 仅一个终止包、EOM=1、有效字段保持原值，payload可缩短；无内存访问；不得依赖 RUD 前包先完成。 | native source 停止 reader/发送 abort、目标提前 EOM 与迟到 SOM 有覆盖；所有头格式仍未完成。 |
-| UE11-p0274-001 | §3.4.6.4.2，目标不可恢复错误 | 消息首错传播并保证传递，不影响 PDC；结合重复错误的单一保证规则。 | 普通 tracked message 已修正首错 gtd，后续消息可继续；无记录容量耗尽拒绝路径待完善。 |
+| UE11-p0274-001 | §3.4.6.4.2，目标不可恢复错误 | 消息首错传播并保证传递，不影响 PDC；结合重复错误的单一保证规则。 | 普通 tracked message 已修正首错 gtd，后续消息可继续；标准请求不再使用无记录语义错误fallback，资源拒绝与首错路径分开。 |
 | UE11-p0274-002 | §3.4.6.4.2，错误数据响应 | 数据响应错误时，不得写入发起端内存。 | M5 READ/fetch 缺失，需要写入前检查 RC。 |
 | UE11-p0274-003 | §3.4.6.5，informational 优先级 | 向应用报告（若请求）；informational 内首错，后续 uncorrectable 覆盖且保证传递。 | 当前整数非取回操作无 informational 类型；浮点/完整优先级未实现。 |
 

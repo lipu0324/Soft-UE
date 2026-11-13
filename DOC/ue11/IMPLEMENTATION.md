@@ -15,6 +15,8 @@ Implemented PDS formats also ignore reserved receive fields while validating
 meaningful codepoints before peer binding; see [PDS reserved fields](PDS-RESERVED-FIELDS.md).
 Plaintext PDC epochs use injected pseudorandom initial sequences with retained
 local-ID separation; see [initial sequences](INITIAL-SEQUENCES.md).
+Standard SES requests reserve bounded message state before PDS receipt and use
+resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
 
 ## What runs
 

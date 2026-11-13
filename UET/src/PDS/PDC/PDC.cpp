@@ -28,6 +28,7 @@
 
 
 #include "PDC.hpp"
+#include "../ReceiveAdmission.hpp"
 #include "../TrimmedPacket.hpp"
 #include "../DefaultSemanticResponse.hpp"
 #include <algorithm>
@@ -129,10 +130,26 @@ PDC::~PDC()
 }
 
 /**
- * @brief Process received request
- * @param pkt Received network packet
- * @return Processing result handle
+ * @brief Reserve SES bookkeeping before accepting a data PSN (UE 1.1 Table 3-68).
+ * @return Whether the request can enter PDS receive state.
  */
+bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
+{
+    if (!runtime_ || !runtime_->semantic_admission) return true;
+    const auto& header=packet.PDS_header.RUOD_req_header;
+    // Process a validated piggyback Clear even when SES has no new message
+    // slots. Its asynchronous event may release the credit for a retry.
+    clearReceivedPacketsThrough(header.psn+header.clear_psn_off);
+    const auto request=UET::PDS::semantic_admission_request(packet,SPDCID,dst_fep,mode,start_psn);
+    if (runtime_->semantic_admission(request)!=UET::Runtime::SemanticAdmission::Rejected) return true;
+    // Table 3-68: no message tracking state. Do not accept this PSN, charge
+    // received bytes, advertise SACK, or forward it to SES before retry.
+    sendNack(header.flags.retx,header.psn,UET_NO_SES_MSG_AVAIL,rx_cur_psn+1,nullptr,&packet);
+    return false;
+}
+
+// Allocate packet metadata only after message admission succeeds. The returned
+// RX handle binds the eventual SES response to this accepted packet.
 uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
 {
     RX_pkt_meta meta = {};
@@ -533,6 +550,10 @@ void PDC::reTx(uint32_t psn){
     }
     else if (p.PDS_type == RUOD_req_header) {
         p.PDS_header.RUOD_req_header.flags.retx = 1;
+        // §3.5.20.1: every request carries the current Clear frontier,
+        // including retransmissions. A cached old Clear can otherwise keep
+        // a completed SES message occupying the slot this retry needs.
+        p.PDS_header.RUOD_req_header.clear_psn_off=static_cast<int16_t>(clear_psn-psn);
         if (!SYN) {
             // §3.5.8.2: after learning the peer PDCID, retransmissions of
             // packets originally sent with SYN use the established tuple.

@@ -30,6 +30,7 @@
 
 #include "../../Transport_Layer.hpp"
 #include "../TrimmedPacket.hpp"
+#include "../ReceiveAdmission.hpp"
 #include "../../logger/Logger.hpp"
 #include "../PDC/process/TPDCProcessManager.hpp"
 #include "../PDC/process/IPDCProcessManager.hpp"
@@ -377,11 +378,36 @@ public:
             // {source FEP, destination FEP, source PDCID}, never by that union.
             local_pdc_id = muxRx2PDCID(received_packet.src_fep,
                                      received_packet.dst_fep, remote_pdc_id);
-            if (local_pdc_id >= MAX_PDC * 2 ||
-                (!pdc_list[local_pdc_id].is_open &&
-                 !allocPDC(local_pdc_id,received_packet.src_fep,received_packet.dst_fep))) {
+            if (local_pdc_id >= MAX_PDC * 2) {
                 sendNack(&received_packet,UET_NO_PDC_AVAIL);
                 return;
+            }
+            if (!pdc_list[local_pdc_id].is_open) {
+                std::optional<PDC_SES_req> reserved_message;
+                if (is_request && runtime_ && runtime_->semantic_admission) {
+                    const auto& header=received_packet.PDS_header.RUOD_req_header;
+                    const auto mode=header.type==RUD_REQ?RUD:ROD;
+                    // A ROD gap may allocate a PDC and return ROD_OOO, but it
+                    // does not deliver a message. Reserve SES state only for
+                    // a first packet that can enter the new receive window.
+                    const bool can_deliver=mode==RUD?header.psn_off<Default_MPR:header.psn_off==0;
+                    if (can_deliver) {
+                        const auto request=UET::PDS::semantic_admission_request(received_packet,local_pdc_id,
+                            received_packet.src_fep,mode,header.psn-header.psn_off);
+                        const auto admission=runtime_->semantic_admission(request);
+                        if (admission==UET::Runtime::SemanticAdmission::Rejected) {
+                            // §3.5.8.2 step 3.c: resource refusal does not
+                            // create a PDC, so this NACK carries SPDCID=0.
+                            ++event_cnt; sendNack(&received_packet,UET_NO_SES_MSG_AVAIL); return;
+                        }
+                        if (admission==UET::Runtime::SemanticAdmission::ReservedMessage) reserved_message=request;
+                    }
+                }
+                if (!allocPDC(local_pdc_id,received_packet.src_fep,received_packet.dst_fep)) {
+                    if (reserved_message && runtime_->cancel_semantic_reservation)
+                        runtime_->cancel_semantic_reservation(*reserved_message);
+                    sendNack(&received_packet,UET_NO_PDC_AVAIL); return;
+                }
             }
         }
 

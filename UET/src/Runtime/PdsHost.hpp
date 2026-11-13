@@ -112,6 +112,11 @@ public:
         wake(); return true;
     }
     void set_request_handler(std::function<void(const PDC_SES_req&)> callback) { request_handler_ = std::move(callback); }
+    void set_receive_admission(std::function<SemanticAdmission(const PDC_SES_req&)> reserve,
+                               std::function<void(const PDC_SES_req&)> cancel) {
+        services_.semantic_admission=std::move(reserve);
+        services_.cancel_semantic_reservation=std::move(cancel);
+    }
     // Establish the transport without inventing an SES NO_OP message. The
     // optional negotiation request uses NO_NEG and enables no optional feature.
     uint16_t open_connection(uint32_t peer,uint32_t job=1,pdc_mode mode=ROD,bool negotiation=false) {

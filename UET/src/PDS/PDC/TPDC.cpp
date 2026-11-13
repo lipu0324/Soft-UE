@@ -178,6 +178,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     }
     if (error_chk == OPEN)
     { // Packet is normal, process receive request
+        if (!admitSemanticRequest(*pkt)) return;
         uint16_t handle = processRxReq(pkt);
         RX_pkt_meta meta = rx_pkt_map.at(handle);
         std::stringstream forward_info;
@@ -600,6 +601,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     }
     else
     { // Packet is normal, process request / Packet normal, process request
+        if (!admitSemanticRequest(*pkt)) return;
         LOG_INFO(__FUNCTION__, formatLogMessage("Packet normal, process request"));
         diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] rx req ok" << std::endl;
         uint16_t handle = processRxReq(pkt);
