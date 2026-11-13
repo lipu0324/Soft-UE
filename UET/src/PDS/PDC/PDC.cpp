@@ -570,6 +570,15 @@ void PDC::clearReceivedPacketsThrough(uint32_t clear_through)
     // A clear may cover only already received contiguous PSNs. Otherwise a
     // malformed peer could silently discard a hole in the RUD receive window.
     if (clear_through-rx_cur_psn && clear_through-rx_cur_psn<0x80000000u) return;
+    // §3.5.11.4.3: Clear claims receipt of the associated ACKs. A retained
+    // receive handle has not produced ANY SES response yet, so that claim
+    // cannot cover it. Ignore the malformed advance before emitting an event
+    // that could retire an asynchronous SES owner. NO_RESPONSE consumes its
+    // handle normally and therefore remains eligible for Clear (§3.5.13).
+    if (advance && std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),[&](const auto& request) {
+        const uint32_t distance=request.second.psn-rx_clear_psn;
+        return distance && distance<=advance;
+    })) return;
     rx_clear_psn=clear_through;
     if (congestion_engaged_ && runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->receive_cleared(congestionConnection(),clear_through);

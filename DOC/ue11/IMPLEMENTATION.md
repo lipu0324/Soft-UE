@@ -44,6 +44,9 @@ Plaintext PDC epochs use injected pseudorandom initial sequences with retained
 local-ID separation; see [initial sequences](INITIAL-SEQUENCES.md).
 Standard SES requests reserve bounded message state before PDS receipt and use
 resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
+Clear cannot cross a retained receive handle before its first SES response;
+valid prefixes and NO_RESPONSE retain their standard behavior. See
+[Clear processing](CLEAR-PROCESSING.md).
 
 Native tagged matching keeps tag, Job-level rank and RMA keys separate. Exact and
 wildcard postings share FIFO selection within their own resource space; see

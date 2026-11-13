@@ -79,6 +79,8 @@ delivery-complete atomic的最终请求句柄在动作之前保留在PDS中。�
 `NO_RESPONSE` 再试图补最终响应：§3.4.4.3要求最终收到包满足完成语义，且§3.5.13允许
 NO_RESPONSE被提升为DEFAULT。分片atomic保留至多8个非空片段及SOM/EOM标记的句柄，
 动作完成后分别返回真实响应。新映射的分片atomic先通过编号NOOP建立PDC。
+缓存操作数时Incoming仍未完成；[Clear处理](CLEAR-PROCESSING.md)也不会越过尚未返回
+任何SES响应的真实句柄。动作完成后的响应和合法Clear共同控制其退休。
 
 ## 资源、恢复和清理
 
