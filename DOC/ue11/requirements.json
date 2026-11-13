@@ -23,9 +23,11 @@
       "summary": "确定性纳秒事件、取消与对象销毁",
       "status": "verified",
       "tests": [
-        "runtime_test"
+        "runtime_test",
+        "realtime_late_progress_test"
       ],
-      "profiles": []
+      "profiles": [],
+      "evidence_note": "Virtual deadline/sequence ordering, cancellation and lifetime remain deterministic. Realtime callbacks follow a live injected elapsed clock; late manual progress no longer backdates retransmission timers. Deterministic pre-fix regressions observed10 timer firings and6 PDS requests in one late progress; corrected tests also cover work within callbacks, overdue immediate scheduling and future/backward clock rejection. See REALTIME-PROGRESS.md."
     },
     {
       "id": "SIM-PDS",

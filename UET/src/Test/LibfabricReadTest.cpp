@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <string>
 #include <vector>
 
 using namespace UET::Runtime;
@@ -64,6 +65,7 @@ struct ReadHarness {
     fi_addr_t peer;
     std::map<uintptr_t,fi_cq_data_entry> successes;
     std::map<uintptr_t,fi_cq_err_entry> errors;
+    std::string scenario;
 
     explicit ReadHarness(bool ordered=false,uint64_t flags=FI_FENCE):
         provider(ordered?FI_ORDER_RMA_RAW|FI_ORDER_RMA_WAR|FI_ORDER_RMA_WAW:0,flags) {
@@ -92,6 +94,17 @@ struct ReadHarness {
             }
             network.progress(); runtime.progress(10000);
         }
+        if (successes.size()!=success_count || errors.size()!=error_count) {
+            std::cerr<<"READ drain failed "<<scenario<<" successes="<<successes.size()<<'/'<<success_count
+                <<" errors="<<errors.size()<<'/'<<error_count<<" read_requests="<<observed.read_attempts
+                <<" result_attempts="<<observed.result_attempts<<" dropped="<<observed.dropped
+                <<" target_messages="<<target.retained_receive_messages()<<" target_read_packets="<<target.retained_read_packets()
+                <<" target_returns="<<target.pending_read_returns()<<" discarded_udp="<<network.discarded_datagrams()<<'\n';
+            for (const auto& [context,completion]:successes)
+                std::cerr<<"success context="<<context<<" flags="<<completion.flags<<" bytes="<<completion.len<<'\n';
+            for (const auto& [context,error]:errors)
+                std::cerr<<"error context="<<context<<" err="<<error.err<<" protocol="<<error.prov_errno<<" bytes="<<error.len<<'\n';
+        }
         CHECK(successes.size()==success_count && errors.size()==error_count);
     }
     void close() {
@@ -101,6 +114,7 @@ struct ReadHarness {
 
 void ordered_read_chain(bool ordered,uint32_t length,bool lose_result) {
     ReadHarness harness(ordered); harness.observed.lose_first_result=lose_result;
+    harness.scenario="ordered="+std::to_string(ordered)+" length="+std::to_string(length)+" lose_result="+std::to_string(lose_result);
     std::vector<uint8_t> initial(length),replacement(length,0x5a),first(length,0xee),second(length,0xee);
     for (size_t index=0;index<initial.size();++index) initial[index]=static_cast<uint8_t>(index*17+3);
     const auto context=[](uintptr_t value) { return reinterpret_cast<void*>(value); };
@@ -127,6 +141,7 @@ void ordered_read_chain(bool ordered,uint32_t length,bool lose_result) {
 
 void validation_and_errors() {
     ReadHarness harness;
+    harness.scenario="validation_and_errors";
     std::array<uint8_t,32> result; result.fill(0xee);
     CHECK(fi_read(harness.provider.endpoint,nullptr,1,nullptr,harness.peer,0,harness.region.key,nullptr)==-FI_EMSGSIZE);
     CHECK(fi_read(harness.provider.endpoint,result.data(),uint64_t{UINT32_MAX}+1,nullptr,harness.peer,0,harness.region.key,nullptr)==-FI_EMSGSIZE);

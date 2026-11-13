@@ -6,6 +6,7 @@
 #include "../PDS/PdcMapping.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -97,9 +98,19 @@ struct Services {
 
 class EventLoop final : public IClock, public ITimerQueue {
 public:
-    Time now() const override { return now_; }
+    EventLoop()=default;
+    explicit EventLoop(const IClock& live_clock):live_clock_(&live_clock) {}
+    Time now() const override { return live_clock_?live_clock_->now():now_; }
     TimerId at(Time when, std::function<void()> callback) override {
-        if (when < now_ || !callback) throw std::invalid_argument("invalid event time or callback");
+        if (!callback) throw std::invalid_argument("invalid event time or callback");
+        const auto current=now();
+        if (when<current) {
+            if (!live_clock_) throw std::invalid_argument("invalid event time or callback");
+            // A real caller can be descheduled between reading the clock and
+            // scheduling an immediate event. Dispatch it at the current time;
+            // virtual simulations still reject scheduling into their past.
+            when=current;
+        }
         if (next_id_ == std::numeric_limits<TimerId>::max()) throw std::overflow_error("event sequence exhausted");
         const auto id = ++next_id_;
         const Key key{when,id};
@@ -108,7 +119,7 @@ public:
         return id;
     }
     TimerId after(Time delay, std::function<void()> callback) {
-        return at(add_time(now_,delay),std::move(callback));
+        return at(add_time(now(),delay),std::move(callback));
     }
     bool cancel(TimerId id) override {
         const auto found = index_.find(id);
@@ -121,6 +132,8 @@ public:
     uint64_t executed() const { return executed_; }
     size_t run_until(Time limit, size_t budget = 1000000) {
         if (limit < now_) throw std::invalid_argument("time cannot move backwards");
+        if (live_clock_ && limit>live_clock_->now())
+            throw std::invalid_argument("live events cannot run ahead of their clock");
         size_t count = 0;
         while (!events_.empty() && events_.begin()->first.first <= limit) {
             if (count == budget) throw std::runtime_error("event budget exhausted");
@@ -129,7 +142,7 @@ public:
             auto callback = std::move(found->second);
             index_.erase(key.second);
             events_.erase(found);
-            now_ = key.first;
+            now_ = std::max(now_,key.first);
             ++count; ++executed_;
             callback();
         }
@@ -147,6 +160,7 @@ public:
 private:
     using Key = std::pair<Time,TimerId>;
     Time now_ = 0;
+    const IClock* live_clock_=nullptr;
     TimerId next_id_ = 0;
     uint64_t executed_ = 0;
     std::map<Key,std::function<void()>> events_;
@@ -155,17 +169,33 @@ private:
 
 // The same timer engine can be driven explicitly from a real monotonic clock.
 // It never creates a background thread; applications/providers call progress().
-class RealtimeRuntime {
+class RealtimeRuntime : public IClock {
 public:
-    RealtimeRuntime() : epoch_(std::chrono::steady_clock::now()) {}
+    RealtimeRuntime() : epoch_(std::chrono::steady_clock::now()),events_(*this) {}
+    // A caller-owned elapsed clock makes late manual progress reproducible
+    // without sleeping or reading wall time in a deterministic regression.
+    explicit RealtimeRuntime(const IClock& elapsed_clock) : elapsed_clock_(&elapsed_clock),events_(*this) {}
+    // events_ follows this object's clock; copying or moving would leave the
+    // event queue referring to a different runtime instance.
+    RealtimeRuntime(const RealtimeRuntime&)=delete;
+    RealtimeRuntime& operator=(const RealtimeRuntime&)=delete;
+    RealtimeRuntime(RealtimeRuntime&&)=delete;
+    RealtimeRuntime& operator=(RealtimeRuntime&&)=delete;
     EventLoop& events() { return events_; }
+    Time now() const override {
+        return elapsed_clock_?elapsed_clock_->now():static_cast<Time>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - epoch_).count());
+    }
     void progress(size_t budget = 1000000) {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - epoch_).count();
-        events_.run_until(static_cast<Time>(elapsed), budget);
+        // UE3.5.14.5 starts a new timeout from the actual retransmission.
+        // Keep deadline ordering, but callbacks observe the live injected
+        // clock, not their historical deadline. A delayed progress call must
+        // not replay all elapsed retry intervals as back-to-back sends.
+        events_.run_until(now(), budget);
     }
 private:
     std::chrono::steady_clock::time_point epoch_;
+    const IClock* elapsed_clock_=nullptr;
     EventLoop events_;
 };
 
