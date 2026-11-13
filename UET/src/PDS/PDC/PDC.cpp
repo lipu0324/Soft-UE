@@ -141,10 +141,12 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
     // slots. Its asynchronous event may release the credit for a retry.
     clearReceivedPacketsThrough(header.psn+header.clear_psn_off);
     const auto request=UET::PDS::semantic_admission_request(packet,SPDCID,dst_fep,mode,start_psn);
-    if (runtime_->semantic_admission(request)!=UET::Runtime::SemanticAdmission::Rejected) return true;
+    const auto admission=runtime_->semantic_admission(request);
+    if (admission!=UET::Runtime::SemanticAdmission::Rejected && admission!=UET::Runtime::SemanticAdmission::NoSynchronizationState) return true;
     // Table 3-68: no message tracking state. Do not accept this PSN, charge
     // received bytes, advertise SACK, or forward it to SES before retry.
-    sendNack(header.flags.retx,header.psn,UET_NO_SES_MSG_AVAIL,rx_cur_psn+1,nullptr,&packet);
+    const auto reason=admission==UET::Runtime::SemanticAdmission::NoSynchronizationState?UET_NO_SES_SYNC_AVAIL:UET_NO_SES_MSG_AVAIL;
+    sendNack(header.flags.retx,header.psn,reason,rx_cur_psn+1,nullptr,&packet);
     return false;
 }
 

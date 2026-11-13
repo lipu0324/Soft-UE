@@ -573,7 +573,9 @@
       "summary": "Sync Group 状态与完成动作",
       "status": "partial",
       "tests": [
-        "synchronized_header_test"
+        "synchronized_header_test",
+        "synchronization_state_test",
+        "synchronization_admission_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -581,7 +583,7 @@
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Standard SYNC_WRITE0x10/SYNC_ATOMIC0x11 extensions have independent Figure3-24 and Table3-20 golden ordering checks across64 fragment/IP/carrier/CRC combinations. Composite SYNC_ATOMIC carries synchronized then atomic extensions, separate from payload. Source/target group tracking, count/completing action ordering, reuse barriers, bounded errors/management cleanup and optimized forms remain unimplemented; no native synchronization or Profile capability claim. See SYNCHRONIZED-HEADERS.md."
+      "evidence_note": "Standard SYNC_WRITE0x10/SYNC_ATOMIC0x11 extensions have independent Figure3-24 and Table3-20 golden ordering checks across64 fragment/IP/carrier/CRC combinations. Isolated bounded metadata tests cover processed counts including failed members, first completer, invalid counts, rollback, expiry, key isolation and FEP-cursor ID lifetime. Real PDS admission tests use scripted SES to verify dedicated NO_SES_SYNC_AVAIL0x1B before PSN acceptance on new/existing RUD/ROD contexts, NSCC, and recovery; this does not execute synchronized memory operations. Native Endpoint group integration, aggregate actions, legal reuse across PDCs, recovery, management cleanup and optimized forms remain open; no native synchronization or Profile capability claim. See SYNCHRONIZED-HEADERS.md and SYNCHRONIZED-IN-PROGRESS.md."
     },
     {
       "id": "PDS-RUDI",

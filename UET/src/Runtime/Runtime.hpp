@@ -45,7 +45,9 @@ struct ITimerQueue {
     virtual bool cancel(TimerId id) = 0;
 };
 
-enum class SemanticAdmission { Rejected, ExistingMessage, ReservedMessage, ReservedPacket };
+// Resource refusal is typed: message bookkeeping and synchronized-group
+// bookkeeping have distinct mandatory PDS NACKs (Table3-68).
+enum class SemanticAdmission { Rejected, ExistingMessage, ReservedMessage, ReservedPacket, NoSynchronizationState };
 // Injected per host. It outlives that host and its PDCs. wake must only enqueue
 // work, never re-enter a protocol state machine from a timer callback.
 struct Services {

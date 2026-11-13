@@ -431,10 +431,12 @@ public:
                         const auto request=UET::PDS::semantic_admission_request(received_packet,local_pdc_id,
                             received_packet.src_fep,mode,header.psn-header.psn_off);
                         const auto admission=runtime_->semantic_admission(request);
-                        if (admission==UET::Runtime::SemanticAdmission::Rejected) {
+                        if (admission==UET::Runtime::SemanticAdmission::Rejected ||
+                            admission==UET::Runtime::SemanticAdmission::NoSynchronizationState) {
                             // §3.5.8.2 step 3.c: resource refusal does not
                             // create a PDC, so this NACK carries SPDCID=0.
-                            ++event_cnt; sendNack(&received_packet,UET_NO_SES_MSG_AVAIL); return;
+                            const auto reason=admission==UET::Runtime::SemanticAdmission::NoSynchronizationState?UET_NO_SES_SYNC_AVAIL:UET_NO_SES_MSG_AVAIL;
+                            ++event_cnt; sendNack(&received_packet,reason); return;
                         }
                         if (admission==UET::Runtime::SemanticAdmission::ReservedMessage ||
                             admission==UET::Runtime::SemanticAdmission::ReservedPacket) reserved_message=request;
