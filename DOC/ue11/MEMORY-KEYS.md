@@ -92,3 +92,9 @@ ctest --test-dir build/cmake -R 'memory_key_test|memory_registry_test|addressing
 测试覆盖完整 48 位边界、零 key/索引、元数据格式、作用域隔离、重复注册、旧句柄与跨
 注册表撤销、Job 删除后的隔离，以及经过协议的实际内存效果。provider 进程测试另验证
 六字节 RKEY 声明、完整高位元数据传递和 OPTIMIZED 回退。
+
+## 本地放置专用注册
+
+接收posting及返回结果的内部注册，使用 `local_placement_only` 区分本地放置与
+远端RMA授权；不新增线格式key位。精确注册撤销检查仍适用，见
+[本地放置权限](LOCAL-PLACEMENT.md)。

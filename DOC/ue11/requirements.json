@@ -306,14 +306,17 @@
       "tests": [
         "memory_registry_test",
         "addressing_test",
-        "realtime_endpoint_processes"
+        "realtime_endpoint_processes",
+        "local_placement_scope_test",
+        "libfabric_local_registration_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Local-placement-only registrations distinguish trusted postings/returned-result authority from incoming RMA key access. Both relative/absolute RMA are denied even with known key and R/W/Atomic rights; exact local identity, bounds, revocation and namespace checks remain. Native SEND/UUD, both READ carriers and cached atomic results still place correctly. Public fi_recv regression reproduced an unauthorized byte99 write with the pre-fix provider binary and now rejects it while delivering posted SEND. Full MR key classes, advanced authorization and profile acceptance remain open; see LOCAL-PLACEMENT.md."
     },
     {
       "id": "SES-WRITE",

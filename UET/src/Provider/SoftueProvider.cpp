@@ -817,8 +817,9 @@ ssize_t submit_fetching_atomic(fid_ep* handle,const void* buffer,size_t count,co
                 }
             }
         }
+        SES::RegionOptions local_result; local_result.local_placement_only=true;
         const auto registration=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(result),limits.size,
-            static_cast<uint8_t>(SES::Access::Write));
+            static_cast<uint8_t>(SES::Access::Write),local_result);
         request.atomic_result=SES::AtomicResultBuffer{registration.key,0,static_cast<uint32_t>(limits.size),1,1};
         ApplicationOperation application{context,FI_ATOMIC|FI_READ,result,registration.key};
         try { enqueue_transmission(endpoint,std::move(request),std::move(application)); }
@@ -915,8 +916,9 @@ ssize_t receive_message(fid_ep* handle,void* buffer,size_t length,void*,fi_addr_
         if (endpoint.receives.size()>=4096) return -FI_EAGAIN;
         if (endpoint.next_receive_token==UINT64_MAX) return -FI_ENOSPC; // Keep native context zero reserved for RMA CQ data.
         progress(*endpoint.domain);
+        SES::RegionOptions local_receive; local_receive.local_placement_only=true;
         const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
-            static_cast<uint8_t>(SES::Access::Write));
+            static_cast<uint8_t>(SES::Access::Write),local_receive);
         const auto token=++endpoint.next_receive_token;
         try {
             endpoint.semantic->post_receive(1,1,region.key,0,static_cast<uint32_t>(length),token);
@@ -961,8 +963,9 @@ ssize_t submit_read(fid_ep* handle,void* buffer,size_t length,fi_addr_t destinat
             // never appears on the wire; SES rechecks its exact identity for
             // every returned fragment (§3.4.5.2). The application keeps this
             // buffer valid until CQ completion, including semantic retries.
+            SES::RegionOptions local_result; local_result.local_placement_only=true;
             const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
-                static_cast<uint8_t>(SES::Access::Write));
+                static_cast<uint8_t>(SES::Access::Write),local_result);
             application.temporary_key=region.key;
             request.read_result=SES::ReadResultBuffer{region.key,0,static_cast<uint32_t>(length),1,1};
         }

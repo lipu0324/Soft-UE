@@ -23,6 +23,7 @@ public:
     MemoryError code;
 };
 enum class Access : uint8_t { Read = 1, Write = 2, Atomic = 4 };
+enum class MemoryAccessOrigin { RemoteRequest, LocalPlacement };
 inline uint8_t operator|(Access a, Access b) { return static_cast<uint8_t>(a) | static_cast<uint8_t>(b); }
 
 // Storage selection is local policy. Remote requests see only a registered key
@@ -125,6 +126,7 @@ struct Region {
     uint64_t registration_id=0; // Local revocation identity, never a wire field.
     std::weak_ptr<const int> registry_authority;
     std::optional<uint16_t> pid_scope;
+    bool local_placement_only=false; // Trusted postings/results may use this region; a wire key cannot grant RMA access.
 };
 
 struct RegionOptions {
@@ -133,6 +135,7 @@ struct RegionOptions {
     std::optional<uint16_t> resource_index;
     std::optional<uint64_t> requested_key; // Native application-assigned, non-optimized key.
     bool bind_zero_pid=false; // Auto keys preserve the legacy domain-scope default for pid=0.
+    bool local_placement_only=false;
 };
 
 enum class Atomic64 { Add, Swap, CompareSwap, And, Or, Xor, Min, Max };
@@ -193,6 +196,7 @@ public:
         region.allow_any_job=options.allow_any_job; region.resource_index=resource_index;
         region.registration_id=++next_registration_;
         region.registry_authority=authority_;
+        region.local_placement_only=options.local_placement_only;
         if (pid || options.bind_zero_pid || options.requested_key) region.pid_scope=pid;
         // §2.2.5.3.4.1: non-optimized key namespaces include Job/PID/RI.
         // Equal numeric application keys may identify independent regions in
@@ -232,7 +236,7 @@ public:
     }
     const Region& authorize(uint32_t job,uint16_t pid,uint64_t key,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},
-                            bool relative_addressing=true) const {
+                            bool relative_addressing=true,MemoryAccessOrigin origin=MemoryAccessOrigin::RemoteRequest) const {
         if (!regions_.count(key) && (relative_addressing || !regions_.count(key^kIdempotentSafe)))
             throw MemoryAccessError(MemoryError::InvalidKey);
         const Region* selected=nullptr;
@@ -258,7 +262,14 @@ public:
         if (!selected || ambiguous || selected->key!=key) throw MemoryAccessError(MemoryError::InvalidKey);
         // Table 2-17: absolute addressing does not use JobID to select a
         // buffer. Ambiguous equal keys are rejected before Job authorization.
-        return check_access(*selected,job,pid,offset,length,access,resource_index);
+        return check_access(*selected,job,pid,offset,length,access,resource_index,origin);
+    }
+    const Region& authorize_local(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint64_t length,
+                                 Access access,std::optional<uint16_t> resource_index={}) const {
+        // This entry is reached from a trusted local posting/operation, never
+        // from fields of an incoming RMA packet. Namespace, rights, bounds and
+        // later exact-registration revocation checks still apply.
+        return authorize(job,pid,key,offset,length,access,resource_index,true,MemoryAccessOrigin::LocalPlacement);
     }
     const Region& authorize_registration(const Region& registration,uint32_t job,uint16_t pid,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={}) const {
@@ -271,7 +282,7 @@ public:
         if (found==bucket->second.end()) throw MemoryAccessError(MemoryError::InvalidKey);
         // A receive posting already selected a buffer. Authenticate that exact
         // live registration; never reselect by a peer's JobID or a reused key.
-        return check_access(*found,job,pid,offset,length,access,resource_index);
+        return check_access(*found,job,pid,offset,length,access,resource_index,MemoryAccessOrigin::LocalPlacement);
     }
     void write(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
@@ -357,12 +368,14 @@ public:
     }
 private:
     const Region& check_access(const Region& region,uint32_t job,uint16_t pid,uint64_t offset,uint64_t length,
-                               Access access,std::optional<uint16_t> resource_index) const {
+                               Access access,std::optional<uint16_t> resource_index,MemoryAccessOrigin origin) const {
         if (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))
             throw MemoryAccessError(MemoryError::WrongJob);
         if (region.pid_scope && *region.pid_scope!=pid) throw MemoryAccessError(MemoryError::WrongEndpoint);
         if (resource_index && region.resource_index && resource_index!=region.resource_index)
             throw MemoryAccessError(MemoryError::InvalidKey);
+        if (region.local_placement_only && origin!=MemoryAccessOrigin::LocalPlacement)
+            throw MemoryAccessError(MemoryError::Permission);
         if (!(region.permissions&static_cast<uint8_t>(access))) throw MemoryAccessError(MemoryError::Permission);
         if (offset>region.storage->size() || length>region.storage->size()-offset)
             throw MemoryAccessError(MemoryError::Bounds);

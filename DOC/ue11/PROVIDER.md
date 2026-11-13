@@ -52,6 +52,10 @@ libfabric 2.0 源码目录（库位于 `src/.libs`）。普通仿真构建不依
 目标仍逐次校验 key、权限、边界和撤销状态。非零 auth key、AV auth key 与完整
 特权 JobID 配置接口尚未实现。
 
+自动创建的接收/READ/取回结果注册使用 `local_placement_only`：应用提交的本地
+posting/operation可授权放置，直接远端RMA访问被拒绝。这不增加线格式key位，
+也不扩大公开MR注册授予的远端权限，见[本地放置权限](LOCAL-PLACEMENT.md)。
+
 `fi_getinfo` 保留调用者请求的已支持排序 flags；显式零排序使用 RUD。没有提供
 排序 hints 时保留 SAS 默认。SEND 排序 flags 为 RAS/SAR/SAS/SAW/WAS；R/W
 排序 flags 按 §2.2.6 的单独列表解释，交叉排序 flag 可以同时参与两种判断。

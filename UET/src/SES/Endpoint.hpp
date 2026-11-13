@@ -153,7 +153,7 @@ public:
             }
             const auto& destination=*operation.read_result;
             try {
-                read_registration=memory_.authorize(operation.job,destination.pid,destination.key,
+                read_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
                     destination.offset,operation.read_length,Access::Write,destination.resource_index);
             } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
         }
@@ -187,7 +187,7 @@ public:
             payload_length=operation.payload.size();
             const auto& destination=*operation.atomic_result;
             try {
-                atomic_registration=memory_.authorize(operation.job,destination.pid,destination.key,
+                atomic_registration=memory_.authorize_local(operation.job,destination.pid,destination.key,
                     destination.offset,atomic_width,Access::Write,destination.resource_index);
             } catch (const MemoryAccessError&) { complete_local(CompletionStatus::LocalError); return id; }
         }
@@ -238,7 +238,7 @@ public:
     void post_receive(uint32_t job, uint16_t pid, uint64_t key, uint64_t offset,
                        uint32_t capacity, uint64_t context=0,uint16_t resource_index=1) {
         if (closed_) throw std::logic_error("endpoint closed");
-        const auto registration=memory_.authorize(job,pid,key,offset,capacity,Access::Write,resource_index);
+        const auto registration=memory_.authorize_local(job,pid,key,offset,capacity,Access::Write,resource_index);
         if (posted_.size()>=4096) throw std::runtime_error("receive queue full");
         posted_.push_back({job,pid,key,offset,capacity,context,resource_index,registration});
         match_unexpected();
