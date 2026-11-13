@@ -136,6 +136,7 @@ if(BUILD_TESTING)
   softue_test(deferrable_restart_test DeferrableRestartTest.cpp)
   softue_test(deferrable_fault_test DeferrableFaultTest.cpp)
   softue_test(deferrable_boundary_test DeferrableBoundaryTest.cpp)
+  softue_test(rendezvous_header_test RendezvousHeaderTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
   softue_test(streaming_read_test StreamingReadTest.cpp)
   # Boundary reports reject a stale binary instead of assigning current HEAD

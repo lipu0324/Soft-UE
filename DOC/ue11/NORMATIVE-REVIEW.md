@@ -99,11 +99,11 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 |---|---|---|---|
 | UE11-p0114-001 | 表 2-22，两种携带 CQ data 的 API | fi_senddata 与 fi_injectdata 都必选，远端 CQ data 放在 ses.header_data；inject 继承成功不生成 CQ、可靠交付失败生成错误 CQ 的规则。 | senddata 有公开进程与 header_data 回归；injectdata 已通过公开 API 到原生对端的复制、目标 CQ data、成功 CQ 抑制和错误完成测试。 |
 | UE11-p0114-002 | §2.2.5.4.1.1，接收策略与发送兼容 | 目标至少选一种规范 unexpected-message 策略；发起端正确响应所有目标行为。 | 已有 ROD 暂存、RUD 丢弃/查询及晚到 receive 场景；全部目标行为及 deferral/rendezvous 的组合仍未覆盖。 |
-| UE11-p0114-003 | §2.2.5.4.1.2，Profile 条件项 | AI Full 支持 deferrable send；HPC 支持 rendezvous。 | 实际 defer/RTR/后续数据与 rendezvous 未实现。已有把收到的 DS 当 SEND 处理的兼容分支不能代替源端与目标完整协议。 |
+| UE11-p0114-003 | §2.2.5.4.1.2，Profile 条件项 | AI Full 支持 deferrable send；HPC 支持 rendezvous。 | 原生 DS 源端、捕获头、RTR、后缀重启与错误清理已有独立真实 PDS 回归；完整 Profile、公开按大小选择及 rendezvous 事务仍未完成。rendezvous 当前仅24字节扩展头基础。 |
 | UE11-p0114-004 | §2.2.5.4.1.2，rendezvous 条件项 | RENDEZVOUS_SEND 的 eager 数据不超过配置上限。 | M5 未实现；需要零、恰好上限及超限测试。触发使用 rendezvous 的大小选择另列 SHOULD。 |
 | UE11-p0115-001 | §2.2.5.4.2，Profile 条件项 | AI Full/HPC 支持 tagged API；DGRAM 不支持。 | 原生及公开 scalar/v/msg tagged 已实现，64位精确/通配与 CQ 有回归；DGRAM 不公布 tagged。优化格式、rendezvous 等完整 M5 仍待验收。 |
 | UE11-p0115-002 | 表 2-23，接收 API 与匹配 | 支持 trecv/trecvv/trecvmsg，按 posted 顺序搜索；AI Full 至少 exact match，不支持 wildcard 时拒绝非零 ignore；HPC 支持 wildcard。 | 需拆分三个 API、FIFO、exact、ignore 拒绝及 wildcard，当前均缺失。 |
-| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data、tsenddata 已有0/MTU/多包、缓冲区所有权与 CQ 回归；原生源端 deferrable/rendezvous 事务及按 Profile/大小的选择仍缺失。 |
+| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data、tsenddata 已有0/MTU/多包、缓冲区所有权与 CQ 回归；原生 deferrable 源/目标已有事务回归；公开按 Profile/大小选择和 rendezvous 事务仍缺失。 |
 | UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | 原生 Job 内32位 rank 与公开 FI_DIRECTED_RECV 已用两个独立对端验证；未请求能力时忽略 src_addr，UNSPEC 为任意源。provider 使用UDP端点node作为rank代理；其他地址字段不混入强制匹配。 |
 | UE11-p0116-002 | §2.2.5.4.2.1，Profile/能力条件项 | AI Full/HPC 支持 UNSPEC；HPC 支持指定源地址。 | 未实现；FI_EXACT_DIRECTED_RECV 例外声明及与前句的关系需在选用该能力时单独复核，当前不宣称该能力。 |
 | UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 与未标记 rendezvous 分开验收；两者当前均缺失。 |
@@ -139,7 +139,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0132-001 | §2.2.10.4，small RMA 原子条件项 | 原子也采用 small RMA 的适用前提。 | small RMA 未实现；与 optimized 条件分开，不把两类紧凑头合并。 |
 | UE11-p0132-002 | 表 2-43，small RMA 映射 | hd 必须为零，其余 opcode/dc/rel/index/generation/Job/PID/长度/offset/initiator/key 按各自来源映射。 | 未实现；无 CQ data 是必要前提，不能静默丢弃调用者提供的 CQ data 来选择该头。 |
 | UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | 原生源/目标 token 使用 FEP Services 的64位游标，32位耗尽拒绝回绕；并发、取消、替换 Endpoint 与迟到 RTR 有回归。实际 reference RTR 互通仍待验；见 DEFERRABLE-TRANSACTIONS.md。 |
-| UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | M5 缺失；源 MR 撤销、偏移边界及全消息 READ 必须共同验证。 |
+| UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | 24字节扩展已按 Figure3-21 独立黄金字节编解码；源 MR 远端 READ 授权、撤销、偏移及整个消息 READ 尚未整合，不能由线格式推断。 |
 | UE11-p0133-002 | §2.2.10.4，原子映射 | libfabric datatype/op 映射至 SES 对应 mnemonic。 | 当前支持的 8 种整数类型、12 种非取回操作已有 native/wire/provider 回归；fetching/CAS 另有8～128位整数、固定双操作数格式与旧值缓存/公开掩码转换证据；浮点和完整类型矩阵仍未验收。 |
 | UE11-p0133-003 | §2.2.10.4，CAS 扩展 | compare/swap 来自 API，每个值尺寸不超过 16 字节，并带正确 opcode/datatype。 | CAS 未实现；后续还需类型允许集、单单位和目标对齐/权限检查。 |
 | UE11-p0134-001 | §2.2.11，Linux 控制接口部署项 | Linux UET Control API 使用 UET family 的 Netlink 消息及规定 typed attributes。 | 真实 kernel 接口留后续系统集成；M7 软件管理模型仍需保留相应消息/权限语义，不宣称提供实际 UET Netlink family。 |
@@ -240,7 +240,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
 | UE11-p0212-002 | §3.4.2.6.4，目标 memory key | RMA 支持把 match_bits 用作 memory key，并遵循 libfabric 定义的结构。 | native/provider 标准头已有 key 映射及授权回归；不把内部容器选择当作线格式要求。 |
-| UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 普通 SEND 模式映射已按独立谓词修正并检查实际报文；M5 tagged/rendezvous/DS 初始与后续消息关联尚未实现。 |
+| UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 普通 SEND 模式映射已按独立谓词修正并检查实际报文；原生 tagged 与 DS 的 ROD初始/RUD重启已验证；完整跨退避顺序、Sync Group 和 rendezvous 两阶段仍未实现。 |
 | UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 已支持 FI_FENCE；公开模式用例同时验证 SENDMSG/WRITEMSG/ATOMICMSG 的 flags，以及 NO_MATCH 重试不被后续 fenced 操作越过。 |
 | UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | READ/WAR 及结果缓存未实现；不能用按请求顺序发送 READ 请求证明结果生命周期正确。 |
 | UE11-p0214-001 | §3.4.2.7.1.3，消息内连续性 | SOM 首 PSN 与 offset0；后包 PSN 连续、offset=(N−1)×Payload MTU；最后包 EOM；同 PDC 两条消息不交错。 | native FIFO producer、PDC PSN 及大消息分片已有回归；M5 多消息/重启格式仍需各自测试。 |

@@ -521,11 +521,14 @@
       "id": "SES-RNDV",
       "reference": "Table 3-1",
       "summary": "rendezvous 与 unexpected 消息",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "rendezvous_header_test"
+      ],
       "profiles": [
         "HPC"
-      ]
+      ],
+      "evidence_note": "Only24byte Figure3-21 extension encoding/decoding is implemented for every standard opcode0x06/0x0a fragment. Independent golden bytes cover32 opcode/SOM/IP/carrier/CRC combinations, truncated frames and wrong extension type; existing wire regression and ASan/UBSan/leak unit checks pass. Native/public rendezvous source/target semantics, eager policy, pinned source MR, real READ completion and unexpected/resource/error/cancellation integration remain missing. No rendezvous API capability or Profile claim. See RENDEZVOUS-HEADERS.md."
     },
     {
       "id": "SES-FETCH",
