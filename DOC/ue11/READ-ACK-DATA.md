@@ -4,8 +4,8 @@ UE 1.1 §3.4.5.2、§3.5.12.1、§3.5.16.2、§3.5.17 是此路径的依据。
 当前原生接口支持 RUD/ROD、标准请求头、单 Payload MTU 内且不超过
 `Max_ACK_Data_Size` 的 READ。默认阈值为 16 B，配置范围为 0～8192 B、
 16 B 粒度；配置必须在打开 PDC 和创建 SES Endpoint 前完成，且整个 fabric
-使用相同值。超过此范围的原生操作在发包前返回 `Unsupported`。
-这不代表多包 READ、AI Full/HPC 或 Unified Local 已完成。
+使用相同值。超过 ACK 阈值的消息使用 [反向数据通道](RETURN-DATA.md)，其
+原生分片与完成条件见 [READ.md](READ.md)。AI Full/HPC 和 Unified Local 的完整验收仍未完成。
 
 ## 请求、返回与本地放置
 
@@ -47,8 +47,6 @@ ROD 的首次 ACK 继续经过现有顺序屏障；旧 PSN 的重读响应可以
 
 ## 待补齐
 
-- 超过阈值的 READ：在同一 PDC 的反向独立 PSN 空间发送返回数据。
-- 多包 READ 的请求分片、区间放置、ROD 返回顺序和有界资源回收。
 - optimized 请求/数据响应头、provider `fi_read` 映射。
 - fetching atomic/CAS 的结果缓存；不得复用 READ 的重新执行策略。
 - READ 与 TSS、RODL 的组合路径及相应 Profile 验收。

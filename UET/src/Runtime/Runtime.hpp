@@ -44,7 +44,7 @@ struct ITimerQueue {
     virtual bool cancel(TimerId id) = 0;
 };
 
-enum class SemanticAdmission { Rejected, ExistingMessage, ReservedMessage };
+enum class SemanticAdmission { Rejected, ExistingMessage, ReservedMessage, ReservedPacket };
 // Injected per host. It outlives that host and its PDCs. wake must only enqueue
 // work, never re-enter a protocol state machine from a timer callback.
 struct Services {

@@ -36,6 +36,8 @@ RODL 的规则另行实现。
 ## 当前边界
 
 `return_data_transport_test` 通过显式 SES 回调驱动真实 PDS、Fabric 和 MemoryRegistry，
-验证反向传输内核契约。原生 Endpoint 的多包 READ 放置、返回数据容量预约、目标
-响应标识租约和错误后排空仍需接入；在这些工作完成以前，原生能力仍限于
-[ACK-data READ](READ-ACK-DATA.md)。本项不建立任何 Profile 符合性声明。
+验证反向传输内核契约。原生 Endpoint 已接入多包 READ 的区间放置、目标包容量
+预约、响应标识与错误后排空，见 [READ.md](READ.md)。`native_read_test` 验证两端
+均使用本实现时的原生操作、故障恢复与缓存约束。允许对端在返回数据前立即确认
+READ 时的独立结果窗口和失败 MID 退休策略仍需扩展验证；当前固定版本参考进程
+互通尚未覆盖 READ。本项不建立任何 Profile 符合性声明。

@@ -375,7 +375,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         RX_pkt_meta meta = rx_pkt_map.at(handle);
         updateRxPsnTracker(&meta);
     
-        if(SYN){
+        if(SYN && (!runtime_ || !runtime_->standard_wire)){
             diagnostics() << getCurrentTimestamp() << "I_PDC connection established,DPDCID:" << pkt->PDS_header.RUOD_req_header.spdcid << std::endl;
             LOG_INFO(__FUNCTION__, "SYN packet processing, establishing connection");
 

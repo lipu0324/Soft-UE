@@ -46,7 +46,7 @@ int main() {
         CHECK(completion.remote_code==0x1c);
         CHECK(target.memory().read(1,1,region.key,0,16)==before);
         Operation unsupported; unsupported.type=OperationType::Read; unsupported.peer=2;
-        unsupported.read_length=source.capabilities().max_read_length+1;
+        unsupported.delivery_mode=RUDI; // RUDI is not yet a native READ capability.
         source.submit(unsupported);
         CHECK(source.poll_completion(completion)); CHECK(completion.status==CompletionStatus::Unsupported);
         CHECK(!source.capabilities().ai_base); CHECK(source.capabilities().atomic);

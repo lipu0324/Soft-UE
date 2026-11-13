@@ -446,12 +446,18 @@ void PDC::updateTxPsnTracker(){
     diagnostics() << getCurrentTimestamp() << "I_PDC update TX PSN - tx_cur_psn: " << tx_cur_psn
             << ", unack_cnt: " << unack_cnt << std::endl;
 
-    if ((tx_cur_psn - clear_psn) >= (unsigned)(local_packet_capacity / 2) && state == ESTABLISHED)
+    // §3.5.16.2: a semantic query needs delivery evidence or an expired
+    // retry timer. The old half-cache heuristic queried a still-in-flight
+    // first PSN after every later transmission, so one loss could provoke
+    // enough simultaneous PKT_NOT_RCVD NACKs to exhaust the retry budget.
+    // Standard wire uses its per-packet RTO/SACK recovery instead.
+    if ((!runtime_ || !runtime_->standard_wire) &&
+        (tx_cur_psn-clear_psn)>=static_cast<unsigned>(local_packet_capacity/2) && state==ESTABLISHED)
     {
         gen_cm = ACK_REQ; 
         diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] Need to send ACK Request, current psn: " << tx_cur_psn << ", clear_psn: " << clear_psn << std::endl;
     }
-    else if ((unack_cnt >= local_packet_capacity) && !SYN)
+    else if ((!runtime_ || !runtime_->standard_wire) && (unack_cnt>=local_packet_capacity) && !SYN)
     {
         gen_cm = ACK_REQ;
         pause_pdc = true;
@@ -1239,8 +1245,11 @@ void PDC::sendCtrlAckReq(PDStoNET_pkt *p){
     p->PDS_header.RUOD_cp_header.dpdcid = DPDCID;
     p->PDS_header.RUOD_cp_header.flags.ar = 1;        
     const auto original = tx_pkt_buffer.find(clear_psn + 1);
-    p->PDS_header.RUOD_cp_header.payload = original == tx_pkt_buffer.end() ? 0 :
-        static_cast<uint32_t>(original->second.SESpkt.bth_header.Standard_Header.msg_id) << 16;
+    p->PDS_header.RUOD_cp_header.payload=0;
+    if (original!=tx_pkt_buffer.end()) {
+        const auto expected=UET::PDS::default_semantic_response(original->second.SESpkt);
+        p->PDS_header.RUOD_cp_header.payload=uint32_t{expected.bth_header.Semantic_Response_Header.message_id}<<16;
+    }
 }
 
 /**

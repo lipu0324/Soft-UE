@@ -438,7 +438,8 @@ public:
                             // create a PDC, so this NACK carries SPDCID=0.
                             ++event_cnt; sendNack(&received_packet,UET_NO_SES_MSG_AVAIL); return;
                         }
-                        if (admission==UET::Runtime::SemanticAdmission::ReservedMessage) reserved_message=request;
+                        if (admission==UET::Runtime::SemanticAdmission::ReservedMessage ||
+                            admission==UET::Runtime::SemanticAdmission::ReservedPacket) reserved_message=request;
                     }
                 }
                 if (!allocPDC(local_pdc_id,received_packet.src_fep,received_packet.dst_fep)) {

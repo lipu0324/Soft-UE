@@ -163,6 +163,7 @@ void local_and_remote_errors() {
     auto& forward=fabric.add_host(1); auto& reverse=fabric.add_host(2);
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     PdsHost source_host(1,loop,trace,forward),target_host(2,loop,trace,reverse);
+    source_host.configure_read_ack_data(1024); target_host.configure_read_ack_data(1024);
     Endpoint source(1,source_host,loop,trace),target(2,target_host,loop,trace);
     source.memory().add_job(1); target.memory().add_job(1); target.memory().add_job(2);
     const auto local=source.memory().register_region(1,1,32,Access::Read|Access::Write);
@@ -176,7 +177,7 @@ void local_and_remote_errors() {
         CHECK(source.poll_completion(completion) && completion.status==expected);
         CHECK(!source.poll_completion(completion));
     };
-    auto invalid=read; invalid.read_length=17; check_local(invalid,CompletionStatus::Unsupported);
+    auto invalid=read; invalid.read_length=1025; check_local(invalid,CompletionStatus::Unsupported);
     invalid=read; invalid.payload={1}; check_local(invalid,CompletionStatus::InvalidRequest);
     invalid=read; invalid.immediate_data=1; check_local(invalid,CompletionStatus::InvalidRequest);
     invalid=read; invalid.read_result.reset(); check_local(invalid,CompletionStatus::InvalidRequest);
@@ -197,7 +198,7 @@ void local_and_remote_errors() {
     source.submit(read); loop.run(100000);
     Completion empty{}; CHECK(source.poll_completion(empty) && empty.status==CompletionStatus::Success && !empty.length);
     CHECK(!source.poll_completion(empty));
-    CHECK(source.capabilities().read && source.capabilities().max_read_length==16 && !source.capabilities().hpc);
+    CHECK(source.capabilities().read && source.capabilities().max_read_length==1024 && !source.capabilities().hpc);
     source.close(); target.close(); source_host.close(); target_host.close(); CHECK(loop.pending()==0);
 }
 

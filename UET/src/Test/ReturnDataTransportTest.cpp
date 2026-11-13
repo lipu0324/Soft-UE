@@ -169,10 +169,42 @@ void round_trip(pdc_mode mode,bool congestion,bool preopen,unsigned fault) {
     source.close(); target.close(); CHECK(loop.pending()==0);
 }
 
+void return_data_preserves_forward_syn() {
+    EventLoop loop; Services services{loop,loop,[]{}};
+    I_PDC source(&services); CHECK(source.initPDC(1,1000)); source.setFep(2,1);
+    PDS_PDC_req read{}; read.delivery_mode=RUD; read.next_hdr=UET_HDR_REQUEST_STD;
+    read.som=read.eom=true; read.pkt.bth_type=Standard_Header;
+    auto& header=read.pkt.bth_header.Standard_Header;
+    header.opcode=2; header.msg_id=9; header.job_id=1; header.som=header.eom=header.dc=1; header.request_length=64;
+    source.sesTxReq(&read); CHECK(source.SYN && source.state==CREATING);
+    PDStoNET_pkt returned{}; returned.PDS_type=RUOD_req_header;
+    auto& delivery=returned.PDS_header.RUOD_req_header;
+    delivery.type=RUD_REQ; delivery.next_hdr=UET_HDR_RESPONSE_DATA;
+    delivery.psn=1000; delivery.clear_psn_off=-1; delivery.spdcid=512; delivery.dpdcid=1;
+    returned.SESpkt.bth_type=Semantic_Response_with_Data_Header;
+    auto& data=returned.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+    data.opcode=2; data.return_code=1; data.job_id=1; data.read_request_msg_id=9; data.response_message_id=7;
+    data.payload_length=data.modified_length=64; returned.SESpkt.payload.assign(64,3);
+    source.rxReq(&returned);
+    CHECK(source.SYN && source.state==CREATING && source.DPDCID==512 && source.rx_req_pkt_q.size()==1);
+    SES_PDC_rsp result{}; result.rx_pkt_handle=source.rx_req_pkt_q.front().rx_pkt_handle;
+    source.rx_req_pkt_q.pop(); result.rep_len=12; result.pkt=UET::PDS::default_semantic_response(returned.SESpkt);
+    source.sesTxRsp(&result);
+    CHECK(source.tx_pkt_q.back().PDS_header.RUOD_ack_header.dpdcid==512 && source.SYN);
+    PDStoNET_pkt accepted{}; accepted.PDS_type=RUOD_ack_header;
+    auto& acknowledgment=accepted.PDS_header.RUOD_ack_header;
+    acknowledgment.type=ACK; acknowledgment.next_hdr=UET_HDR_RESPONSE;
+    acknowledgment.cack_psn=1000; acknowledgment.spdcid=512; acknowledgment.dpdcid=1;
+    accepted.SESpkt=UET::PDS::default_semantic_response(read.pkt);
+    source.rxAck(&accepted); CHECK(!source.SYN && source.state==ESTABLISHED);
+    source.freePDC(); CHECK(loop.pending()==0);
+}
+
 int main() {
     try {
         for (const auto mode:{RUD,ROD}) for (const bool congestion:{false,true}) for (const bool preopen:{false,true})
             for (unsigned fault=0;fault<=4;++fault) round_trip(mode,congestion,preopen,fault);
+        return_data_preserves_forward_syn();
         std::cout<<"PASS: same-PDC return data, independent PSNs, response token, loss/duplicates and incarnation checks\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
