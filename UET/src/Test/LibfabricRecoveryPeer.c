@@ -28,6 +28,9 @@ int main(int argc,char** argv) {
     CHECK(argc==2); const int server=!strcmp(argv[1],"server");
     const char* ordering_setting=getenv("SOFTUE_RECOVERY_ORDERED");
     const int ordered=!ordering_setting || strcmp(ordering_setting,"0");
+    const char* rendezvous_setting=getenv("SOFTUE_RECOVERY_RENDEZVOUS");
+    const int rendezvous=rendezvous_setting && strcmp(rendezvous_setting,"0");
+    const int expected_provider_error=rendezvous?0:(ordered?4:5);
     struct fi_info *hints=fi_allocinfo(),*info=NULL; CHECK(hints);
     hints->fabric_attr->prov_name=strdup("softue"); hints->ep_attr->type=FI_EP_RDM;
     hints->caps=FI_MSG|FI_RMA; hints->addr_format=FI_SOCKADDR_IN;
@@ -67,8 +70,8 @@ int main(int argc,char** argv) {
     const double started=monotonic_seconds();
     int finished=0;
     while (!finished && monotonic_seconds()-started<12) {
-        // ROD exceeds the unexpected-buffer budget; RUD reports NO_MATCH.
-        // Both modes keep manual progress running while the receive is late.
+        // Ordinary ROD exceeds the payload budget; ordinary RUD has NO_MATCH.
+        // Rendezvous instead captures a header until this late posting.
         if (server && !posted && monotonic_seconds()-started>0.080) {
             SUCCESS(fi_recv(endpoint,large_buffer,LARGE_BYTES,NULL,FI_ADDR_UNSPEC,(void*)11));
             SUCCESS(fi_recv(endpoint,small_buffer,sizeof(small_buffer),NULL,FI_ADDR_UNSPEC,(void*)12));
@@ -80,12 +83,13 @@ int main(int argc,char** argv) {
             // Preserve the first protocol/application failure before CHECK's
             // early exit can produce a much longer sanitizer cleanup report.
             if (server || !failure_started || error.op_context!=(void*)3 ||
-                error.prov_errno!=(ordered?4:5) || errors)
+                error.prov_errno!=expected_provider_error || errors)
                 fprintf(stderr,"unexpected recovery CQ error server=%d context=%llu err=%d provider=%d "
                     "flags=%llu sends=%zu receives=%zu errors=%zu failure_started=%d elapsed=%.6f\n",
                     server,(unsigned long long)(uintptr_t)error.op_context,error.err,error.prov_errno,
                     (unsigned long long)error.flags,sends,receives,errors,failure_started,monotonic_seconds()-started);
-            CHECK(!server && failure_started && error.op_context==(void*)3 && error.prov_errno==(ordered?4:5) && !errors);
+            CHECK(!server && failure_started && error.op_context==(void*)3 && error.prov_errno==expected_provider_error && !errors);
+            if (rendezvous) CHECK(error.err==FI_ETIMEDOUT);
             ++errors;
         } else if (count>0) for (ssize_t index=0;index<count;++index) {
             const struct fi_cq_data_entry *entry=&entries[index];
@@ -106,8 +110,8 @@ int main(int argc,char** argv) {
             SUCCESS(fi_send(endpoint,"reply",5,NULL,peer,(void*)30)); replied=1;
         }
         if (!server && sends==2 && receives==1 && !failure_started) {
-            // No further receive is posted. ROD exhausts its unexpected
-            // budget (DISABLED_GEN); RUD has no matching buffer (NO_MATCH).
+            // No further receive is posted. Ordinary SEND exhausts its retry
+            // policy; rendezvous reaches its single transaction deadline.
             // Each policy returns exactly one final application error.
             SUCCESS(fi_send(endpoint,large_buffer,LARGE_BYTES,NULL,peer,(void*)3)); failure_started=1;
         }

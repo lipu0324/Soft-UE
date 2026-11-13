@@ -369,7 +369,7 @@ public:
         }
         return false;
     }
-    size_t retained_rendezvous_receives() const { return rendezvous_targets_.size(); }
+    size_t retained_rendezvous_receives() const { return rendezvous_targets_.size()+rendezvous_receive_errors_.size(); }
     void configure_rendezvous(size_t limit=64,std::optional<uint32_t> read_initiator={}) {
         if (!limit || !rendezvous_targets_.empty()) throw std::invalid_argument("invalid rendezvous header limit/state");
         rendezvous_target_limit_=limit; rendezvous_read_initiator_=read_initiator;
@@ -422,6 +422,7 @@ public:
         while (!rendezvous_sources_.empty()) complete_rendezvous_source(rendezvous_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!deferred_targets_.empty()) fail_deferred_target(deferred_targets_.begin()->first,CompletionStatus::Cancelled,0);
         while (!rendezvous_targets_.empty()) fail_rendezvous_target(rendezvous_targets_.begin()->first,CompletionStatus::Cancelled,0,0);
+        while (!rendezvous_receive_errors_.empty()) complete_deferred_rendezvous_error(rendezvous_receive_errors_.begin()->first);
         incoming_.clear(); rendezvous_order_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
         posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
         read_returns_.clear(); read_packet_reservations_.clear();
@@ -553,6 +554,10 @@ private:
     size_t deferred_header_limit_=0;
     uint32_t target_restart_initiator_=0; // Configured local Job rank; default node proxy is simulator policy.
     using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
+    // A rejected eager continuation may precede SOM. Preserve only its one
+    // receive CQ until header data arrives; the owning Incoming bounds this
+    // state and retires it on Clear/Close (§3.4.6.4.1).
+    std::map<MessageKey,Completion> rendezvous_receive_errors_;
     struct RendezvousSourceTransaction {
         enum class Phase { Eager, Backoff, WaitingForRead };
         Operation original_operation;
@@ -667,6 +672,11 @@ private:
     static std::optional<uint64_t> rendezvous_tag(const RendezvousTargetTransaction& transaction) {
         return transaction.header.opcode==10?std::optional<uint64_t>{static_cast<uint64_t>(transaction.header.match_bits)}:std::nullopt;
     }
+    void complete_deferred_rendezvous_error(const MessageKey& message,std::optional<uint64_t> immediate={}) {
+        const auto found=rendezvous_receive_errors_.find(message); if (found==rendezvous_receive_errors_.end()) return;
+        if (immediate) found->second.immediate_data=immediate;
+        completions_.push_back(found->second); rendezvous_receive_errors_.erase(found);
+    }
     void fail_rendezvous_target(uint64_t id,CompletionStatus status,uint8_t code,uint32_t read_bytes) {
         const auto found=rendezvous_targets_.find(id); if (found==rendezvous_targets_.end()) return;
         const auto transaction=found->second;
@@ -688,8 +698,11 @@ private:
         if (pending_.count(active)) finish(active,CompletionStatus::Cancelled,read_bytes,0);
         if (transaction->receive) {
             const auto placed=static_cast<uint32_t>(transaction->placed_bytes.bytes());
-            completions_.push_back({0,transaction->receive->context,status,placed,code,true,transaction->immediate,0,
-                transaction->header.request_length,rendezvous_tag(*transaction)});
+            Completion completion{0,transaction->receive->context,status,placed,code,true,transaction->immediate,0,
+                transaction->header.request_length,rendezvous_tag(*transaction)};
+            if (!closed_ && transaction->header.hd && !transaction->start_seen && incoming!=incoming_.end())
+                rendezvous_receive_errors_.emplace(transaction->eager_message,std::move(completion));
+            else completions_.push_back(std::move(completion));
         }
     }
     void maybe_complete_rendezvous_target(uint64_t id) {
@@ -772,6 +785,8 @@ private:
     void receive_rendezvous(const PDC_SES_req& request) {
         const auto& header=request.pkt.bth_header.Standard_Header;
         auto& message=incoming_.at(receive_message_key(request));
+        if (header.som && header.hd)
+            complete_deferred_rendezvous_error(receive_message_key(request),static_cast<uint64_t>(header.diff.som_true.header_data));
         message.completion_reported=true; // Only the root owns an application CQ.
         if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
         const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
@@ -820,6 +835,10 @@ private:
             transaction=std::make_shared<RendezvousTargetTransaction>();
             transaction->id=++next_rendezvous_target_; transaction->arrival_order=++next_receive_order_;
             transaction->eager_message=receive_message_key(request); transaction->header=header; transaction->extension=extension;
+            // A failed posting must still retain valid CQ header data from
+            // this SOM. Binding can report truncation before payload handling.
+            transaction->start_seen=header.som;
+            if (header.som && header.hd) transaction->immediate=header.diff.som_true.header_data;
             transaction->selected=selected; transaction->peer=request.source_fep;
             transaction->accepted_eager=expected?static_cast<uint32_t>(extension.eager_length):0;
             transaction->semantic_length=expected?static_cast<uint32_t>(header.request_length):0;
@@ -928,7 +947,7 @@ private:
             const auto selected=resources_.resolve(operation.job,operation.relative_addressing,source.pid,source.resource_index,
                 ResourceSpace::Rma,source.generation);
             const auto registration=memory_.authorize(operation.job,selected.absolute_pid,source.key,source.offset,source.length,
-                Access::Read,selected.resource_index,operation.relative_addressing);
+                Access::Read,selected.resource_index,operation.relative_addressing,MemoryAccessOrigin::RendezvousSource);
             transaction=std::make_shared<RendezvousSourceTransaction>();
             transaction->registered_source=std::make_shared<RegisteredReadPayload>(memory_,registration,operation.job,
                 selected.absolute_pid,selected.resource_index,source.offset,source.length);
@@ -1579,6 +1598,7 @@ private:
                         if (unfinished.reserved_restart) retire_deferred_target(unfinished.reserved_restart);
                     }
                     release_unexpected(message->second);
+                    complete_deferred_rendezvous_error(key);
                     message=incoming_.erase(message);
                 } else ++message;
             }

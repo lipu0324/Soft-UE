@@ -32,6 +32,11 @@ constexpr uint64_t supported_caps=datagram_caps|FI_TAGGED|FI_RMA|FI_READ|FI_WRIT
 // It therefore enforces FI_FENCE for every transmit (§3.4.2.7.1.1), even
 // across peers. This conservative policy trades concurrency for simplicity.
 constexpr size_t maximum_inject_bytes=256; // Advertised local copy bound, not a protocol MTU.
+// Provider policy, not a negotiated UE limit: large RDM messages use native
+// rendezvous, with one payload MTU of eager data. FI_INJECT remains copied.
+constexpr size_t rendezvous_threshold_bytes=64*1024;
+constexpr uint32_t rendezvous_eager_bytes=1024;
+fi_provider provider_definition{};
 constexpr uint64_t completion_levels=FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_DELIVERY_COMPLETE;
 // libfabric completion levels are minimum guarantees (fi_cq(3)). For RDM we
 // choose the stronger globally-observable completion for every level: all PDS
@@ -138,6 +143,7 @@ struct ProviderEndpoint {
     uint64_t message_ordering=0;
     uint64_t default_operation_flags=0;
     uint64_t next_transmit_token=0;
+    size_t rendezvous_threshold=rendezvous_threshold_bytes; // Zero explicitly selects ordinary SEND for compatible peers.
     Runtime::RealtimeRuntime runtime;
     Runtime::Trace trace{runtime.events(),0}; // API users do not opt into an in-memory experiment trace.
     std::unique_ptr<Runtime::UdpFramePort> port;
@@ -269,8 +275,8 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
 }
 
 std::pair<uint32_t,SES::ResourceSpace> generation_key(const SES::Operation& request) {
-    const auto space=request.type==SES::OperationType::Send?SES::ResourceSpace::Send:
-        request.type==SES::OperationType::TaggedSend?SES::ResourceSpace::Tagged:SES::ResourceSpace::Rma;
+    const auto space=(request.type==SES::OperationType::Send || request.type==SES::OperationType::RendezvousSend)?SES::ResourceSpace::Send:
+        (request.type==SES::OperationType::TaggedSend || request.type==SES::OperationType::RendezvousTaggedSend)?SES::ResourceSpace::Tagged:SES::ResourceSpace::Rma;
     return {request.peer,space};
 }
 
@@ -291,7 +297,8 @@ void enqueue_transmission(ProviderEndpoint& endpoint,SES::Operation request,Appl
     const auto token=++endpoint.next_transmit_token;
     // Table 2-29: SEND ordering chooses SEND's mode; R/W ordering chooses
     // RMA/ATOMIC's mode. Extra local serialization cannot replace this mapping.
-    const auto ordering=(request.type==SES::OperationType::Send || request.type==SES::OperationType::TaggedSend)?send_ordering_modes:read_write_ordering_modes;
+    const auto ordering=(request.type==SES::OperationType::Send || request.type==SES::OperationType::TaggedSend ||
+        request.type==SES::OperationType::RendezvousSend || request.type==SES::OperationType::RendezvousTaggedSend)?send_ordering_modes:read_write_ordering_modes;
     request.delivery_mode=endpoint.datagram?UUD:(endpoint.message_ordering&ordering?ROD:RUD);
     request.context=token; application.request=std::move(request);
     endpoint.transmits.emplace(token,std::move(application)); endpoint.transmit_order.push_back(token);
@@ -307,6 +314,9 @@ bool retry_semantic_error(ProviderEndpoint& endpoint,ApplicationOperation& appli
     if (completion.status!=SES::CompletionStatus::RemoteError || completion.remote_code<2 || completion.remote_code>5 ||
         endpoint.datagram || application.retries>=8) return false;
     auto& request=*application.request;
+    // Native rendezvous owns its one global deadline and recoverable retries.
+    // Re-enqueueing its final result here would restart that logical lifetime.
+    if (request.type==SES::OperationType::RendezvousSend || request.type==SES::OperationType::RendezvousTaggedSend) return false;
     if (completion.remote_code==2 || completion.remote_code==3) request.target_generation=completion.remote_generation;
     else if (completion.remote_code==4) request.target_generation=static_cast<uint8_t>(completion.remote_generation+1u);
     endpoint.peer_generations[generation_key(request)]=request.target_generation;
@@ -652,6 +662,9 @@ int open_endpoint(fid_domain* handle,fi_info* info,fid_ep** result,void* context
             info->tx_attr->inject_size>maximum_inject_bytes) return -FI_EINVAL;
         if (domain.endpoint) return -FI_ENOSPC; // Explicitly advertised: one endpoint per domain.
         auto endpoint=std::make_unique<ProviderEndpoint>(); endpoint->domain=&domain;
+        const int configured_threshold=fi_param_get_size_t(&provider_definition,"rendezvous_threshold",&endpoint->rendezvous_threshold);
+        if (configured_threshold && configured_threshold!=-FI_ENODATA) return configured_threshold;
+        if (endpoint->rendezvous_threshold>UINT32_MAX) return -FI_EINVAL;
         endpoint->datagram=datagram; endpoint->directed_receive=info->caps&FI_DIRECTED_RECV;
         endpoint->message_ordering=info->tx_attr->msg_order;
         endpoint->default_operation_flags=info->tx_attr->op_flags;
@@ -711,7 +724,22 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
             (endpoint.datagram?SES::OperationType::DatagramSend:SES::OperationType::Send);
         operation.peer=*peer; operation.remote_key=key; operation.remote_offset=offset; operation.immediate_data=immediate;
         operation.tag=tag.value_or(0);
-        if (inject) {
+        ApplicationOperation application{context,tag?FI_TAGGED|FI_SEND:write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,
+            suppress_success?nullptr:const_cast<void*>(buffer)};
+        const bool rendezvous=!write && !endpoint.datagram && !inject && endpoint.rendezvous_threshold &&
+            length>=endpoint.rendezvous_threshold;
+        if (rendezvous) {
+            // No FI_MR_LOCAL mode or general remote-read grant is required.
+            // Only native rendezvous may read this private source registration
+            // through its peer/Job/rank-bound alias; its own key stays private.
+            SES::RegionOptions source_options; source_options.rendezvous_source_only=true;
+            const auto source=endpoint.domain->memory.register_buffer(1,1,
+                static_cast<uint8_t*>(const_cast<void*>(buffer)),length,static_cast<uint8_t>(SES::Access::Read),source_options);
+            application.temporary_key=source.key;
+            operation.type=tag?SES::OperationType::RendezvousTaggedSend:SES::OperationType::RendezvousSend;
+            operation.rendezvous_source=SES::RendezvousBuffer{source.key,0,static_cast<uint32_t>(length),1,1,0};
+            operation.rendezvous_eager_length=std::min<uint32_t>(rendezvous_eager_bytes,static_cast<uint32_t>(length));
+        } else if (inject) {
             // FI_INJECT returns ownership before network progress. Keep an
             // owned, bounded copy for PDS and for any later semantic retry.
             if (length) operation.payload.assign(static_cast<const uint8_t*>(buffer),static_cast<const uint8_t*>(buffer)+length);
@@ -721,10 +749,10 @@ ssize_t submit_operation(fid_ep* handle,const void* buffer,size_t length,fi_addr
             auto storage=std::make_shared<SES::BufferMemory>(static_cast<uint8_t*>(const_cast<void*>(buffer)),length);
             operation.payload_source=std::make_shared<SES::StoragePayload>(std::move(storage),0,length);
         }
-        ApplicationOperation application{context,tag?FI_TAGGED|FI_SEND:write?FI_RMA|FI_WRITE:FI_MSG|FI_SEND,
-            suppress_success?nullptr:const_cast<void*>(buffer)};
         application.suppress_success_completion=suppress_success;
-        enqueue_transmission(endpoint,std::move(operation),std::move(application));
+        const auto temporary_key=application.temporary_key;
+        try { enqueue_transmission(endpoint,std::move(operation),std::move(application)); }
+        catch (...) { if (temporary_key) endpoint.domain->memory.deregister(temporary_key); throw; }
         return 0;
     });
 }
@@ -1245,8 +1273,12 @@ void initialize_operations() {
 extern "C" __attribute__((visibility("default"))) fi_provider* fi_prov_ini() {
     static const bool initialized=[] { initialize_operations(); return true; }();
     (void)initialized;
-    static fi_provider provider{};
-    provider.version=FI_VERSION(0,2); provider.fi_version=FI_VERSION(2,0);
-    provider.name="softue"; provider.getinfo=get_information; provider.fabric=open_fabric;
-    return &provider;
+    provider_definition.version=FI_VERSION(0,2); provider_definition.fi_version=FI_VERSION(2,0);
+    provider_definition.name="softue"; provider_definition.getinfo=get_information; provider_definition.fabric=open_fabric;
+    static const bool parameters_defined=[] {
+        return fi_param_define(&provider_definition,"rendezvous_threshold",FI_PARAM_SIZE_T,
+            "RDM SEND/tagged rendezvous threshold in bytes (default65536; 0 selects ordinary SEND)")==0;
+    }();
+    if (!parameters_defined) return nullptr;
+    return &provider_definition;
 }

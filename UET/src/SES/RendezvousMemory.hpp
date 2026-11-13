@@ -13,13 +13,14 @@ public:
         :registry_(registry),registration_(std::move(registration)),job_(job),pid_(pid),
          resource_index_(resource_index),offset_(offset),length_(length) {
         if (registration_.local_placement_only) throw MemoryAccessError(MemoryError::Permission);
-        registry_.authorize_registration(registration_,job_,pid_,offset_,length_,Access::Read,resource_index_);
+        registry_.authorize_registration(registration_,job_,pid_,offset_,length_,Access::Read,resource_index_,
+            MemoryAccessOrigin::RendezvousSource);
     }
     uint64_t size() const override { return length_; }
     void read(uint64_t offset,uint8_t* destination,size_t count) const override {
         if (offset>length_ || count>length_-offset) throw MemoryAccessError(MemoryError::Bounds);
         const auto& live=registry_.authorize_registration(registration_,job_,pid_,offset_+offset,count,
-            Access::Read,resource_index_);
+            Access::Read,resource_index_,MemoryAccessOrigin::RendezvousSource);
         live.storage->read(offset_+offset,destination,count);
     }
 private:

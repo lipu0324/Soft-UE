@@ -23,7 +23,7 @@ public:
     MemoryError code;
 };
 enum class Access : uint8_t { Read = 1, Write = 2, Atomic = 4 };
-enum class MemoryAccessOrigin { RemoteRequest, LocalPlacement };
+enum class MemoryAccessOrigin { RemoteRequest, LocalPlacement, RendezvousSource };
 inline uint8_t operator|(Access a, Access b) { return static_cast<uint8_t>(a) | static_cast<uint8_t>(b); }
 
 // Storage selection is local policy. Remote requests see only a registered key
@@ -127,6 +127,7 @@ struct Region {
     std::weak_ptr<const int> registry_authority;
     std::optional<uint16_t> pid_scope;
     bool local_placement_only=false; // Trusted postings/results may use this region; a wire key cannot grant RMA access.
+    bool rendezvous_source_only=false; // Only a trusted transaction may create a peer-bound read-only view.
 };
 
 struct RegionOptions {
@@ -136,6 +137,7 @@ struct RegionOptions {
     std::optional<uint64_t> requested_key; // Native application-assigned, non-optimized key.
     bool bind_zero_pid=false; // Auto keys preserve the legacy domain-scope default for pid=0.
     bool local_placement_only=false;
+    bool rendezvous_source_only=false;
 };
 
 enum class Atomic64 { Add, Swap, CompareSwap, And, Or, Xor, Min, Max };
@@ -178,7 +180,8 @@ public:
     Region register_storage(uint32_t job,uint16_t pid,std::shared_ptr<MemoryStorage> storage,
                             uint8_t permissions,const RegionOptions& options={}) {
         if (!has_job(job)) throw MemoryAccessError(MemoryError::WrongJob);
-        if (!storage || pid > 0xfff || (options.resource_index && *options.resource_index>0xfff) || (permissions & ~uint8_t{7}))
+        if (!storage || pid > 0xfff || (options.resource_index && *options.resource_index>0xfff) || (permissions & ~uint8_t{7}) ||
+            (options.local_placement_only && options.rendezvous_source_only))
             throw std::invalid_argument("invalid region attributes");
         if (next_registration_==UINT64_MAX) throw std::overflow_error("registration identities exhausted");
         uint64_t key;
@@ -197,6 +200,7 @@ public:
         region.registration_id=++next_registration_;
         region.registry_authority=authority_;
         region.local_placement_only=options.local_placement_only;
+        region.rendezvous_source_only=options.rendezvous_source_only;
         if (pid || options.bind_zero_pid || options.requested_key) region.pid_scope=pid;
         // §2.2.5.3.4.1: non-optimized key namespaces include Job/PID/RI.
         // Equal numeric application keys may identify independent regions in
@@ -272,7 +276,8 @@ public:
         return authorize(job,pid,key,offset,length,access,resource_index,true,MemoryAccessOrigin::LocalPlacement);
     }
     const Region& authorize_registration(const Region& registration,uint32_t job,uint16_t pid,
-                            uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={}) const {
+                            uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},
+                            MemoryAccessOrigin origin=MemoryAccessOrigin::LocalPlacement) const {
         if (registration.registry_authority.lock()!=authority_) throw MemoryAccessError(MemoryError::InvalidKey);
         const auto bucket=regions_.find(registration.key);
         if (bucket==regions_.end()) throw MemoryAccessError(MemoryError::InvalidKey);
@@ -282,7 +287,7 @@ public:
         if (found==bucket->second.end()) throw MemoryAccessError(MemoryError::InvalidKey);
         // A receive posting already selected a buffer. Authenticate that exact
         // live registration; never reselect by a peer's JobID or a reused key.
-        return check_access(*found,job,pid,offset,length,access,resource_index,MemoryAccessOrigin::LocalPlacement);
+        return check_access(*found,job,pid,offset,length,access,resource_index,origin);
     }
     void write(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
@@ -391,6 +396,12 @@ private:
         if (resource_index && region.resource_index && resource_index!=region.resource_index)
             throw MemoryAccessError(MemoryError::InvalidKey);
         if (region.local_placement_only && origin!=MemoryAccessOrigin::LocalPlacement)
+            throw MemoryAccessError(MemoryError::Permission);
+        // A libfabric FI_SEND buffer is not a general FI_REMOTE_READ grant.
+        // Its private registration may only feed a locally created rendezvous
+        // view. Incoming READ/WRITE keys and ordinary result/posting lookups
+        // cannot select this origin (§2.2.10.4 / §3.4.5.3).
+        if (region.rendezvous_source_only && origin!=MemoryAccessOrigin::RendezvousSource)
             throw MemoryAccessError(MemoryError::Permission);
         if (!(region.permissions&static_cast<uint8_t>(access))) throw MemoryAccessError(MemoryError::Permission);
         if (offset>region.storage->size() || length>region.storage->size()-offset)
