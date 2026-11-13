@@ -31,6 +31,7 @@
 #include "../../Transport_Layer.hpp"
 #include "../TrimmedPacket.hpp"
 #include "../ReceiveAdmission.hpp"
+#include "../RudiInitiator.hpp"
 #include "../../logger/Logger.hpp"
 #include "../PDC/process/TPDCProcessManager.hpp"
 #include "../PDC/process/IPDCProcessManager.hpp"
@@ -69,6 +70,7 @@ public:
     // Remove unsent fragments after the owning PDC terminates. They must not
     // accidentally establish a replacement context under a retired message ID.
     void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
+        if (rudi_initiator_) rudi_initiator_->cancel_message(peer,job,message_id);
         const auto matches=[&](const SES_PDS_req& request) {
             const auto& header=request.pkt.bth_header.Standard_Header;
             return request.dst_fep==peer && header.job_id==job && header.msg_id==message_id;
@@ -93,7 +95,42 @@ public:
         armPendingDeadline();
     }
     explicit PDS_Manager(UET::Runtime::Services* runtime = nullptr)
-        : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {}
+        : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {
+        if (runtime_) rudi_initiator_=std::make_unique<UET::PDS::RudiInitiator>(*runtime_,
+            [this](const PDStoNET_pkt& packet) { return PDStoNet.push(packet); },
+            [this](UET::PDS::RudiInitiator::Result result) {
+                PDC_SES_rsp response{}; response.PDCID=UINT16_MAX; response.delivery_mode=RUDI;
+                response.source_fep=result.peer; response.rudi_packet_id=result.packet_id;
+                response.rudi_request_offset=result.request_offset; response.rudi_message_id=result.message_id;
+                response.rudi_timed_out=result.timed_out; response.pkt=std::move(result.semantic_response);
+                // At most the initiator packet budget can complete at once.
+                // SES response delivery must not silently lose a terminal fact.
+                rudi_results_.push_back(std::move(response));
+            });
+    }
+    std::optional<uint32_t> submitRudi(const SES_PDS_req& request) {
+        if (runtime_ && rudi_initiator_ && rudi_results_.size()+rudi_initiator_->outstanding_packets()>=runtime_->rudi_packet_limit) return {};
+        return rudi_initiator_?rudi_initiator_->submit(request):std::optional<uint32_t>{};
+    }
+    bool notifyRudiTransmit(const UET::Runtime::TransmitNotification& notification) {
+        return rudi_initiator_ && rudi_initiator_->notify_transmit(notification);
+    }
+    bool activeRudiAttempt(const UET::Runtime::TransmitIdentity& identity) const {
+        return rudi_initiator_ && rudi_initiator_->active_attempt(identity);
+    }
+    bool popRudiResult(PDC_SES_rsp& response) {
+        if (rudi_results_.empty()) return false;
+        response=std::move(rudi_results_.front()); rudi_results_.pop_front(); return true;
+    }
+    bool respondRudi(const PDC_SES_req& request,uint32_t local_fep,const SEStoPDS_pkt& semantic_response) {
+        if (request.delivery_mode!=RUDI) return false;
+        PDStoNET_pkt response{}; response.src_fep=local_fep; response.dst_fep=request.source_fep;
+        response.PDS_type=RUDI_header; response.SESpkt=semantic_response;
+        response.PDS_header.RUDI_header={RUDI_RESP,
+            semantic_response.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
+            {static_cast<uint8_t>(request.rudi_congestion_marked),static_cast<uint8_t>(request.rudi_retransmission)},request.rudi_packet_id};
+        return PDStoNet.push(response); // No retained response; source recovers a lost reply.
+    }
     ~PDS_Manager() {
         lifetime_.reset();
         if (runtime_ && pending_deadline_timer_) runtime_->timers.cancel(pending_deadline_timer_);
@@ -196,6 +233,8 @@ public:
 
 private:
     UET::Runtime::Services* runtime_ = nullptr;
+    std::unique_ptr<UET::PDS::RudiInitiator> rudi_initiator_;
+    std::deque<PDC_SES_rsp> rudi_results_;
     // A PDC ID is meaningful only within its peer endpoint tuple (§3.5.8).
     // IDs can collide across peers; validating just dpdcid would deliver a
     // forged or delayed packet into an unrelated connection.
@@ -269,7 +308,8 @@ public:
         if (queued) mainChk();
         const bool initiator = IPDC_Processmanager.progressOne();
         const bool target = TPDC_Processmanager.progressOne();
-        return queued || initiator || target;
+        const bool rudi=rudi_initiator_ && rudi_initiator_->progress();
+        return queued || initiator || target || rudi;
     }
 
     // IDLE, TX_READY, TX_PROCESSING, PDC and ERROR -> idle
@@ -316,6 +356,26 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
+        if (received_packet.PDS_type==RUDI_header) {
+            const auto& transport=received_packet.PDS_header.RUDI_header;
+            if (transport.type==RUDI_RESP) {
+                if (rudi_initiator_) rudi_initiator_->receive(received_packet);
+            } else if (transport.type==RUDI_REQ) {
+                if (received_packet.trimmed) { sendRudiNack(received_packet,
+                    received_packet.trimmed_last_hop?UET_TRIMMED_LASTHOP:UET_TRIMMED); return; }
+                PDC_SES_req request{}; request.PDCID=UINT16_MAX; request.delivery_mode=RUDI;
+                request.source_fep=received_packet.src_fep; request.next_hdr=transport.next_hdr;
+                request.rudi_packet_id=transport.pkt_id; request.rudi_retransmission=transport.flags.retx;
+                request.rudi_congestion_marked=received_packet.network_ecn==3;
+                request.pkt=std::move(received_packet.SESpkt);
+                if (!PDCtoSES_req.push(request)) sendRudiNack(received_packet,UET_NO_PKT_BUFFER);
+            }
+            return; // Never allocate a PDC, even for duplicates or malformed SES.
+        }
+        if (received_packet.PDS_type==nack_header && received_packet.PDS_header.nack_header.flags.nt) {
+            if (rudi_initiator_) rudi_initiator_->receive(received_packet);
+            return; // RUDI NACK IDs are not PDC sequence numbers.
+        }
         if (!received_packet.trimmed && received_packet.PDS_type==RUOD_cp_header &&
             received_packet.PDS_header.RUOD_cp_header.ctl_type>=10) {
             // Protect direct protocol-queue adapters as well as wire ingress.
@@ -596,6 +656,16 @@ public:
         LOG_INFO("send_nack", "Sending NACK packet, NACK type: " + std::to_string(nack_type));
     }
 
+    void sendRudiNack(const PDStoNET_pkt& received,PDS_Nack_Codes code) {
+        PDStoNET_pkt response{}; response.PDS_type=nack_header;
+        response.src_fep=received.dst_fep; response.dst_fep=received.src_fep;
+        auto& nack=response.PDS_header.nack_header;
+        nack.type=NACK; nack.next_hdr=UET_HDR_NONE; nack.flags.nt=1;
+        nack.flags.m=received.network_ecn==3; nack.flags.retx=received.PDS_header.RUDI_header.flags.retx;
+        nack.nack_code=code; nack.nack_pkt_id=received.PDS_header.RUDI_header.pkt_id;
+        PDStoNet.push(response); // Reserved PDC IDs/payload remain zero (Table3-49).
+    }
+
     /**
      * @brief Process SES to PDS request
      * @param tx Pointer to SES to PDS request processing structure, containing request information to forward
@@ -607,6 +677,10 @@ public:
         // Get request from queue
         SES_PDS_req tx = SES_tx_req_q.front(); // Get queue
         SES_tx_req_q.pop();                      // Pop queue head element
+        if (tx.mode==RUDI) {
+            if (!submitRudi(tx)) rejectPendingMessage(tx);
+            return; // Generic queue adapters must never allocate a RUDI PDC either.
+        }
         if (tx.mode == UUD) {
             PDStoNET_pkt datagram{};
             datagram.src_fep=tx.src_fep; datagram.dst_fep=tx.dst_fep;

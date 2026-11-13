@@ -137,7 +137,10 @@ public:
     // Request CP; it cannot unilaterally perform the successful close handshake.
     bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
         std::lock_guard<std::mutex> lock(manager_mutex);
-        if (!pds_process_info || notification.identity.local_pdc>=MAX_PDC*2) return false;
+        if (!pds_process_info) return false;
+        if (notification.identity.kind==UET::Runtime::TransmitKind::RudiRequest)
+            return pds_process_info->pds_instance->notifyRudiTransmit(notification);
+        if (notification.identity.local_pdc>=MAX_PDC*2) return false;
         return notification.identity.local_pdc<MAX_PDC?
             pds_process_info->pds_instance->IPDC_Processmanager.notifyTransmit(notification):
             pds_process_info->pds_instance->TPDC_Processmanager.notifyTransmit(notification);
@@ -152,6 +155,17 @@ public:
     bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         return pds_process_info && pds_process_info->pds_instance->pushReturnData(original,data);
+    }
+    std::optional<uint32_t> submitRudi(const SES_PDS_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info?pds_process_info->pds_instance->submitRudi(request):std::optional<uint32_t>{};
+    }
+    bool activeRudiAttempt(const UET::Runtime::TransmitIdentity& identity) const {
+        return pds_process_info && pds_process_info->pds_instance->activeRudiAttempt(identity);
+    }
+    bool respondRudi(const PDC_SES_req& request,uint32_t local_fep,const SEStoPDS_pkt& response) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && pds_process_info->pds_instance->respondRudi(request,local_fep,response);
     }
     bool requestConnectionProbe(uint16_t local_pdc_id,uint32_t selective_base) {
         std::lock_guard<std::mutex> lock(manager_mutex);
@@ -519,6 +533,7 @@ public:
      */
     bool popSESResponse(PDC_SES_rsp &rsp)
     {
+        if (pds_process_info && pds_process_info->pds_instance->popRudiResult(rsp)) return true;
         if (!pds_process_info || pds_process_info->pds_instance->PDCtoSES_rsp.empty())
         {
             return false;

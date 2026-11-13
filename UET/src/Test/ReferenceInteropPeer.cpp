@@ -34,7 +34,7 @@ int main() {
             // that same configured bound (§3.4.3.3) for multi-packet messages.
             Endpoint endpoint(1,host,loop,trace,1024,5*1000*kMillisecond);
             endpoint.memory().add_job(1);
-            std::vector<uint8_t> receive_buffer(128);
+            std::vector<uint8_t> receive_buffer(8192);
             const auto receive_region=endpoint.memory().register_buffer(1,1,receive_buffer.data(),receive_buffer.size(),7);
             endpoint.post_receive(1,1,receive_region.key,0,16,77);
             endpoint.post_tagged_receive(1,1,receive_region.key,48,16,{0x0123456789abcdefULL,0,{}},78);
@@ -85,6 +85,10 @@ int main() {
             Operation synchronized_atomic=increment; synchronized_atomic.type=OperationType::SynchronizedAtomic;
             synchronized_atomic.synchronization=synchronized_group; synchronized_atomic.remote_offset=3264;
             synchronized_atomic.payload={5,0,0,0,0,0,0,0}; endpoint.submit(synchronized_atomic);
+            Operation rudi_write=write; rudi_write.delivery_mode=RUDI;
+            rudi_write.remote_offset=4096; rudi_write.payload.assign(1113,0x63);
+            const auto rudi_write_id=endpoint.submit(rudi_write);
+            bool rudi_read_started=false;
             const auto reverse_synchronization_complete=[&] {
                 for (size_t byte=64;byte<83;++byte) if (receive_buffer[byte]!=0xa1) return false;
                 for (size_t byte=112;byte<120;++byte) if (receive_buffer[byte]) return false;
@@ -99,13 +103,14 @@ int main() {
             bool final_send_started=false;
             size_t sends=0,receives=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
-            while ((sends!=11 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) && std::chrono::steady_clock::now()<deadline) {
+            while ((sends!=14 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) && std::chrono::steady_clock::now()<deadline) {
                 port.progress(); runtime.progress(10000);
                 Completion completion{};
                 while (endpoint.poll_completion(completion)) {
                     if (completion.status!=CompletionStatus::Success) {
-                        std::cerr<<"FAIL Soft-UE completion status="<<static_cast<int>(completion.status)
+                        std::cerr<<"FAIL Soft-UE operation="<<completion.operation<<" completion status="<<static_cast<int>(completion.status)
                             <<" code="<<unsigned(completion.remote_code)<<'\n';
+                        for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                         return 1;
                     }
                     if (completion.receive) {
@@ -114,29 +119,51 @@ int main() {
                             (completion.context==0 && completion.length==19 && completion.immediate_data==99));
                         ++receives;
                     }
-                    else ++sends;
+                    else {
+                        ++sends;
+                        if (completion.operation==rudi_write_id) {
+                            // RUDI does not order independent operations. The
+                            // application observes WRITE completion before
+                            // reading those bytes through the reference SES.
+                            // The pinned reference interprets continuation
+                            // payload_length as returned byte count; our
+                            // no-payload READ path uses zero (Table3-10).
+                            // Keep that recorded divergence explicit. These
+                            // are two independent single-request READs, not
+                            // evidence for a multi-packet READ to the reference.
+                            for (const uint32_t offset:{0u,1024u}) {
+                                Operation rudi_read=read; rudi_read.delivery_mode=RUDI;
+                                rudi_read.remote_offset=4096+offset; rudi_read.read_length=std::min<uint32_t>(1024,1113-offset);
+                                rudi_read.read_result=ReadResultBuffer{receive_region.key,4096+offset,rudi_read.read_length,1,1};
+                                endpoint.submit(rudi_read);
+                            }
+                            rudi_read_started=true;
+                        }
+                    }
                 }
-                if (!final_send_started && sends==10 && receives==3 && !endpoint.retained_receive_messages() && reverse_synchronization_complete()) {
+                if (!final_send_started && sends==13 && receives==3 && !endpoint.retained_receive_messages() && reverse_synchronization_complete()) {
                     // The application handshake proves the reference's Clear
                     // retired its reverse synchronized messages at this peer.
                     Operation final=send; final.payload={'d','o','n','e'}; endpoint.submit(final); final_send_started=true;
                 }
                 pollfd readiness{port.descriptor(),POLLIN,0}; ::poll(&readiness,1,1);
             }
-            if (sends!=11 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) {
+            if (sends!=14 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) {
                 std::cerr<<"FAIL Soft-UE interop timeout sends="<<sends<<" receives="<<receives<<'\n';
                 for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                 return 1;
             }
             CHECK(receive_buffer[0]==6 && receive_buffer[1]==5 && receive_buffer[2]==4);
             CHECK(receive_buffer[48]==3 && receive_buffer[49]==2 && receive_buffer[50]==1);
+            CHECK(rudi_read_started);
+            for (size_t byte=4096;byte<4096+1113;++byte) CHECK(receive_buffer[byte]==0x63);
             for (size_t byte=0;byte<16;++byte) CHECK(receive_buffer[16+byte]==static_cast<uint8_t>((13+byte)*7));
             for (size_t byte=0;byte<8;++byte) {
                 CHECK(receive_buffer[32+byte]==(byte?0:1)); CHECK(receive_buffer[40+byte]==(byte?0:2));
             }
             endpoint.close(); host.close(); port.close(); CHECK(loop.pending()==0);
         }
-        std::cout<<"PASS Soft-UE: existing operations, forward three-member synchronized SUM, reverse synchronized WRITE and explicit CPU-coherent rejection\n";
+        std::cout<<"PASS Soft-UE: forward multi-packet RUDI WRITE and two independent READs, synchronized SUM/WRITE and CPU-coherent rejection\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<"FAIL "<<error.what()<<'\n'; return 1; }
 }

@@ -1058,6 +1058,7 @@ void PDC::fwdRsp2SES(SEStoPDS_pkt *pkt,uint32_t original_sequence)
 {
     LOG_DEBUG(__FUNCTION__, formatLogMessage("Forward response to SES layer"));
     PDC_SES_rsp rsp;
+    rsp.delivery_mode=mode; // Preserve RUD/ROD identity alongside the explicit RUDI upcall path.
     rsp.original_sequence=original_sequence; rsp.connection_start_psn=start_psn;
     rsp.PDCID = SPDCID;                     
     rsp.rx_pkt_handle = pkt->bth_header.Semantic_Response_Header.job_id;

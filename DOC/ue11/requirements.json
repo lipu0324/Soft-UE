@@ -600,12 +600,17 @@
       "status": "partial",
       "tests": [
         "rudi_header_test",
-        "reference_wire_comparison"
+        "rudi_initiator_test",
+        "rudi_transaction_test",
+        "rudi_safety_test",
+        "rudi_lifecycle_test",
+        "reference_wire_comparison",
+        "reference_process_interop"
       ],
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Figure3-74/Table3-48 wire foundation only:8-byte header includes reserved16 between prologue16 and pkt_id32; no PDC/PSN fields.288 independent request/read/response/data, carrier/IP/CRC/retry/mark/ID/reserved/truncation vectors and48 total independent pinned-parser/CRC fixtures including RUDI. Native per-packet source IDs/timers, stateless checked WRITE/READ target, RTO/NACK/trim recovery, bounds/lifecycle, interoperability and public capability remain unimplemented. No RUDI or Profile capability claim; see RUDI.md."
+      "evidence_note": "Native standard-header idempotent-safe RMA WRITE/READ uses the original PDS manager with source-only packet recovery, FEP-persistent nonwrapping32-bit IDs, NIC-boundary RTO, NACK/trim replay, bounded producer/packet/result state and one application completion. The target validates Job/PID/RI/generation/MR/span independently for each packet, retains no message/PDC/response state, creates no target CQ, and preserves private-placement/rendezvous authority. READ results pin their original registration; cancellation, deadline, retry exhaustion, backpressure, replacement and ID boundaries are tested. Table3-86 distinguishes WRITE control responses from trimmable READ data, without UET-CC credit.288 independent header vectors and48 pinned-parser fixtures remain. Pinned reference receives a multi-packet RUDI WRITE and serves two independent single-request READs; its continuation payload_length interpretation differs from the current no-payload READ policy, so no multi-packet reference READ claim. TSS, full management/configuration, public provider selection and complete HPC acceptance remain open. Native feature flags are not Profile claims; see RUDI.md."
     },
     {
       "id": "CMS-RCCC",
