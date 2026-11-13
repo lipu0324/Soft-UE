@@ -11,10 +11,11 @@ by each regression, concrete remaining placeholders and the next gated work.
 The [PDS configuration field audit](PDS-CONFIGURATION.md) supplements the
 normative-paragraph review with Table 3-35/3-36 obligations.
 
-Standard SYNC_WRITE/SYNC_ATOMIC extensions have independent wire golden checks;
-bounded group metadata and typed resource NACKs have isolated regressions;
-native transaction integration is still unimplemented. See
-[synchronized extension boundaries](SYNCHRONIZED-HEADERS.md).
+Native SYNC_WRITE/SYNC_ATOMIC groups connect bounded metadata, typed resource
+NACKs and the original PDS to delayed target notifications and checked integer
+atomic actions. See [synchronized transactions](SYNCHRONIZED-TRANSACTIONS.md)
+for source scheduling, independent target tests, reference differences and the
+remaining reuse/management boundaries.
 
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
@@ -59,7 +60,8 @@ See [real-time progress](REALTIME-PROGRESS.md).
 - A new asynchronous SES entry point supports NO_OP, SEND into a posted receive
   region, fragmented WRITE, WRITE with immediate completion data, single-packet
   DATAGRAM_SEND, fragmented native READ, exact/wildcard tagged SEND, SEND/DGRAM CQ header data, native deferrable SEND/tagged transactions with checked RTR and optional bounded header capture, native registered-buffer rendezvous SEND/tagged with real eager/READ completion, non-fetching 8/16/32/64-bit integer atomics, and single-element 8–128-bit integer fetching/CAS.
-  It uses the existing PDS/PDC implementation, not a replacement transport.
+  Native synchronized WRITE/<=8-byte integer atomic groups add aggregate target
+  actions without changing the original PDS/PDC reliability implementation.
 - Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
   immediate. Native integer bytes remain little endian while atomic operand fields

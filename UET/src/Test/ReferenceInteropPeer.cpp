@@ -34,11 +34,11 @@ int main() {
             // that same configured bound (§3.4.3.3) for multi-packet messages.
             Endpoint endpoint(1,host,loop,trace,1024,5*1000*kMillisecond);
             endpoint.memory().add_job(1);
-            std::vector<uint8_t> receive_buffer(64);
+            std::vector<uint8_t> receive_buffer(128);
             const auto receive_region=endpoint.memory().register_buffer(1,1,receive_buffer.data(),receive_buffer.size(),7);
             endpoint.post_receive(1,1,receive_region.key,0,16,77);
             endpoint.post_tagged_receive(1,1,receive_region.key,48,16,{0x0123456789abcdefULL,0,{}},78);
-            std::cerr<<"READY "<<port.local_port()<<std::endl;
+            std::cerr<<"READY "<<port.local_port()<<' '<<receive_region.key<<" 1 1"<<std::endl;
             uint16_t target_port=0,target_pid=0,target_resource=0; uint64_t target_key=0;
             CHECK(static_cast<bool>(std::cin>>target_port>>target_key>>target_pid>>target_resource));
             port.add_peer(2,"127.0.0.1",target_port);
@@ -76,9 +76,30 @@ int main() {
             Operation tagged=send; tagged.type=OperationType::TaggedSend;
             tagged.tag=0xfedcba9876543210ULL; tagged.payload={7,8,9};
             endpoint.submit(tagged);
+            const auto synchronized_group=endpoint.begin_synchronized_group(2,1,3);
+            CHECK(synchronized_group);
+            Operation synchronized_write=write; synchronized_write.type=OperationType::SynchronizedWrite;
+            synchronized_write.synchronization=synchronized_group; synchronized_write.remote_offset=3200;
+            synchronized_write.payload.assign(19,0x71); endpoint.submit(synchronized_write);
+            synchronized_write.remote_offset=3232; synchronized_write.payload.assign(17,0x82); endpoint.submit(synchronized_write);
+            Operation synchronized_atomic=increment; synchronized_atomic.type=OperationType::SynchronizedAtomic;
+            synchronized_atomic.synchronization=synchronized_group; synchronized_atomic.remote_offset=3264;
+            synchronized_atomic.payload={5,0,0,0,0,0,0,0}; endpoint.submit(synchronized_atomic);
+            const auto reverse_synchronization_complete=[&] {
+                for (size_t byte=64;byte<83;++byte) if (receive_buffer[byte]!=0xa1) return false;
+                for (size_t byte=112;byte<120;++byte) if (receive_buffer[byte]) return false;
+                // The pinned source requests CPU-coherent atomics (sem_ctl2).
+                // This memory model promises network atomicity only; §3.4.9.2
+                // requires RC_AMO_UNSUPPORTED_OP rather than a false success.
+                return std::any_of(trace.events().begin(),trace.events().end(),[](const TraceEvent& event) {
+                    return event.node==1 && event.event=="synchronized_member_failed" &&
+                        event.value==static_cast<uint8_t>(SemanticReturnCode::AtomicUnsupportedOperation);
+                });
+            };
+            bool final_send_started=false;
             size_t sends=0,receives=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
-            while ((sends!=7 || receives!=2 || endpoint.retained_receive_messages()!=0) && std::chrono::steady_clock::now()<deadline) {
+            while ((sends!=11 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) && std::chrono::steady_clock::now()<deadline) {
                 port.progress(); runtime.progress(10000);
                 Completion completion{};
                 while (endpoint.poll_completion(completion)) {
@@ -89,14 +110,20 @@ int main() {
                     }
                     if (completion.receive) {
                         CHECK((completion.context==77 && !completion.tag) ||
-                            (completion.context==78 && completion.tag==0x0123456789abcdefULL));
+                            (completion.context==78 && completion.tag==0x0123456789abcdefULL) ||
+                            (completion.context==0 && completion.length==19 && completion.immediate_data==99));
                         ++receives;
                     }
                     else ++sends;
                 }
+                if (!final_send_started && sends==10 && receives==3 && !endpoint.retained_receive_messages() && reverse_synchronization_complete()) {
+                    // The application handshake proves the reference's Clear
+                    // retired its reverse synchronized messages at this peer.
+                    Operation final=send; final.payload={'d','o','n','e'}; endpoint.submit(final); final_send_started=true;
+                }
                 pollfd readiness{port.descriptor(),POLLIN,0}; ::poll(&readiness,1,1);
             }
-            if (sends!=7 || receives!=2 || endpoint.retained_receive_messages()!=0) {
+            if (sends!=11 || receives!=3 || endpoint.retained_receive_messages()!=0 || !reverse_synchronization_complete()) {
                 std::cerr<<"FAIL Soft-UE interop timeout sends="<<sends<<" receives="<<receives<<'\n';
                 for (const auto& event:trace.events()) std::cerr<<event.time<<' '<<event.event<<' '<<event.value<<'\n';
                 return 1;
@@ -109,7 +136,7 @@ int main() {
             }
             endpoint.close(); host.close(); port.close(); CHECK(loop.pending()==0);
         }
-        std::cout<<"PASS Soft-UE: WRITE/READ/SEND/AMO/FETCH/CAS completed against the reference stack with verified registered results\n";
+        std::cout<<"PASS Soft-UE: existing operations, forward three-member synchronized SUM, reverse synchronized WRITE and explicit CPU-coherent rejection\n";
         return 0;
     } catch (const std::exception& error) { std::cerr<<"FAIL "<<error.what()<<'\n'; return 1; }
 }

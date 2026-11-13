@@ -100,6 +100,9 @@ struct Services {
     // Use a 64-bit cursor so exhaustion of the 32-bit wire token cannot wrap
     // silently onto a stale deferred transaction. Simulation may inject it.
     uint64_t next_semantic_restart_token=1;
+    // A 16-bit synchronized group may be reused only after all members are
+    // acknowledged. Keep fresh allocation monotonic across SES replacement.
+    uint32_t next_synchronization_group_id=0;
 
 };
 

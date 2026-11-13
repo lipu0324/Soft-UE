@@ -69,6 +69,15 @@ void expiry_and_credit() {
     CHECK(groups.cleared(first.member) && groups.cleared(newer.member) && !groups.retained_members() && !groups.active_groups());
     check_throws<std::invalid_argument>([] { Groups invalid(0); });
 }
+void completing_error_after_operand_arrival() {
+    Groups groups;
+    const auto completer=groups.reserve({2,0},1,true,2,0),write=groups.reserve({2,0},1,false,0,0);
+    CHECK(groups.processed(completer.member) && groups.processed(completer.member,true));
+    CHECK(groups.snapshot(completer.owner)->processed_messages==1 && !groups.processed(completer.member,true));
+    CHECK(groups.processed(write.member) && groups.snapshot(completer.owner)->state==Groups::State::Completed);
+    CHECK(!groups.action_completed(completer.owner) && groups.cleared(completer.member) && groups.cleared(write.member));
+    CHECK(!groups.active_groups() && !groups.retained_members());
+}
 void count_boundary() {
     Groups groups(1,100,2); uint64_t owner=0;
     for (uint32_t index=0;index<65534;++index) {
@@ -101,7 +110,8 @@ int main() {
     try {
         for (bool first:{false,true}) for (bool failed_write:{false,true}) for (bool failed_completer:{false,true})
             completion_order_and_failures(first,failed_write,failed_completer);
-        isolated_keys_and_bad_completers(); excess_after_completion_and_rollback(); expiry_and_credit(); count_boundary(); source_ids();
+        isolated_keys_and_bad_completers(); excess_after_completion_and_rollback(); expiry_and_credit();
+        completing_error_after_operand_arrival(); count_boundary(); source_ids();
         std::cout<<"PASS synchronized metadata counters, failed members, first completer, expiry, bounds and FEP identifier lifetime\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

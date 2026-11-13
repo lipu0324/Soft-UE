@@ -94,7 +94,7 @@ int main(void) {
     struct fid_fabric fabric={0}; struct fid_domain fabric_domain={0};
     struct fid_ep fabric_endpoint={0}; struct fid_cq fabric_cq={0};
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
-    uint8_t memory[4096]={0},receive_buffer[32]={0},tagged_buffer[16]={0};
+    uint8_t memory[4096]={0},receive_buffer[32]={0},tagged_buffer[16]={0},final_buffer[4]={0};
     setenv("UET_PDS","pds",1); setenv("UET_PDS_ACK_TYPE","ack",1);
     /* The pinned reference defaults to a 5 ms wall-clock timeout. An ASan
      * process sharing a CPU with stress tests can be descheduled longer than
@@ -118,6 +118,7 @@ int main(void) {
     REQUIRE_SUCCESS(uet_ep_bind_cq(endpoint,&attributes,&fabric_cq,FI_RECV,NULL,&receive_cq));
     REQUIRE_SUCCESS(uet_mr_enable(region)); REQUIRE_SUCCESS(uet_ep_enable(endpoint));
     REQUIRE_SUCCESS(uet_recv(endpoint,UET_JOB_ID_ANY,receive_buffer,sizeof(receive_buffer),NULL,NULL,(void*)1));
+    REQUIRE_SUCCESS(uet_recv(endpoint,UET_JOB_ID_ANY,final_buffer,sizeof(final_buffer),NULL,NULL,(void*)8));
     /* Exact tagged matching is supported by the pinned reference. Its API
      * explicitly rejects ignore bits, so wildcard coverage stays native. */
     REQUIRE_SUCCESS(uet_trecv(endpoint,UET_JOB_ID_ANY,tagged_buffer,sizeof(tagged_buffer),NULL,NULL,
@@ -125,24 +126,31 @@ int main(void) {
     struct uet_addr local_identity={0}; REQUIRE_SUCCESS(uet_getname(endpoint,&local_identity));
     fprintf(stderr,"READY %u %llu %u %u\n",tunnel_port,(unsigned long long)uet_mr_key(region),
         local_identity.pid_on_fep,local_identity.start_index); fflush(stderr);
-    unsigned int peer_port=0;
-    if (scanf("%u",&peer_port)!=1 || !peer_port || peer_port>65535) return 1;
+    unsigned int peer_port=0,peer_pid=0,peer_resource=0; unsigned long long peer_key=0;
+    if (scanf("%u %llu %u %u",&peer_port,&peer_key,&peer_pid,&peer_resource)!=4 || !peer_port || peer_port>65535) return 1;
     tunnel_peer.sin_family=AF_INET; tunnel_peer.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     tunnel_peer.sin_port=htons((uint16_t)peer_port);
     struct uet_addr peer_identity={0}; peer_identity.flags=UET_ADDR_FA_V|UET_ADDR_PID_ON_FEP_V|UET_ADDR_INDEX_V|UET_ADDR_INITIATOR_V;
-    peer_identity.fa.v4=1; peer_identity.pid_on_fep=1; peer_identity.start_index=1;
+    peer_identity.fa.v4=1; peer_identity.pid_on_fep=peer_pid; peer_identity.start_index=peer_resource;
     peer_identity.num_indices=1; peer_identity.initiator_id=1;
     REQUIRE_SUCCESS(uet_av_insert(domain,&peer_identity,&peer));
     const time_t deadline=time(NULL)+8;
     bool receive_complete=false,tagged_received=false,reply_started=false,reply_complete=false,tagged_reply_complete=false;
+    bool final_received=false; unsigned int synchronized_results=0;
     uint8_t reply[3]={6,5,4},tagged_reply[3]={3,2,1};
-    while (time(NULL)<deadline && (!reply_complete || !tagged_reply_complete || !clear_commands_sent)) {
+    uint8_t synchronized_first[19]; uint64_t synchronized_increment=7,synchronized_data=99;
+    memset(synchronized_first,0xa1,sizeof(synchronized_first));
+    while (time(NULL)<deadline && (!reply_complete || !tagged_reply_complete || !final_received || synchronized_results!=2)) {
         struct fi_cq_tagged_entry entry;
         ssize_t count=uet_cq_read(receive_cq,&entry,1);
         if (count>0 && entry.op_context==(void*)1) receive_complete=true;
         if (count>0 && entry.op_context==(void*)3) {
             if (entry.tag!=UINT64_C(0xfedcba9876543210) || !(entry.flags&FI_TAGGED) || entry.len!=3) return 1;
             tagged_received=true;
+        }
+        if (count>0 && entry.op_context==(void*)8) {
+            if (entry.len!=4 || memcmp(final_buffer,"done",4)) return 1;
+            final_received=true;
         }
         if (count<0 && count!=-FI_EAGAIN) { fprintf(stderr,"FAIL reference receive CQ: %zd\n",count); return 1; }
         if (receive_complete && tagged_received && !reply_started) {
@@ -157,21 +165,38 @@ int main(void) {
             if (tagged_buffer[0]!=7 || tagged_buffer[1]!=8 || tagged_buffer[2]!=9) return 1;
             REQUIRE_SUCCESS((int)uet_tsend(endpoint,1,tagged_reply,sizeof(tagged_reply),NULL,peer,
                 UINT64_C(0x0123456789abcdef),(void*)4));
+            /* The pinned source builder puts the final group count in every
+             * queued WRITE. UE1.1 requires zero on non-completing WRITE, so
+             * reverse interoperability uses two legal one-member completing
+             * groups. Independent PDS tests cover native multi-member target
+             * barriers; the forward direction uses a real three-member group. */
+            REQUIRE_SUCCESS((int)uet_write_sync(endpoint,1,synchronized_first,sizeof(synchronized_first),&synchronized_data,NULL,peer,64,peer_key,(void*)5));
+            REQUIRE_SUCCESS((int)uet_atomic_sync(endpoint,1,&synchronized_increment,1,NULL,peer,112,peer_key,FI_UINT64,FI_SUM,(void*)7));
             reply_started=true;
         }
         count=uet_cq_read(send_cq,&entry,1);
         if (count>0 && entry.op_context==(void*)2) reply_complete=true;
         if (count>0 && entry.op_context==(void*)4) tagged_reply_complete=true;
+        if (count>0 && entry.op_context==(void*)5) ++synchronized_results;
+        if (count>0 && entry.op_context==(void*)7) { fprintf(stderr,"FAIL CPU-coherent atomic unexpectedly succeeded\n"); return 1; }
+        if (count==-FI_EAVAIL) {
+            struct fi_cq_err_entry error={0};
+            if (uet_cq_readerr(send_cq,&error)!=1 || error.op_context!=(void*)7 || error.err!=FI_EIO) return 1;
+            ++synchronized_results; count=0; /* Expected unsupported CPU-coherent operation. */
+        }
         if (count<0 && count!=-FI_EAGAIN) { fprintf(stderr,"FAIL reference send CQ: %zd\n",count); return 1; }
         struct pollfd readiness={tunnel_socket,POLLIN,0}; poll(&readiness,1,1);
     }
-    if (!reply_complete || !tagged_reply_complete || !clear_commands_sent) { fprintf(stderr,"FAIL reference timeout received=%d reply=%d clear=%u\n",
+    if (!reply_complete || !tagged_reply_complete || !final_received || synchronized_results!=2 || !clear_commands_sent) { fprintf(stderr,"FAIL reference timeout received=%d reply=%d clear=%u\n",
         receive_complete,reply_started,clear_commands_sent); return 1; }
+    for (size_t byte=3200;byte<3219;++byte) if (memory[byte]!=0x71) return 1;
+    for (size_t byte=3232;byte<3249;++byte) if (memory[byte]!=0x82) return 1;
+    for (size_t byte=3264;byte<3272;++byte) if (memory[byte]!=(byte==3264?5:0)) return 1;
     REQUIRE_SUCCESS(uet_ep_close(endpoint)); REQUIRE_SUCCESS(uet_av_remove(peer));
     REQUIRE_SUCCESS(uet_cq_close(send_cq));
     REQUIRE_SUCCESS(uet_cq_close(receive_cq)); REQUIRE_SUCCESS(uet_mr_close(region));
     REQUIRE_SUCCESS(uet_domain_close(domain)); REQUIRE_SUCCESS(uet_finalize(instance));
     fi_freeinfo(info); fi_freeinfo(hints);
-    puts("PASS reference: unchanged SES/PDS received WRITE/READ/SEND/AMO/FETCH/CAS/TAGGED and sent verified untagged/tagged replies");
+    puts("PASS reference: unchanged SES/PDS exchanged synchronized operations and observed expected CPU-coherent atomic error");
     return 0;
 }

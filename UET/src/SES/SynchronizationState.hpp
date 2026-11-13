@@ -108,8 +108,19 @@ public:
         return {invalid_completer?Admission::InvalidCount:Admission::Accepted,view.owner,member,created};
     }
     bool processed(uint64_t member,bool failed=false) {
-        const auto found=members_.find(member); if (found==members_.end() || found->second.processed) return false;
+        const auto found=members_.find(member); if (found==members_.end()) return false;
         auto& entry=found->second; auto& group=*entry.group;
+        if (entry.processed) {
+            // A held completing atomic may receive MSG_ERROR or lose its PDC
+            // after its operand was counted but before the group is ready.
+            // Suppress that action without counting this member twice.
+            if (failed && entry.completing && !group.completer_failed) {
+                group.completer_failed=true;
+                if (group.view.state==State::Ready) group.view.state=State::Completed;
+                return true;
+            }
+            return false;
+        }
         entry.processed=true; ++group.view.processed_messages;
         if (entry.completing && failed) group.completer_failed=true;
         if (group.view.state==State::Collecting && group.invalid_completer_count &&
@@ -152,6 +163,10 @@ public:
     }
     std::optional<Snapshot> snapshot(uint64_t owner) const {
         const auto group=find_owner(owner); return group?std::optional<Snapshot>{group->view}:std::nullopt;
+    }
+    std::optional<Snapshot> current(Key key) const {
+        const auto found=active_.find(key);
+        return found==active_.end()?std::nullopt:std::optional<Snapshot>{found->second->view};
     }
     std::optional<Snapshot> member_snapshot(uint64_t member) const {
         const auto found=members_.find(member);

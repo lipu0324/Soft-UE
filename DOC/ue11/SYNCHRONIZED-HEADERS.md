@@ -17,14 +17,8 @@ Table3-23 的 opcode 是 `UET_SYNC_WRITE=0x10`、`UET_SYNC_ATOMIC=0x11`。
 `02 07 00 00`，覆盖64种 WRITE/ATOMIC、SOM/EOM、IPv4/6、UDP/native、CRC组合。
 测试另检查 payload 分界、nominal packet size、逐字节截断和错误扩展类型。
 
-线格式之外，现有[状态层原型](SYNCHRONIZED-IN-PROGRESS.md)验证了本地组计数、
-失败成员计数、第一 completing member、过期和有界ID分配。PDS的专用资源NACK
-`NO_SES_SYNC_AVAIL` 已覆盖新建/已有连接，但该测试使用脚本SES，尚未执行同步内存操作。
-原生同步组尚需接入并验证：
-
-- 目标以 `{initiator FEP, sync_group}` 跟踪状态并核对 Job；每条已处理消息只计数一次，失败也计数。
-- RUD 写入不为同组消息排序而延迟；唯一 completing WRITE/ATOMIC 等全部写入完成。
-- 源端收到组内所有消息的确认前不得重用 group；资源耗尽、错误和管理清理有界。
-- completing WRITE 的 header data、8字节以内非取回原子，以及优化头格式各自验收。
-
-当前没有原生同步组 API 或同步组能力声明；各 Profile 声明保持关闭。
+线格式之外，[原生同步组](SYNCHRONIZED-TRANSACTIONS.md)已接入组计数、目标通知、
+受检整数atomic、原PDS确认/恢复与有界清理。失败成员仍计数，RUD写入不为组内排序而
+延迟，header data值0保留。专用 `NO_SES_SYNC_AVAIL` 覆盖新建/已有连接及真实预算恢复。
+状态层的早期原型与接入修正见[历史记录](SYNCHRONIZED-IN-PROGRESS.md)。
+优化头及完整Profile验收仍开放；各Profile声明保持关闭。

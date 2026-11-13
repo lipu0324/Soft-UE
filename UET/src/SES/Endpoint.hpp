@@ -6,6 +6,7 @@
 #include "ReadCoverage.hpp"
 #include "ByteCoverage.hpp"
 #include "RendezvousMemory.hpp"
+#include "SynchronizationState.hpp"
 #include "../PDS/DefaultSemanticResponse.hpp"
 #include "../Runtime/PdsHost.hpp"
 #include <deque>
@@ -14,7 +15,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11, SynchronizedWrite=16, SynchronizedAtomic=17 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -33,6 +34,22 @@ struct RendezvousBuffer {
     uint32_t length=0;
     uint16_t pid=1,resource_index=1;
     uint8_t generation=0;
+};
+// This handle is local authority, not a received identifier. Its weak identity
+// prevents attaching an old group to a replacement or unrelated Endpoint.
+class SynchronizedGroup {
+public:
+    uint16_t wire_identifier() const { return wire_group_; }
+    uint16_t message_count() const { return message_count_; }
+private:
+    friend class Endpoint;
+    SynchronizedGroup(uint64_t owner,uint16_t wire_group,uint16_t message_count,uint32_t peer,uint32_t job,
+                      std::weak_ptr<int> authority)
+        :owner_(owner),wire_group_(wire_group),message_count_(message_count),peer_(peer),job_(job),authority_(authority) {}
+    uint64_t owner_;
+    uint16_t wire_group_,message_count_;
+    uint32_t peer_,job_;
+    std::weak_ptr<int> authority_;
 };
 struct Operation {
     OperationType type = OperationType::Send;
@@ -62,6 +79,7 @@ struct Operation {
     std::optional<RendezvousBuffer> rendezvous_source;
     uint32_t rendezvous_eager_length=0;
     bool zero_length_atomic=false; // §3.4.2.12: explicit zero-byte put/get, distinct from READ's ignored input operand.
+    std::shared_ptr<const SynchronizedGroup> synchronization;
 };
 // Ignore bits apply to the tag only. An omitted initiator matches any source;
 // a specified rank is interpreted inside the posting's JobID, even with absolute addressing.
@@ -88,6 +106,7 @@ struct EndpointCapabilities {
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
     bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
+    bool synchronized_write=true,synchronized_integer_atomic=true; // Native bounded groups; no Profile claim.
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     bool deferrable_send=true, deferrable_tagged_send=true,deferrable_header_capture=false;
@@ -115,7 +134,9 @@ public:
              size_t read_result_window=8)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
           memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit),
-          unexpected_limit_(unexpected_buffer_bytes),read_response_limit_(read_response_limit),read_result_window_(read_result_window) {
+          unexpected_limit_(unexpected_buffer_bytes),read_response_limit_(read_response_limit),read_result_window_(read_result_window),
+          synchronization_ids_(host.services().next_synchronization_group_id),
+          synchronized_target_groups_(64,timeout,receive_message_limit) {
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ ||
             !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
@@ -143,11 +164,47 @@ public:
     ResourceDirectory& resources() { return resources_; }
     const EndpointCapabilities& capabilities() const { return capabilities_; }
 
+    std::shared_ptr<const SynchronizedGroup> begin_synchronized_group(uint32_t peer,uint32_t job,uint16_t messages) {
+        if (closed_ || !peer || !messages || !memory_.has_job(job)) throw std::invalid_argument("invalid synchronized group");
+        if (next_synchronization_owner_==UINT64_MAX) return {};
+        const auto wire_group=synchronization_ids_.allocate();
+        if (!wire_group) return {};
+        const auto owner=++next_synchronization_owner_;
+        auto handle=std::shared_ptr<const SynchronizedGroup>(new SynchronizedGroup(owner,*wire_group,messages,peer,job,lifetime_));
+        SynchronizedSourceGroup group; group.handle=handle;
+        std::weak_ptr<int> life=lifetime_;
+        group.deadline=loop_.after(timeout_,[this,life,owner] {
+            if (!life.expired()) abandon_synchronized_group(owner);
+        });
+        synchronized_source_groups_.emplace(owner,std::move(group));
+        return handle;
+    }
+    size_t retained_synchronized_groups() const { return synchronized_target_groups_.active_groups(); }
+    size_t retained_synchronized_members() const { return synchronized_target_groups_.retained_members(); }
+    size_t retained_synchronized_actions() const { return synchronized_target_actions_.size(); }
+    void configure_synchronized_tracking(size_t maximum_groups=64) {
+        if (!maximum_groups || synchronized_target_groups_.active_groups() || synchronized_target_groups_.retained_members())
+            throw std::invalid_argument("invalid synchronization group limit/state");
+        synchronized_target_groups_=SynchronizationGroups(maximum_groups,timeout_,receive_message_limit_);
+    }
+    size_t active_synchronized_source_groups() const { return synchronized_source_groups_.size(); }
+    bool cancel_synchronized(uint64_t operation) {
+        const auto found=synchronized_sources_.find(operation); if (found==synchronized_sources_.end()) return false;
+        const auto message=found->second->active_message;
+        if (message && pending_.count(message)) finish(message,CompletionStatus::Cancelled,0,0);
+        else complete_synchronized_source(operation,CompletionStatus::Cancelled,0,0,0);
+        feed_submissions(); return true;
+    }
+
     uint64_t submit(Operation operation) {
         if (closed_) throw std::logic_error("endpoint closed");
         if (next_operation_==UINT64_MAX) throw std::overflow_error("operation ids exhausted");
         const auto application_operation_id=++next_operation_;
-        if (operation.type==OperationType::RendezvousSend || operation.type==OperationType::RendezvousTaggedSend)
+        if (operation.type==OperationType::SynchronizedWrite || operation.type==OperationType::SynchronizedAtomic)
+            start_synchronized_source(std::move(operation),application_operation_id);
+        else if (operation.synchronization)
+            completions_.push_back({application_operation_id,operation.context,CompletionStatus::InvalidRequest,0,0,false});
+        else if (operation.type==OperationType::RendezvousSend || operation.type==OperationType::RendezvousTaggedSend)
             start_rendezvous_source(std::move(operation),application_operation_id);
         else if (operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend)
             start_deferrable_source(std::move(operation),application_operation_id);
@@ -158,10 +215,11 @@ private:
     // A user operation and a wire message have different identities. Internal
     // continuations will retain the application's ID while allocating a fresh
     // MID and using the same original SES/PDS submission path.
-    uint16_t submit_message(Operation operation,uint64_t application_operation_id,uint32_t deferrable_token=0,uint32_t restart_owner=0,uint64_t rendezvous_owner=0,uint64_t rendezvous_read_owner=0) {
+    uint16_t submit_message(Operation operation,uint64_t application_operation_id,uint32_t deferrable_token=0,uint32_t restart_owner=0,uint64_t rendezvous_owner=0,uint64_t rendezvous_read_owner=0,uint64_t synchronization_owner=0) {
         if (closed_) throw std::logic_error("endpoint closed");
         const auto complete_local=[&](CompletionStatus status) {
-            if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,0,0);
+            if (synchronization_owner) complete_synchronized_source(synchronization_owner,status,0,0,0);
+            else if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,0,0);
             else if (rendezvous_owner) complete_rendezvous_source(rendezvous_owner,status,0,0);
             else if (restart_owner) fail_deferred_target(restart_owner,status,0);
             else if (deferrable_token) complete_deferrable_source(deferrable_token,status,0,0);
@@ -172,14 +230,15 @@ private:
         const bool is_restart=restart_owner!=0;
         const bool is_datagram=operation.type==OperationType::DatagramSend;
         const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic;
-        const bool is_atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
+        const bool is_synchronized_write=operation.type==OperationType::SynchronizedWrite;
+        const bool is_atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || is_fetching_atomic;
         const bool is_read=operation.type==OperationType::Read;
         const bool is_deferrable=operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend;
         if (!is_datagram && operation.delivery_mode!=ROD && operation.delivery_mode!=RUD) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (operation.type!=OperationType::Noop && operation.type!=OperationType::Send &&
-            operation.type!=OperationType::Write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read && !is_restart && !is_rendezvous && !(is_deferrable && deferrable_token)) {
+            operation.type!=OperationType::Write && !is_synchronized_write && operation.type!=OperationType::TaggedSend && !is_atomic && !is_datagram && !is_read && !is_restart && !is_rendezvous && !(is_deferrable && deferrable_token)) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (!is_rendezvous && (operation.rendezvous_source || operation.rendezvous_eager_length)) {
@@ -267,7 +326,7 @@ private:
         }
         if (!operation.peer || (!memory_.has_job(operation.job) && !authorized_foreign_rendezvous_job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
             payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-            (operation.immediate_data && operation.type!=OperationType::Write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable && !is_rendezvous) ||
+            (operation.immediate_data && operation.type!=OperationType::Write && !is_synchronized_write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable && !is_rendezvous) ||
             (operation.type==OperationType::Noop && payload_length)) {
             complete_local(CompletionStatus::InvalidRequest); return 0;
         }
@@ -285,6 +344,7 @@ private:
         pending.returned_generation=operation.target_generation; pending.deferrable_token=deferrable_token;
         pending.restart_owner=restart_owner; pending.rendezvous_owner=rendezvous_owner;
         pending.rendezvous_read_owner=rendezvous_read_owner;
+        pending.synchronization_owner=synchronization_owner;
         pending.is_datagram=is_datagram;
         pending.is_read=is_read; pending.read_result=operation.read_result;
         pending.read_registration=std::move(read_registration);
@@ -300,6 +360,7 @@ private:
                 transfer_length,0,0,false});
             sources_.at(message).deferrable_token=deferrable_token;
             sources_.at(message).restart_owner=restart_owner;
+            if (synchronization_owner) synchronized_sources_.at(synchronization_owner)->active_message=message;
             if (rendezvous_read_owner) rendezvous_targets_.at(rendezvous_read_owner)->active_read_message=message;
             if (rendezvous_owner) {
                 const auto transaction=rendezvous_sources_.at(rendezvous_owner);
@@ -345,9 +406,9 @@ public:
         completion=completions_.front(); completions_.pop_front(); return true;
     }
     size_t pending() const {
-        size_t count=deferred_sources_.size()+rendezvous_sources_.size();
+        size_t count=deferred_sources_.size()+rendezvous_sources_.size()+synchronized_sources_.size();
         for (const auto& operation:pending_) if (!operation.second.deferrable_token && !operation.second.restart_owner &&
-            !operation.second.rendezvous_owner && !operation.second.rendezvous_read_owner) ++count;
+            !operation.second.rendezvous_owner && !operation.second.rendezvous_read_owner && !operation.second.synchronization_owner) ++count;
         return count;
     }
     // Simulator policy: enable bounded, header-only unexpected deferral (J=0).
@@ -387,6 +448,7 @@ public:
     bool transport_pending(uint64_t operation) const {
         if (!operation) return false;
         if (rendezvous_sources_.count(operation)) return true;
+        if (synchronized_sources_.count(operation)) return true;
         for (const auto& transaction:deferred_sources_) if (transaction.second->operation==operation) return true;
         for (const auto& pending:pending_) if (pending.second.id==operation) return true;
         for (const auto& lease:message_leases_) if (lease.second.operation==operation) return true;
@@ -420,6 +482,10 @@ public:
         while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!deferred_sources_.empty()) complete_deferrable_source(deferred_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!rendezvous_sources_.empty()) complete_rendezvous_source(rendezvous_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
+        while (!synchronized_source_groups_.empty()) abandon_synchronized_group(synchronized_source_groups_.begin()->first);
+        for (const auto& timer:synchronized_target_timers_) loop_.cancel(timer.second);
+        synchronized_target_timers_.clear(); synchronized_target_actions_.clear();
+        synchronized_target_groups_=SynchronizationGroups{};
         while (!deferred_targets_.empty()) fail_deferred_target(deferred_targets_.begin()->first,CompletionStatus::Cancelled,0);
         while (!rendezvous_targets_.empty()) fail_rendezvous_target(rendezvous_targets_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!rendezvous_receive_errors_.empty()) complete_deferred_rendezvous_error(rendezvous_receive_errors_.begin()->first);
@@ -465,6 +531,7 @@ private:
         uint8_t returned_generation=0;
         uint32_t deferrable_token=0,restart_owner=0;
         uint64_t rendezvous_owner=0,rendezvous_read_owner=0;
+        uint64_t synchronization_owner=0;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
     struct RestartRequest {
@@ -538,6 +605,14 @@ private:
         uint32_t rendezvous_semantic_length=0; // Sticky result survives retiring the logical receive.
         ReadCoverage read_requests;
         size_t read_returns_pending=0;
+        uint64_t synchronization_member=0;
+        uint16_t synchronization_group=0,synchronization_count=0;
+        bool synchronized_atomic=false;
+        bool synchronization_start_seen=false;
+        std::optional<Region> synchronization_registration;
+        std::vector<uint8_t> synchronization_operands;
+        std::vector<PDC_SES_req> synchronization_responses;
+        std::optional<SemanticReturnCode> synchronization_admission_error;
     };
     struct DeferredTarget {
         uint32_t token,source_token,peer;
@@ -653,6 +728,263 @@ private:
         std::optional<uint32_t> sequence;
     };
     std::map<uint16_t,ReadReturn> read_returns_;
+
+    struct SynchronizedSourceGroup {
+        std::shared_ptr<const SynchronizedGroup> handle;
+        uint32_t submitted=0,finished=0;
+        bool completing_submitted=false,all_confirmed=true;
+        Runtime::TimerId deadline=0;
+    };
+    struct SynchronizedSource {
+        Operation original;
+        std::shared_ptr<const PayloadSource> payload;
+        uint64_t operation=0;
+        uint16_t active_message=0,retiring_message=0;
+        uint32_t retries=0;
+        bool retry_ready=false;
+        bool waiting_for_writes=false;
+        Runtime::TimerId backoff=0;
+        std::set<ConnectionKey> connections;
+    };
+    struct SynchronizedTargetAction {
+        uint64_t owner=0,member=0;
+        PDC_SES_req request; // Metadata plus at most one <=8-byte atomic operand.
+        ResourceSelection selected{};
+        std::optional<Region> registration;
+        std::optional<uint64_t> immediate;
+        uint32_t length=0;
+        bool atomic=false;
+        std::vector<PDC_SES_req> responses;
+    };
+    SynchronizationIdPool synchronization_ids_;
+    static constexpr size_t kMaximumSynchronizedSourceMembers=4096;
+    uint64_t next_synchronization_owner_=0;
+    std::map<uint64_t,SynchronizedSourceGroup> synchronized_source_groups_;
+    std::map<uint64_t,std::shared_ptr<SynchronizedSource>> synchronized_sources_;
+    SynchronizationGroups synchronized_target_groups_;
+    std::map<uint64_t,SynchronizedTargetAction> synchronized_target_actions_;
+    std::map<uint64_t,Runtime::TimerId> synchronized_target_timers_;
+    bool cancelling_synchronized_incarnation_=false;
+
+    void abandon_synchronized_group(uint64_t owner) {
+        const auto found=synchronized_source_groups_.find(owner); if (found==synchronized_source_groups_.end()) return;
+        const auto handle=found->second.handle;
+        loop_.cancel(found->second.deadline); synchronized_source_groups_.erase(found);
+        synchronization_ids_.release(handle->wire_group_,false);
+        std::vector<uint64_t> operations;
+        for (const auto& source:synchronized_sources_)
+            if (source.second->original.synchronization->owner_==owner) operations.push_back(source.first);
+        for (const auto operation:operations) {
+            const auto source=synchronized_sources_.find(operation); if (source==synchronized_sources_.end()) continue;
+            const auto message=source->second->active_message;
+            if (message && pending_.count(message)) finish(message,closed_?CompletionStatus::Cancelled:CompletionStatus::Timeout,0,0);
+            else complete_synchronized_source(operation,closed_?CompletionStatus::Cancelled:CompletionStatus::Timeout,0,0,0);
+        }
+        if (!closed_) feed_submissions(); // Any started message still drains its reliable error tail.
+    }
+    void start_synchronized_source(Operation operation,uint64_t application_operation_id) {
+        const auto handle=operation.synchronization;
+        const auto group=handle?synchronized_source_groups_.find(handle->owner_):synchronized_source_groups_.end();
+        const bool completing=operation.type==OperationType::SynchronizedAtomic || operation.immediate_data.has_value();
+        const bool atomic=operation.type==OperationType::SynchronizedAtomic;
+        const auto payload_size=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        if (!handle || handle->authority_.lock()!=lifetime_ || group==synchronized_source_groups_.end() ||
+            group->second.handle!=handle || handle->peer_!=operation.peer || handle->job_!=operation.job ||
+            group->second.submitted>=handle->message_count_ || (completing && group->second.completing_submitted) ||
+            (!completing && !group->second.completing_submitted && group->second.submitted+1==handle->message_count_) ||
+            operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
+            (operation.delivery_mode!=RUD && operation.delivery_mode!=ROD) ||
+            (atomic && (operation.immediate_data || static_cast<uint8_t>(operation.atomic_datatype)>7 ||
+             payload_size>8 || operation.remote_offset%integer_atomic_width(operation.atomic_datatype) ||
+             integer_atomic_width(operation.atomic_datatype)>mtu_))) {
+            completions_.push_back({application_operation_id,operation.context,CompletionStatus::InvalidRequest,0,0,false}); return;
+        }
+        if (atomic && (static_cast<uint8_t>(operation.atomic_operation)>12 || operation.atomic_operation==IntegerAtomicOperation::Read)) {
+            completions_.push_back({application_operation_id,operation.context,CompletionStatus::Unsupported,0,0,false}); return;
+        }
+        if (synchronized_sources_.size()>=kMaximumSynchronizedSourceMembers) {
+            completions_.push_back({application_operation_id,operation.context,CompletionStatus::ResourceExhausted,0,0,false}); return;
+        }
+        auto source=std::make_shared<SynchronizedSource>(); source->operation=application_operation_id;
+        source->payload=operation.payload_source;
+        if (!source->payload) source->payload=std::make_shared<VectorPayload>(std::move(operation.payload));
+        operation.payload_source.reset(); source->original=std::move(operation);
+        ++group->second.submitted; group->second.completing_submitted|=completing;
+        synchronized_sources_.emplace(application_operation_id,source);
+        // A completing atomic may wait behind an arbitrary amount of WRITE
+        // data. Sending it first on the same finite PDC would block Clear and
+        // could fill the window before the writes arrive. There is no ordering
+        // requirement on its operand payload (§3.4.9.6), so defer its first
+        // transmission until the other logical members have acknowledged.
+        source->waiting_for_writes=atomic;
+        if (atomic) drive_synchronized_sources();
+        else queue_synchronized_attempt(application_operation_id);
+    }
+    void queue_synchronized_attempt(uint64_t operation) {
+        const auto found=synchronized_sources_.find(operation);
+        if (found==synchronized_sources_.end() || closed_ || found->second->active_message) return;
+        auto request=found->second->original; request.payload_source=found->second->payload;
+        if (request.zero_length_atomic && !request.payload_source->size()) request.payload_source.reset();
+        found->second->retry_ready=false; found->second->waiting_for_writes=false;
+        submit_message(std::move(request),operation,0,0,0,0,operation);
+    }
+    void complete_synchronized_source(uint64_t operation,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation) {
+        const auto found=synchronized_sources_.find(operation); if (found==synchronized_sources_.end()) return;
+        const auto source=found->second; synchronized_sources_.erase(found); loop_.cancel(source->backoff);
+        completions_.push_back({operation,source->original.context,status,length,code,false,{},generation});
+        trace_.record(node_,"operation_complete",operation);
+        const auto group=synchronized_source_groups_.find(source->original.synchronization->owner_);
+        if (group==synchronized_source_groups_.end()) { drive_synchronized_sources(); return; }
+        ++group->second.finished;
+        // Error completion can precede reliable tail/Clear retirement. Such
+        // groups are deliberately quarantined; success requires every ACK.
+        group->second.all_confirmed&=status==CompletionStatus::Success;
+        if (group->second.finished==group->second.handle->message_count_ && group->second.completing_submitted) {
+            synchronization_ids_.release(group->second.handle->wire_group_,group->second.all_confirmed);
+            loop_.cancel(group->second.deadline); synchronized_source_groups_.erase(group);
+        }
+        drive_synchronized_sources();
+    }
+    void synchronized_message_complete(uint64_t operation,uint16_t message,CompletionStatus status,uint32_t length,uint8_t code,uint8_t generation) {
+        const auto found=synchronized_sources_.find(operation); if (found==synchronized_sources_.end()) return;
+        const auto source=found->second; source->active_message=0; source->retiring_message=message;
+        if (status==CompletionStatus::RemoteError && (code==2 || code==4)) {
+            source->original.target_generation=generation;
+            const auto exponent=std::min(source->retries++,uint32_t{4});
+            const auto delay=std::min<Runtime::Time>(10*Runtime::kMillisecond,Runtime::kMillisecond<<exponent);
+            std::weak_ptr<int> life=lifetime_;
+            source->backoff=loop_.after(delay,[this,life,operation] {
+                if (life.expired()) return;
+                const auto retry=synchronized_sources_.find(operation); if (retry==synchronized_sources_.end()) return;
+                retry->second->backoff=0; retry->second->retry_ready=true; drive_synchronized_sources();
+            });
+            feed_submissions(); return;
+        }
+        complete_synchronized_source(operation,status,length,code,generation);
+    }
+    void drive_synchronized_sources() {
+        if (closed_ || cancelling_synchronized_incarnation_) return;
+        std::vector<uint64_t> ready;
+        for (const auto& source:synchronized_sources_) {
+            const auto group=synchronized_source_groups_.find(source.second->original.synchronization->owner_);
+            if (group==synchronized_source_groups_.end()) continue;
+            if (source.second->waiting_for_writes && group!=synchronized_source_groups_.end() &&
+                group->second.submitted==group->second.handle->message_count_ &&
+                group->second.finished+1==group->second.handle->message_count_) ready.push_back(source.first);
+            else if (source.second->retry_ready && !sources_.count(source.second->retiring_message) &&
+                !message_leases_.count(source.second->retiring_message)) {
+                const auto& operation=source.second->original;
+                const bool older_recovery=std::any_of(synchronized_sources_.begin(),synchronized_sources_.end(),[&](const auto& other) {
+                    const auto& earlier=other.second->original;
+                    return other.first<source.first && other.second->retries &&
+                        std::tie(earlier.peer,earlier.job,earlier.target_pid,earlier.target_resource,earlier.relative_addressing)==
+                        std::tie(operation.peer,operation.job,operation.target_pid,operation.target_resource,operation.relative_addressing);
+                });
+                // §3.4.4.7.3.2: only the oldest failed message probes the
+                // recovered generation until a successful acknowledgement.
+                if (!older_recovery) ready.push_back(source.first);
+            }
+        }
+        for (const auto operation:ready) queue_synchronized_attempt(operation);
+    }
+    static const SES_Synchronized_Operation_Extension_Header& synchronization_extension(const SEStoPDS_pkt& packet) {
+        return packet.bth_header.Standard_Header.opcode==0x11?
+            packet.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+            packet.eth_header.Synchronized_Operation_Extension_Header;
+    }
+    void arm_synchronized_target(uint64_t owner) {
+        std::weak_ptr<int> life=lifetime_;
+        synchronized_target_timers_[owner]=loop_.after(timeout_,[this,life,owner] {
+            if (life.expired()) return;
+            synchronized_target_timers_.erase(owner);
+            for (const auto expired:synchronized_target_groups_.expire(loop_.now())) {
+                synchronized_target_actions_.erase(expired);
+                trace_.record(node_,"synchronized_group_expired",expired);
+            }
+        });
+    }
+    void drive_synchronized_target(uint64_t owner) {
+        const auto group=synchronized_target_groups_.snapshot(owner);
+        if (!group || (group->state!=SynchronizationGroups::State::Ready && group->state!=SynchronizationGroups::State::Completed)) return;
+        if (const auto timer=synchronized_target_timers_.find(owner);timer!=synchronized_target_timers_.end()) {
+            loop_.cancel(timer->second); synchronized_target_timers_.erase(timer);
+        }
+        const auto found=synchronized_target_actions_.find(owner);
+        if (group->state!=SynchronizationGroups::State::Ready) {
+            if (found!=synchronized_target_actions_.end()) synchronized_target_actions_.erase(found);
+            return;
+        }
+        if (found==synchronized_target_actions_.end()) throw std::logic_error("ready synchronized group has no completing action");
+        auto action=std::move(found->second); synchronized_target_actions_.erase(found);
+        // Mark before issuing callbacks: the aggregate action executes once,
+        // independently of per-message PDS replay and receive-state Clear.
+        if (!synchronized_target_groups_.action_completed(owner)) throw std::logic_error("synchronized action changed state");
+        if (!action.atomic) {
+            completions_.push_back({0,0,CompletionStatus::Success,action.length,1,true,action.immediate});
+        } else {
+            const auto message=incoming_.find(receive_message_key(action.request));
+            if (message==incoming_.end()) throw std::logic_error("synchronized atomic lost Incoming before its group barrier");
+            if (!action.registration) throw std::logic_error("synchronized atomic has no pinned registration at its group barrier");
+            const auto& header=action.request.pkt.bth_header.Standard_Header;
+            try {
+                // Preserve the original registration identity across the
+                // barrier. A revoked/reused numeric key is never rebound.
+                memory_.authorize_registration(*action.registration,header.job_id,action.selected.absolute_pid,
+                    header.buffer_offset,action.length,Access::Atomic,action.selected.resource_index,MemoryAccessOrigin::RemoteRequest);
+                memory_.atomic_elements(header.job_id,action.selected.absolute_pid,header.match_bits,header.buffer_offset,
+                    static_cast<IntegerAtomicOperation>(message->second.atomic_operation),
+                    static_cast<IntegerAtomicDatatype>(message->second.atomic_datatype),action.request.pkt.payload,
+                    action.selected.resource_index,header.rel);
+                message->second.completed=true;
+                for (const auto& response:action.responses) reply(response,SemanticReturnCode::Ok,action.length);
+                trace_.record(node_,"synchronized_atomic_executed",action.length);
+            } catch (const MemoryAccessError& error) {
+                reject_message(action.request,message->second,memory_code(error.code));
+                for (const auto& response:action.responses)
+                    if (response.orig_psn!=action.request.orig_psn) reply_error(response,message->second);
+            }
+        }
+        trace_.record(node_,"synchronized_group_completed",owner);
+    }
+    void process_synchronized_member(Incoming& message,bool failed) {
+        if (!message.synchronization_member) return;
+        const auto group=synchronized_target_groups_.member_snapshot(message.synchronization_member);
+        if (!group) throw std::logic_error("missing synchronized member ownership");
+        if (failed && message.first_error && !message.initialized &&
+            (*message.first_error==SemanticReturnCode::BadGeneration || *message.first_error==SemanticReturnCode::DisabledGeneration)) {
+            synchronized_target_groups_.rollback(message.synchronization_member); message.synchronization_member=0;
+            if (!synchronized_target_groups_.snapshot(group->owner)) {
+                const auto timer=synchronized_target_timers_.find(group->owner);
+                if (timer!=synchronized_target_timers_.end()) { loop_.cancel(timer->second); synchronized_target_timers_.erase(timer); }
+            }
+            return; // Recoverable address rejection did not admit a logical group member.
+        }
+        if (synchronized_target_groups_.processed(message.synchronization_member,failed)) {
+            if (failed && message.first_error) trace_.record(node_,"synchronized_member_failed",static_cast<uint8_t>(*message.first_error));
+            drive_synchronized_target(group->owner);
+        }
+    }
+    void finish_synchronized_receive(const PDC_SES_req& request,Incoming& message,const ResourceSelection& selected) {
+        const auto group=synchronized_target_groups_.member_snapshot(message.synchronization_member);
+        if (!group) throw std::logic_error("synchronized completion lost its group");
+        const bool completing=message.synchronized_atomic || message.has_immediate;
+        if (completing && group->state==SynchronizationGroups::State::Collecting && !synchronized_target_actions_.count(group->owner)) {
+            SynchronizedTargetAction action;
+            action.owner=group->owner; action.member=message.synchronization_member;
+            action.request=rendezvous_response_handle(request); action.selected=selected;
+            action.registration=message.synchronization_registration; action.immediate=message.immediate_data;
+            action.length=message.total; action.atomic=message.synchronized_atomic;
+            if (action.atomic) {
+                action.request.pkt.payload=message.synchronization_operands;
+                action.responses=std::move(message.synchronization_responses);
+            }
+            synchronized_target_actions_.emplace(group->owner,std::move(action));
+        }
+        process_synchronized_member(message,false);
+        // A held delivery-complete atomic produces no provisional response.
+        // §3.4.4.3 forbids acknowledging the final received packet before its
+        // completion semantics; NO_RESPONSE is promotable to DEFAULT (§3.5.13).
+    }
 
     void recover_rendezvous_resources() {
         if (rendezvous_targets_.size()>=rendezvous_target_limit_) return;
@@ -1307,7 +1639,7 @@ private:
             }
             const bool datagram=operation.type==OperationType::DatagramSend;
             const bool fetching_atomic=operation.type==OperationType::FetchingAtomic;
-            const bool atomic=operation.type==OperationType::Atomic || fetching_atomic;
+            const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || fetching_atomic;
             const bool restart=transfer.restart_owner!=0;
             const bool read=operation.type==OperationType::Read && !transfer.aborting;
             if (read && pending_.at(message).read_requests_awaiting_data.size()>=read_result_window_) break;
@@ -1323,6 +1655,9 @@ private:
             request.mode=datagram?UUD:operation.delivery_mode;
             request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
             request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
+            // Queue establishment through the original manager's transmit
+            // path. An SES backoff timer must not allocate/mutate a PDC itself.
+            request.establish_with_control=operation.type==OperationType::SynchronizedAtomic;
             auto& header=request.pkt.bth_header.Standard_Header;
             header.opcode=transfer.aborting?0x0f:static_cast<uint8_t>(operation.type); header.version=0;
             header.som=!transfer.started;
@@ -1351,6 +1686,15 @@ private:
                 extension.atomic_opcode=static_cast<uint8_t>(operation.atomic_operation);
                 extension.atomic_datatype=static_cast<uint8_t>(operation.atomic_datatype);
             }
+            if (operation.synchronization && !transfer.aborting) {
+                const auto atomic_extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
+                request.pkt.eth_type=atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header;
+                auto& synchronization=atomic?request.pkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+                    request.pkt.eth_header.Synchronized_Operation_Extension_Header;
+                synchronization.sync_group=operation.synchronization->wire_group_;
+                synchronization.sync_count=(atomic || operation.immediate_data)?operation.synchronization->message_count_:0;
+                if (atomic) request.pkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic=atomic_extension;
+            }
             if (!header.som) {
                 header.diff.som_false.payload_length=read?0:count;
                 header.diff.som_false.message_offset=static_cast<uint32_t>(transfer.offset);
@@ -1371,7 +1715,8 @@ private:
             // fields are padded16B slots, not a vector of datatype elements.
             if (atomic && !fetching_atomic && !transfer.aborting)
                 convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
-            request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+request.pkt.payload.size());
+            request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+
+                ((operation.synchronization && !transfer.aborting)?4:0)+request.pkt.payload.size());
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
@@ -1413,7 +1758,8 @@ private:
         const auto restart_owner=it->second.restart_owner;
         const auto rendezvous_owner=it->second.rendezvous_owner;
         const auto rendezvous_read_owner=it->second.rendezvous_read_owner;
-        if (!deferrable_token && !restart_owner && !rendezvous_owner && !rendezvous_read_owner) {
+        const auto synchronization_owner=it->second.synchronization_owner;
+        if (!deferrable_token && !restart_owner && !rendezvous_owner && !rendezvous_read_owner && !synchronization_owner) {
             completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
             trace_.record(node_,"operation_complete",it->second.id);
         } else trace_.record(node_,"wire_message_complete",message);
@@ -1429,6 +1775,7 @@ private:
         }
         const bool finish_read_tail=it->second.is_read && status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess;
         pending_.erase(it);
+        if (synchronization_owner) synchronized_message_complete(synchronization_owner,message,status,length,code,remote_generation);
         if (deferrable_token) deferrable_message_complete(deferrable_token,message,status,length,code,remote_generation);
         if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,length,code);
         if (rendezvous_owner) rendezvous_eager_complete(rendezvous_owner,message,status,length,code,remote_generation);
@@ -1438,6 +1785,23 @@ private:
 
     void context_event(const Runtime::PdcEvent& event) {
         if (event.kind==Runtime::PdcEventKind::ConnectionClosed && event.failure!=Runtime::PdcFailureReason::None) {
+            cancelling_synchronized_incarnation_=true;
+            std::vector<uint64_t> synchronized_failed;
+            for (const auto& source:synchronized_sources_)
+                if (source.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) synchronized_failed.push_back(source.first);
+            for (const auto operation:synchronized_failed) {
+                const auto source=synchronized_sources_.find(operation); if (source==synchronized_sources_.end()) continue;
+                const auto active=source->second->active_message;
+                const auto status=event.failure==Runtime::PdcFailureReason::RetryExhausted?CompletionStatus::Timeout:CompletionStatus::RemoteError;
+                if (active && pending_.count(active)) {
+                    const auto& pending=pending_.at(active);
+                    if (ConnectionKey{pending.peer,pending.local_pdc,pending.connection_start_psn}==
+                        ConnectionKey{event.peer,event.local_pdc,event.connection_start_psn}) discard_source(active);
+                    finish(active,status,0,0);
+                }
+                else complete_synchronized_source(operation,status,0,0,0);
+            }
+            cancelling_synchronized_incarnation_=false;
             std::vector<uint32_t> failed;
             for (const auto& transaction:deferred_sources_)
                 if (transaction.second->connections.count({event.peer,event.local_pdc,event.connection_start_psn})) failed.push_back(transaction.first);
@@ -1536,6 +1900,10 @@ private:
         if (event.kind==Runtime::PdcEventKind::RequestTransmitted) {
             if (auto operation=pending_.find(event.message_id);operation!=pending_.end() &&
                 operation->second.peer==event.peer && operation->second.job==event.job) {
+                if (operation->second.synchronization_owner) {
+                    const auto source=synchronized_sources_.find(operation->second.synchronization_owner);
+                    if (source!=synchronized_sources_.end()) source->second->connections.insert(connection);
+                }
                 if (operation->second.deferrable_token) {
                     const auto transaction=deferred_sources_.find(operation->second.deferrable_token);
                     if (transaction!=deferred_sources_.end()) transaction->second->connections.insert(connection);
@@ -1599,6 +1967,10 @@ private:
                     }
                     release_unexpected(message->second);
                     complete_deferred_rendezvous_error(key);
+                    if (message->second.synchronization_member) {
+                        if (event.kind==Runtime::PdcEventKind::ConnectionClosed) process_synchronized_member(message->second,true);
+                        synchronized_target_groups_.cleared(message->second.synchronization_member);
+                    }
                     message=incoming_.erase(message);
                 } else ++message;
             }
@@ -1620,7 +1992,7 @@ private:
                 feed_submissions();
             }
         }
-        drive_deferrable_sources(); drive_rendezvous_sources();
+        drive_deferrable_sources(); drive_rendezvous_sources(); drive_synchronized_sources();
     }
     void complete_read_return(const PDC_SES_rsp& response) {
         if (response.pkt.bth_type!=Semantic_Response_Header) return;
@@ -1995,8 +2367,12 @@ private:
             release_unexpected(message); message.received=0; message.segments.clear();
         }
         message.completed=message.end_seen && (message.opcode!=2 || !message.read_returns_pending);
+        if (message.synchronization_member && !message.initialized &&
+            (code==SemanticReturnCode::BadGeneration || code==SemanticReturnCode::DisabledGeneration))
+            message.completion_reported=true; // No target resource was admitted for this retryable attempt.
         report_receive_error(message);
         if (message.reserved_restart) retire_deferred_target(message.reserved_restart);
+        process_synchronized_member(message,true);
         if (message.opcode==2) {
             const auto credit=read_packet_reservations_.find(ReadPacketIdentity::from(request));
             if (credit!=read_packet_reservations_.end()) {
@@ -2009,6 +2385,9 @@ private:
         // previously held EOM may also need an explicit result, but it must
         // not steal that guarantee merely because its handle was deferred.
         reply_error(request,message);
+        for (const auto& response:message.synchronization_responses)
+            if (response.orig_psn!=request.orig_psn) reply_error(response,message);
+        message.synchronization_responses.clear();
         if (message.deferred_response) {
             if (message.deferred_response->orig_psn!=request.orig_psn)
                 reply_error(*message.deferred_response,message);
@@ -2041,11 +2420,38 @@ private:
             return Runtime::SemanticAdmission::Rejected;
         }
         if (!existing) {
-            const uint8_t opcode=header.opcode==6?5:header.opcode==10?9:nondeferring_send_opcode(header.opcode);
+            const uint8_t opcode=header.opcode==0x10?1:header.opcode==0x11?3:header.opcode==6?5:header.opcode==10?9:nondeferring_send_opcode(header.opcode);
             Incoming message{opcode,static_cast<uint32_t>(header.request_length),header.match_bits,header.buffer_offset,0,0};
             message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
             message.rendezvous_eager=header.opcode==6 || header.opcode==10;
             if (message.rendezvous_eager) message.completion_reported=true; // The transaction owns the single receive CQ.
+            if (header.opcode==0x10 || header.opcode==0x11) {
+                const bool atomic=header.opcode==0x11;
+                if (request.pkt.eth_type!=(atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
+                    message.synchronization_admission_error=SemanticReturnCode::OperationViolation;
+                else {
+                    const auto& extension=synchronization_extension(request.pkt);
+                    const auto previous=synchronized_target_groups_.current({request.source_fep,extension.sync_group});
+                    // All source ACKs may precede the receiver applying Clear,
+                    // including this request's piggyback Clear queued by PDS.
+                    // Wait for its retirement event instead of rejecting legal
+                    // group reuse as an excess member of the completed group.
+                    if (previous && previous->state==SynchronizationGroups::State::Completed)
+                        return Runtime::SemanticAdmission::NoSynchronizationState;
+                    const auto reservation=synchronized_target_groups_.reserve({request.source_fep,extension.sync_group},
+                        header.job_id,atomic || header.hd,extension.sync_count,loop_.now());
+                    if (reservation.status==SynchronizationGroups::Admission::NoState)
+                        return Runtime::SemanticAdmission::NoSynchronizationState;
+                    if (reservation.status==SynchronizationGroups::Admission::NoMessageState)
+                        return Runtime::SemanticAdmission::Rejected;
+                    message.synchronization_member=reservation.member; message.synchronization_group=extension.sync_group;
+                    message.synchronization_count=extension.sync_count; message.synchronized_atomic=atomic;
+                    if (reservation.new_group) arm_synchronized_target(reservation.owner);
+                    if (reservation.status!=SynchronizationGroups::Admission::Accepted)
+                        message.synchronization_admission_error=reservation.status==SynchronizationGroups::Admission::WrongJob?
+                            SemanticReturnCode::PermissionViolation:SemanticReturnCode::OperationViolation;
+                }
+            }
             incoming_.emplace(key,std::move(message));
         }
         // Reserve before PDS accepts a PSN. Even another packet of an existing
@@ -2068,6 +2474,14 @@ private:
             [&](const auto& credit) { return credit.second.message==found->first; })) return;
         if (found->second.initialized || found->second.first_error || found->second.received)
             throw std::logic_error("cannot roll back a processed SES message");
+        if (found->second.synchronization_member) {
+            const auto group=synchronized_target_groups_.member_snapshot(found->second.synchronization_member);
+            synchronized_target_groups_.rollback(found->second.synchronization_member);
+            if (group && !synchronized_target_groups_.snapshot(group->owner)) {
+                const auto timer=synchronized_target_timers_.find(group->owner);
+                if (timer!=synchronized_target_timers_.end()) { loop_.cancel(timer->second); synchronized_target_timers_.erase(timer); }
+            }
+        }
         incoming_.erase(found);
     }
     void retire_deferred_target(uint32_t token) {
@@ -2475,6 +2889,10 @@ private:
         // SEND/TSEND as their ordinary forms. Interpret a copy: restart tokens
         // remain intact on the wire but are never an RMA or placement offset.
         const bool deferrable_as_send=interpreted_header.opcode==0x08 || interpreted_header.opcode==0x0b;
+        const bool synchronized_write=interpreted_header.opcode==0x10;
+        const bool synchronized_atomic=interpreted_header.opcode==0x11;
+        if (synchronized_write) interpreted_header.opcode=1;
+        if (synchronized_atomic) interpreted_header.opcode=3;
         if (deferrable_as_send) {
             interpreted_header.opcode=nondeferring_send_opcode(interpreted_header.opcode);
             if (interpreted_header.som) trace_.record(node_,"deferrable_as_send",interpreted_header.msg_id);
@@ -2484,15 +2902,33 @@ private:
         auto found=incoming_.find(key);
         if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved standard SES message");
         auto& message=found->second;
+        // Capture terminal/header metadata before validating synchronized
+        // membership. A retryable address error may already have rolled its
+        // provisional member back, but its old MID must still drain to EOM.
         if (header.som && message.opcode==0x0f && header.opcode!=0x0f)
-            message.opcode=header.opcode; // Late SOM identifies an earlier MSG_ERROR's resource space.
+            message.opcode=header.opcode;
         if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
         if (header.som && header.hd) message.immediate_data=header.diff.som_true.header_data;
         if (message.first_error) {
-            // A RUD EOM/MSG_ERROR may arrive before SOM and before its header
-            // data. Capture that data above, but never perform another lookup
-            // or memory access for an already rejected message.
             reject_message(request,message,*message.first_error); return;
+        }
+        if (synchronized_write || synchronized_atomic) {
+            if (header.som) message.synchronization_start_seen=true;
+            if (message.synchronization_admission_error) {
+                if (header.som && header.hd) message.immediate_data=header.diff.som_true.header_data;
+                if (header.eom) { message.end_seen=true; message.end_of_message_psn=request.orig_psn; }
+                reject_message(request,message,*message.synchronization_admission_error); return;
+            }
+            if (request.pkt.eth_type!=(synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header)) {
+                reject_message(request,message,SemanticReturnCode::OperationViolation); return;
+            }
+            const auto& extension=synchronization_extension(request.pkt);
+            if (!message.synchronization_member || message.synchronized_atomic!=synchronized_atomic ||
+                message.synchronization_group!=extension.sync_group || message.synchronization_count!=extension.sync_count) {
+                reject_message(request,message,SemanticReturnCode::OperationViolation); return;
+            }
+        } else if (message.synchronization_member && header.opcode!=0x0f) {
+            reject_message(request,message,SemanticReturnCode::OperationViolation); return;
         }
         const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
             reject_message(request,message,code,generation);
@@ -2520,7 +2956,8 @@ private:
         }
         const auto offset=header.som?0:header.diff.som_false.message_offset;
         const auto count=request.pkt.payload.size();
-        const auto& atomic_extension=request.pkt.eth_header.Atomic_Operation_Extension_Header;
+        const auto& atomic_extension=synchronized_atomic?request.pkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic:
+            request.pkt.eth_header.Atomic_Operation_Extension_Header;
         if (header.opcode==3 && !poisoned) {
             if (atomic_extension.atomic_datatype>7) { reject(SemanticReturnCode::AtomicUnsupportedDatatype); return; }
             if (atomic_extension.atomic_opcode>12 || atomic_extension.atomic_opcode==11 ||
@@ -2528,6 +2965,9 @@ private:
             const auto width=integer_atomic_width(static_cast<IntegerAtomicDatatype>(atomic_extension.atomic_datatype));
             if (header.request_length%width || count%width || offset%width) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
             if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
+            if (synchronized_atomic && (header.hd || header.request_length>8)) {
+                reject(SemanticReturnCode::AtomicUnsupportedSize); return;
+            }
         }
         if (offset>header.request_length || count>header.request_length-offset ||
             (!header.som && count!=header.diff.som_false.payload_length) ||
@@ -2546,6 +2986,10 @@ private:
                     const auto& region=memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
                         header.buffer_offset,header.request_length,Access::Atomic,selected.resource_index,header.rel);
                     if ((region.permissions&3u)!=3u) { reject(SemanticReturnCode::OperationViolation); return; }
+                    if (synchronized_atomic) {
+                        message.synchronization_registration=region;
+                        message.synchronization_operands.resize(message.total);
+                    }
                     message.atomic_operation=atomic_extension.atomic_opcode;
                     message.atomic_datatype=atomic_extension.atomic_datatype;
                 } else if (header.opcode==5 || header.opcode==9) {
@@ -2614,7 +3058,16 @@ private:
             else if (header.opcode==3) {
                 auto operands=request.pkt.payload;
                 convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
-                memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
+                if (synchronized_atomic) {
+                    std::copy(operands.begin(),operands.end(),message.synchronization_operands.begin()+offset);
+                    // At most8 nonempty byte fragments plus SOM/EOM markers.
+                    // Empty middle packets have no memory effect to defer.
+                    if (count || header.som || header.eom) {
+                        if (message.synchronization_responses.size()>=10) { reject(SemanticReturnCode::OperationViolation); return; }
+                        message.synchronization_responses.push_back(rendezvous_response_handle(request));
+                    }
+                }
+                else memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
                     static_cast<IntegerAtomicOperation>(message.atomic_operation),
                     static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index,message.relative_addressing);
             } else if (message.receive_registration) memory_.write_registration(*message.receive_registration,
@@ -2648,18 +3101,24 @@ private:
             // §3.4.2.14: byte coverage and EOM are independent. A sender
             // can finish its bytes before a separate zero-payload end marker;
             // never report application success or retire state before EOM.
-            if (message.end_seen && message.received==message.total) {
+            if (message.end_seen && message.received==message.total &&
+                (!message.synchronization_member || message.synchronization_start_seen)) {
                 // §3.4.2.14 / §3.5.11.4.3: the packet filling the last RUD
                 // hole may precede EOM in PSN order. Retire only when Clear
                 // reaches the EOM recorded on arrival, not this last placement.
                 message.completed=true; message.completion_reported=true;
                 if (header.opcode==5 || header.opcode==9) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
-                if (header.opcode==1 && message.immediate_data)
+                if (header.opcode==1 && message.immediate_data && !message.synchronization_member)
                     completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
                 if (message.reserved_restart) retire_deferred_target(message.reserved_restart);
                 trace_.record(node_,"memory_delivered",message.total);
+                if (message.synchronization_member) {
+                    finish_synchronized_receive(request,message,selected);
+                    if (synchronized_atomic) return; // The aggregate action owns this real response handle.
+                }
                 reply(request,SemanticReturnCode::Ok,message.total);
-            } else reply(request,SemanticReturnCode::Ok,0,false);
+            } else if (synchronized_atomic && (count || header.som || header.eom)) return;
+            else reply(request,SemanticReturnCode::Ok,0,false);
         } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
     void receive_datagram(const PDC_SES_req& request) {

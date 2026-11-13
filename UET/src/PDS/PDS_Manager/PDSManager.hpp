@@ -637,6 +637,8 @@ public:
             return true;
         }
         if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,request.dst_fep,request.src_fep,static_cast<pdc_mode>(request.mode))) return false;
+        if (semantic.som && request.establish_with_control &&
+            !IPDC_Processmanager.openWithControl(local_pdc,static_cast<pdc_mode>(request.mode),false)) return false;
         fwdPkt2PDC(&request,local_pdc);
         return true;
     }

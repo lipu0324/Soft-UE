@@ -774,6 +774,10 @@ struct SES_PDS_req {
     // Local source process identity for PDC selection (§3.5.8.1). This is
     // distinct from ses.initiator, which is a Job-relative matching rank.
     uint16_t source_pid=1;
+    // Local SES scheduling metadata, never serialized. A message that holds
+    // all semantic responses may need a numbered NOOP to establish its PDC
+    // before its first data fragment can wait at the target (§3.5.8.2).
+    bool establish_with_control=false;
 };
 
 /**

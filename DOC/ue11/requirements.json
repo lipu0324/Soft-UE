@@ -575,7 +575,13 @@
       "tests": [
         "synchronized_header_test",
         "synchronization_state_test",
-        "synchronization_admission_test"
+        "synchronization_admission_test",
+        "synchronized_transaction_test",
+        "synchronized_target_test",
+        "synchronized_fault_test",
+        "synchronized_lifecycle_test",
+        "synchronized_validation_test",
+        "reference_process_interop"
       ],
       "profiles": [
         "AI_BASE",
@@ -583,7 +589,7 @@
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Standard SYNC_WRITE0x10/SYNC_ATOMIC0x11 extensions have independent Figure3-24 and Table3-20 golden ordering checks across64 fragment/IP/carrier/CRC combinations. Isolated bounded metadata tests cover processed counts including failed members, first completer, invalid counts, rollback, expiry, key isolation and FEP-cursor ID lifetime. Real PDS admission tests use scripted SES to verify dedicated NO_SES_SYNC_AVAIL0x1B before PSN acceptance on new/existing RUD/ROD contexts, NSCC, and recovery; this does not execute synchronized memory operations. Native Endpoint group integration, aggregate actions, legal reuse across PDCs, recovery, management cleanup and optimized forms remain open; no native synchronization or Profile capability claim. See SYNCHRONIZED-HEADERS.md and SYNCHRONIZED-IN-PROGRESS.md."
+      "evidence_note": "Native standard SYNC_WRITE/SYNC_ATOMIC groups use trusted Endpoint handles, FEP-persistent wire allocation, distinct logical IDs/MIDs, bounded source/target members and injected deadlines. WRITE payload places normally; target notifications and checked <=8B integer atomic actions wait for processed members including failed writes. Completing atomic registration is pinned and reauthorized; original PDS owns retained final handles, recovery and Clear. Native atomic transmission waits for other members to acknowledge to avoid finite-window deadlock. Tests cover RUD/ROD/NSCC, independent-PDS atomic-first/cross-context target barriers, count/job/completer/excess errors while collecting, MR revoke/key reuse, packet faults, fresh-MID generation recovery, dedicated0x1B resource NACK, lost-Clear legal reuse, cancellation/expiry/FEP ID boundaries, source limits, integer types/zero-byte and window progress. Pinned reference receives a three-member synchronized SUM group, sends a legal one-member completing WRITE, and observes expected CPU-coherent atomic rejection. Reference queued non-completing WRITE count differs from UE1.1, so no positive multi-member reference-source claim. Optimized forms, floating/complex/semantic-control/security, complete management and post-action early-extra versus legal-reuse classification remain open. Native feature flags are not Profile claims; see SYNCHRONIZED-TRANSACTIONS.md."
     },
     {
       "id": "PDS-RUDI",

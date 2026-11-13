@@ -152,6 +152,16 @@ if(BUILD_TESTING)
   softue_test(synchronized_header_test SynchronizedHeaderTest.cpp)
   softue_test(synchronization_state_test SynchronizationStateTest.cpp)
   softue_test(synchronization_admission_test SynchronizationAdmissionTest.cpp)
+  softue_test(synchronized_transaction_test SynchronizedTransactionTest.cpp)
+  softue_test(synchronized_target_test SynchronizedTargetTest.cpp)
+  softue_test(synchronized_fault_test SynchronizedFaultTest.cpp)
+  softue_test(synchronized_lifecycle_test SynchronizedLifecycleTest.cpp)
+  softue_test(synchronized_validation_test SynchronizedValidationTest.cpp)
+  # Build the feature's independent regressions as one dependency graph, so
+  # Make/Ninja can compile different fixtures concurrently within the job cap.
+  add_custom_target(synchronization_tests DEPENDS synchronized_header_test synchronization_state_test
+    synchronization_admission_test synchronized_transaction_test synchronized_target_test
+    synchronized_fault_test synchronized_lifecycle_test synchronized_validation_test)
   softue_test(rendezvous_source_scope_test RendezvousSourceScopeTest.cpp)
   softue_test(rendezvous_truncation_test RendezvousTruncationTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)

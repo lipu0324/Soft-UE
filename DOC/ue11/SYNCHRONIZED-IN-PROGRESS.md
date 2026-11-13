@@ -1,97 +1,64 @@
-# 同步事务接入笔记（未实现，不是能力声明）
+# 同步状态层与接入历史
 
-基于 b76e340；标准头扩展 a4655a8 已整合。下一步仍属于 M5。
-下面是规范检查和待实现接口，不可写成已通过的行为。
+当前行为与API见 [SYNCHRONIZED-TRANSACTIONS.md](SYNCHRONIZED-TRANSACTIONS.md)。
+本页保留从状态层到原生事务的设计修正，便于研究者理解不能由局部测试推出的结论。
 
-## 已复核的依据
+## 状态层基础：28d138e
 
-- §3.4.2.5.5、§3.4.2.7.4、§3.4.3.6、§3.4.4.8、§3.4.9.6及Table3-31。
-- 目标 key 为 {initiator FEP, sync_group16}；SHOULD核对最初Job。
-- 组最多65534条非completing WRITE，加唯一completing WRITE(hd1)/ATOMIC(hd0)。
-- completing sync_count为全部消息数，非completing必须0。不能误抄正文的含混一句为全部WRITE都0。
-- 同步WRITE的payload在RUD下不能为了组内排序而延迟；完成通知/原子动作才是屏障。
-- Table3-31 Case1：失败消息仍计数，不能让它取消或污染其他消息；变量应叫processed_messages，而不是successful_messages。
-- Case2：目标必须age out缺失消息的组；已收到的completer不得完成或执行。
-- Case3：completer的count小于当前已计数，报OP_VIOLATION。
-- Case4：未等规定完成就追加的Y条WRITE必须OP_VIOLATION，不影响原X条。
-- Case5：第二个completer失败，不能让它的失败计数提前触发第一个completer。
+标准扩展头来自a4655a8，整合基线为b76e340。SynchronizationIdPool使用FEP游标，
+成功确认后的ID可本地回收；未知结果不重用。SynchronizationGroups以
+`{initiator FEP, wire group}` 为key，核对Job，并用本地owner/member序号隔离旧组。
+`processed_messages` 包含失败成员；第一completer不可被后来的completer替换。
 
-## 源接口方向
+原型最初错误地把小于admitted count的completer变为Ready；负例
+`/tmp/softue-sync-state-tests.log` 揭示该问题，随后加入invalid-count屏障。
+已经计数但仍在等待执行的completer若遇MSG_ERROR或PDC失败，也必须能阻止动作，
+同时保持processed count不变；这在原生接入时另加回归。
 
-begin_synchronized_group(peer,job,total_messages)返回本地可信handle。handle含非零64位token、
-Endpoint authority weak identity及16位wire group，wire0合法。Operation增加optional group。
-SYNC_WRITE通过immediate_data决定是否completing；SYNC_ATOMIC天然completing。普通op拒绝group字段。
-源在本地检查peer/job、成员数、唯一completer和datatype/rights/bounds，再走原submit_message。
-每条操作保留自己的用户ID/CQ，组不额外制造CQ。
+PDS准入增加typed NoSynchronizationState。新建PDC和既有PDC分别按标准发0x1B，
+普通消息预算仍发0x1A。固定扩展头必须复制到preadmission元数据中；payload不复制。
+脚本SES的恢复测试只证明准入、PSN不前进及恢复后交付一次，不能证明同步内存操作。
 
-FEP Services保存32位next_synchronization_group_id cursor，防止16位wrap和Endpoint替换重置。
-正常完成组可在Endpoint中回收wire ID；必须等全部成员真正确认。错误CQ可早于尾部/Clear，
-所以需使用transport_pending检查，不能仅用用户CQ数释放group。未知失败/本地取消/超时保守隔离ID。
-源组总deadline使用注入EventLoop；源组及成员表有明确资源上限，源handle跨Endpoint不可用。
+冻结28d138e在ASan/UBSan与泄漏检查下通过状态层、同步准入、普通准入、同步线头4/4，
+0.90s，日志 `/tmp/softue-sync-state-asan-cmake-tests.log`。
 
-## 目标方向
+## 最终请求不能借NO_RESPONSE挂起
 
-独立target group root保存peer/group/job、本地不可重用owner serial、processed_messages、唯一
-completer身份/总数、计时器和关联PDC epoch。Incoming固定本地owner，不能只用wire group
-查当前root，否则旧报文会混入重用后的组。
+早期接入原型在delivery-complete atomic的最终请求上返回NO_RESPONSE，随后试图复用
+同一句柄补响应。分片回归暴露提前DEFAULT和Incoming退休：
+`/tmp/softue-sync-native-tests4.log`、`/tmp/softue-sync-native-tests5.log`。
+§3.4.4.3要求最终收到包满足完成语义，§3.5.13又允许NO_RESPONSE被提升为DEFAULT。
+当前实现保留真实PDS句柄直至动作；源端通过NOOP建立新映射，并把completing atomic的
+首次发送排在其他成员确认之后，避免有限窗口被屏障阻塞。
 
-同步WRITE复用受检RMA放置、覆盖/SOM/EOM及first-error；每个已处理消息仅计数一次，
-失败也计数。非completing可以正常ACK；completer的payload同样立即放置，header data通知
-等组计数满足。SYNC_ATOMIC只缓存一个<=8字节整数非取回操作及精确授权MR，在屏障后
-重新检查原注册再执行一次；不能按旧key绑定新MR。READ/CAS/masked swap、hd1原子非法。
+## 逻辑错误、线消息尾部和Clear是三件事
 
-completer先于其余成员且恰好是PDC首个SOM/EOM时，需及时返回NO_RESPONSE让PDS握手/进度
-继续；最终结果复用同一真实handle，不能提前DEFAULT导致源成功。RUD不应阻塞后来的WRITE。
+generation恢复前撤销临时组成员，避免新MID重复计数或第二次绑定completer。
+旧Incoming仍需看到EOM。最初扩展检查发生在EOM记录之前，已撤销的旧成员使其EOM
+永远不能记录，造成两条旧Incoming不退休；故障回归
+`/tmp/softue-sync-native-tests9.log` 后改为先捕获终止元数据，再返回粘滞的首个错误。
 
-资源满必须是UET_NO_SES_SYNC_AVAIL(0x1B)，不能复用NO_SES_MSG_AVAIL(0x1A)。当前
-SemanticAdmission只有Rejected，需扩展typed rejection并覆盖PDSManager及PDC两个准入入口。
-组老化必须释放tracking预算，未执行completer不能迟到执行；其Incoming/PDS状态单独排空。
-完成/已满组的早期追加、重用与跨PDC Clear可见性需独立审查和故障测试，不能把本地CQ
-误当成对端已清理的事实。源先等Clear的保守策略不足以证明目标接受所有合法外部重用。
+未准入的generation错误曾产生目标RMA header-data错误CQ，最终重试又产生成功CQ；
+`/tmp/softue-sync-native-tests8.log` 记录该失败。当前恢复前的失败不报告目标CQ。
 
-## 验收方向
+源收到全部ACK不等于目标已应用Clear。完成组尚未退休时，合法新组曾被误判额外成员；
+同一份tests8日志包含丢Clear重用负例。当前等待退休时临时发同步资源NACK，由原PDS
+重试；尚未对该区间内非法提前追加完成全部规范验收。
 
-真实PDS：WRITE/ATOMIC completer先/后到、RUD/ROD、NSCC、多peer同group数字、Job隔离；
-失败成员仍计数/其他成员继续，count不足老化、不足/过量count、重复completer、非法字段、
-MR权限/撤销复用、数据/ACK/控制丢失重复乱序、NO_SYNC资源恢复、group0/65535/耗尽及
-Endpoint替换、正常/错误Close和源取消超时。验证一次动作/CQ、组与Incoming/MID/定时器释放。
-固定参考实现也有同步组实现，可用于核对共有的线格式和行为，但不能替代1.1规范。
-固定版本 uet_api.c 的 uet_get_sync_grp_src_fep 维护组计数，uet_rx_cq_post 在
-完成时立即删除组，uet_rx_sync_grp_age 清理空闲组。其错误路径会把任何成员的错误
-传播给 completing action；这与1.1 Table3-31 Case1的独立错误语义有差异。
-其延迟原子只支持64位SUM并保存主机指针；本项目必须保留注册身份并重新授权，不能照搬。
+早期关闭fixture的tests12..15误把initiator的Close_cmd当成responder的Close_req来丢弃，
+实际走的是正常关闭；旧PDC结束后恢复成功，或在持续disabled时等到总deadline。
+当前fixture丢弃真实Close_cmd，检查错误CQ先于组deadline、恰好一次且没有新的重试MID，
+以验证generation退避中的活跃逻辑事务被致命关闭停止。Source批量清理期间也暂停
+重试调度，防止回调给尚待取消的成员建立新attempt。
 
-## 当前原型（未接入 Endpoint）
+## 固定参考实现的边界
 
-新增 SynchronizationState.hpp：SynchronizationIdPool 使用FEP cursor与确认后的本地回收；
-SynchronizationGroups用本地owner/member序号区分旧组、处理计数与唯一completer，支持
-rollback、Clear、完成前的年龄回收，成员记录上限独立于组数。SynchronizationStateTest
-覆盖65535计数边界、失败成员、错误count、重复completer、两种完成先后、Job/FEP隔离、
-过期旧owner与相同wire ID新owner、撤销准入、source ID0/65535/耗尽/pool替换。
-pool替换测试共享FEP cursor；原生Endpoint替换尚未接入验证。
-首轮错误count测试暴露原型错误：小于admitted的count会在第一个成员完成时提前Ready；
-现已阻断，原失败 /tmp/softue-sync-state-tests.log，后续普通测试通过。
+5b4e049的uet_get_sync_grp_src_fep维护计数，uet_rx_cq_post完成时删除组，
+uet_rx_sync_grp_age清理空闲组。其任意成员错误会污染completing action，区别于1.1
+Table3-31 Case1；其延迟atomic只支持64位SUM并保存主机指针。原生实现保留注册身份。
 
-PDS支持typed NoSynchronizationState，两个准入入口分别发0x1B；普通Rejected仍0x1A。
-semantic_admission_request现在拷贝固定extension元数据，仍不拷贝payload，否则SES不能
-在接受PSN前看到sync_group/count。SynchronizationAdmissionTest有I/T直测与真实PDS的
-新建/已建立、RUD/ROD、NSCC、两种sync扩展恢复。CMake三项普通通过0.12s，日志
-/tmp/softue-sync-state-cmake-tests2.log。冻结的28d138e在ASan/UBSan与泄漏检查下通过
-状态层、同步准入、普通准入和同步线头4/4，0.90s；日志
-/tmp/softue-sync-state-asan-cmake-tests.log。未声明原生同步功能。
-
-## 接入前需保持的区别
-
-§3.4.2.7.4说sender完成处理不改变：completing WRITE自己的payload可完成/ACK，目标
-header-data通知等组；completing ATOMIC必须等实际执行再成功ACK。Atomic为PDC首包时
-需要NO_RESPONSE先打开后续消息进度，不可提前成功。
-
-TransmitCleared是本地已收到交付/语义响应后推进clear_psn的事实，发生在Clear Command
-发送之前；它不是对端已应用Clear的证明。ReceiveCleared才是对端本地事实。Completed组
-保留到Clear的策略会影响合法跨PDC重用，必须进一步处理，不得宣称只等transport_pending
-就解决目标兼容性。Table3-31 Case4早期额外成员与合法重用需要独立协议证据。
-
-恢复性BadGeneration/Disabled错误与组计数的关系也需核对：源必须按规范重发，不能让
-同一逻辑成员的新MID重复计数；尤其不能把恢复性错误的completer绑成不可替换的第一个
-completer。候选方案为资源地址验证前的provisional reservation rollback，以及原生源每个
-逻辑成员维护新MID重试/总deadline。未验证前不要将它当成已实现规则。
+互测首版失败日志 `/tmp/softue-sync-native-reference-tests.log`：参考把最终count填进
+排队的非completing WRITE，而Table3-15要求这些WRITE为0。
+第二版 `/tmp/softue-sync-native-reference-tests2.log`：参考请求CPU coherent atomic，
+目标按§3.4.9.2返回0x0f。互测随后显式核对该预期错误及未修改的目标数据，并将正向
+三成员组、反向单成员completing WRITE列为实际共有路径。参考shared library未修改。
