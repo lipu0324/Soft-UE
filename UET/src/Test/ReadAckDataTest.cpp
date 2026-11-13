@@ -177,7 +177,7 @@ void local_and_remote_errors() {
         CHECK(source.poll_completion(completion) && completion.status==expected);
         CHECK(!source.poll_completion(completion));
     };
-    auto invalid=read; invalid.read_length=1025; check_local(invalid,CompletionStatus::Unsupported);
+    auto invalid=read; invalid.delivery_mode=RUDI; check_local(invalid,CompletionStatus::Unsupported);
     invalid=read; invalid.payload={1}; check_local(invalid,CompletionStatus::InvalidRequest);
     invalid=read; invalid.immediate_data=1; check_local(invalid,CompletionStatus::InvalidRequest);
     invalid=read; invalid.read_result.reset(); check_local(invalid,CompletionStatus::InvalidRequest);
@@ -198,7 +198,7 @@ void local_and_remote_errors() {
     source.submit(read); loop.run(100000);
     Completion empty{}; CHECK(source.poll_completion(empty) && empty.status==CompletionStatus::Success && !empty.length);
     CHECK(!source.poll_completion(empty));
-    CHECK(source.capabilities().read && source.capabilities().max_read_length==1024 && !source.capabilities().hpc);
+    CHECK(source.capabilities().read && source.capabilities().max_read_length==UINT32_MAX && !source.capabilities().hpc);
     source.close(); target.close(); source_host.close(); target_host.close(); CHECK(loop.pending()==0);
 }
 

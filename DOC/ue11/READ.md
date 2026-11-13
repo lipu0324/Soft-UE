@@ -15,8 +15,9 @@ READ 请求没有 payload，也不接受 payload reader 或 immediate data。零
 允许省略本地结果缓冲区，仍经过远端权限检查并产生一个完成事件。
 
 `Max_ACK_Data_Size` 默认16 B，配置范围0～8192 B、16 B粒度；各 FEP 配置一致。
-当前原生能力根据 fabric 与 Payload MTU 公开 `max_read_length`：阈值低于 MTU
-时允许32位总长度；阈值达到 MTU 时采用 §3.5.12.1 的单 MTU 配置分支。
+当前原生能力公开32位 `max_read_length`。两个返回分支都支持多包消息；每一个
+请求及其数据响应仍至多一 Payload MTU。SES 构造时配置主机的
+`semantic_payload_mtu`，已有连接期间不改变它，PDC 也按代次保存响应策略。
 
 ## 一个消息、两条返回路径
 
@@ -24,9 +25,9 @@ UE 1.1 §3.4.5.2：每个请求最多索取一 Payload MTU 的数据。标准头
 `request_length` 仍是整个消息长度；非 SOM 请求用 `message_offset` 标识位置，
 其 `payload_length` 为0。目标按总长度与 offset 推导这一个请求要读取的字节数。
 
-- 整个消息不超过阈值：使用 [数据 ACK](READ-ACK-DATA.md)。ACK 丢失后重发原
+- 整个消息不超过阈值，或阈值达到 Payload MTU：使用 [数据 ACK](READ-ACK-DATA.md)。ACK 丢失后重发原
   READ 并重新读取；目标发送后保留 PSN 标记，不保留结果快照。
-- 整个消息超过阈值：所有片段，包括最后不足阈值的一片，都使用
+- 阈值低于 Payload MTU 且整个消息超过阈值：所有片段，包括最后不足阈值的一片，都使用
   [同一 PDC 的反向 PDS Request](RETURN-DATA.md)。两个方向采用相同起点，
   随后独立推进 PSN、窗口及 Clear。
 
@@ -78,3 +79,10 @@ ID。§3.5.8.3 的 Close 隐式确认全部返回方向，连接退休后，旧�
 `read_early_acceptance_test` 采用合法的独立 SES 策略：先返回正向 DEFAULT，再在
 200µs 后交付返回数据。它验证1/2/8个源端结果窗口、正向已 Clear 后取消、发包前
 取消、PDC 未分配时的资源拒绝，以及迟到旧数据不会写入取消操作的缓冲区。
+
+`read_large_ack_test` 覆盖阈值等于/大于 MTU、总长大于阈值的多包数据 ACK。
+它丢失 SOM/EOM 数据 ACK 后更改远端对应片段，验证重发的原 READ 读取新值；
+ACK 中的 offset 与本片长度必须匹配原 PSN，不能用整个消息长度代替。
+
+§3.4.5.2 Figure3-32 明确给出大 ACK 阈值下的多包 READ。§3.5.12.1 的“一 MTU”
+按单个请求/响应解释，保留整个消息分片的能力；不能把它变成大消息 API 上限。

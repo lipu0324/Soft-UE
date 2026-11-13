@@ -7,6 +7,9 @@ bool PDC::beginTransmitIncarnation() {
     if (runtime_->rto_ns>UET::Runtime::kMaximumInitialRtoNs) return false;
     if (runtime_->maximum_packet_retries>UET::Runtime::kInfiniteRetryLimit) return false;
     if (runtime_->max_ack_data_size>8192 || runtime_->max_ack_data_size%16) return false;
+    if (!runtime_->semantic_payload_mtu || runtime_->semantic_payload_mtu>8192) return false;
+    read_response_payload_mtu_=runtime_->semantic_payload_mtu;
+    read_ack_data_limit_=runtime_->max_ack_data_size;
     if (runtime_->standard_wire) {
         try { runtime_->psn_ranges.validate(runtime_->mpr_zero_override); }
         catch (const std::invalid_argument&) { return false; }

@@ -83,8 +83,11 @@ struct Services {
     PDS::PsnRangeConfiguration psn_ranges;
     PDS::PdcMappingConfiguration pdc_mapping;
     // UE 1.1 Table 3-35: fabric-wide READ return-data threshold, in bytes.
-    // The current SES adapter supports the ACK-data branch (one Payload MTU).
+    // Each response carries at most one Payload MTU; a message can span many.
     uint32_t max_ack_data_size=16;
+    // Payload MTU shared by SES packetization and PDS READ-response recovery.
+    // A READ request has no payload from which PDS could infer this length.
+    uint32_t semantic_payload_mtu=1024;
     uint16_t next_probe_opaque=0; // Host-scoped identifier persists across PDC reuse.
     bool enable_automatic_window_probes=true; // May be disabled for isolated admission experiments.
     bool actual_transmit_notifications=false; // Set by a port with a first-bit departure boundary.

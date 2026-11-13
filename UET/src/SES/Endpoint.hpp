@@ -58,7 +58,7 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
-    uint32_t max_read_length=16; // Endpoint construction derives the fabric/MTU limit.
+    uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     std::vector<IntegerAtomicDatatype> atomic_datatypes={IntegerAtomicDatatype::Int8,IntegerAtomicDatatype::Uint8,
         IntegerAtomicDatatype::Int16,IntegerAtomicDatatype::Uint16,IntegerAtomicDatatype::Int32,
@@ -83,9 +83,7 @@ public:
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ ||
             !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
-        // §3.5.12.1: a threshold at/above MTU selects a single-MTU READ
-        // fabric. Otherwise large messages use reverse PDS requests.
-        capabilities_.max_read_length=host_.services().max_ack_data_size>=mtu_?static_cast<uint32_t>(mtu_):UINT32_MAX;
+        host_.configure_semantic_payload_mtu(static_cast<uint32_t>(mtu_));
         host_.set_receive_admission(
             [this](const PDC_SES_req& request) { return reserve_receive_message(request); },
             [this](const PDC_SES_req& request) { cancel_receive_reservation(request); });
@@ -131,9 +129,6 @@ public:
         if ((!is_read && (operation.read_length || operation.read_result)) ||
             (is_read && (payload_length || operation.payload_source || operation.immediate_data))) {
             complete_local(CompletionStatus::InvalidRequest); return id;
-        }
-        if (is_read && host_.services().max_ack_data_size>=mtu_ && operation.read_length>mtu_) {
-            complete_local(CompletionStatus::Unsupported); return id;
         }
         if (operation.payload_source && !operation.payload.empty()) {
             complete_local(CompletionStatus::InvalidRequest); return id;
@@ -954,8 +949,7 @@ private:
         if (header.version || header.hd) { reject(SemanticReturnCode::UnsupportedOperation); return; }
         const uint32_t offset=header.som?0:header.diff.som_false.message_offset;
         if (!request.pkt.payload.empty() || offset>header.request_length ||
-            (!header.som && header.diff.som_false.payload_length) || offset%mtu_ ||
-            (host_.services().max_ack_data_size>=mtu_ && header.request_length>mtu_)) {
+            (!header.som && header.diff.som_false.payload_length) || offset%mtu_) {
             reject(SemanticReturnCode::UnsupportedSize); return;
         }
         // §3.4.5.2: each empty READ request asks for one Payload MTU, except
@@ -996,13 +990,14 @@ private:
             result.read_request_msg_id=header.msg_id; result.payload_length=count;
             result.modified_length=header.request_length; result.message_offset=offset;
             data.payload=std::move(bytes);
-            if (header.request_length<=host_.services().max_ack_data_size) {
+            if (header.request_length<=host_.services().max_ack_data_size || host_.services().max_ack_data_size>=mtu_) {
                 // §3.5.17: PDS keeps only this PSN's required-delivery marker,
                 // never a post-transmit snapshot of the READ result.
                 SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
                 response.rsp_len=20+count; response.gtd_del=true; response.rsp=std::move(data);
                 if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected READ data ACK");
-                message.completed=message.end_seen; trace_.record(node_,"read_ack_data",count); host_.wake();
+                message.completed=message.end_seen && message.read_requests.bytes()==message.total;
+                trace_.record(node_,"read_ack_data",count); host_.wake();
                 return;
             }
             uint16_t token=0;

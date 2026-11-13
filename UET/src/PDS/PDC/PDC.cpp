@@ -302,10 +302,12 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA && packet.SESpkt.bth_type==Semantic_Response_with_Data_Header) {
         const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
         const auto& result=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+        const uint32_t offset=request.som?0:request.diff.som_false.message_offset;
+        const bool valid_offset=offset<=request.request_length;
+        const uint32_t count=valid_offset?std::min(read_response_payload_mtu_,request.request_length-offset):0;
         if (!result.version && result.opcode==2 && result.return_code==1 && result.job_id==request.job_id &&
-            result.read_request_msg_id==request.msg_id && !result.message_offset &&
-            result.modified_length==request.request_length && result.payload_length==request.request_length &&
-            packet.SESpkt.payload.size()==request.request_length) {
+            result.read_request_msg_id==request.msg_id && valid_offset && result.message_offset==offset &&
+            result.modified_length==request.request_length && result.payload_length==count && packet.SESpkt.payload.size()==count) {
             auto response=packet.SESpkt;
             if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);
             semantic_completed_tx_.insert(explicit_sequence);

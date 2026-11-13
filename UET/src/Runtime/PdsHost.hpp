@@ -125,6 +125,12 @@ public:
             throw std::logic_error("configure READ responses before opening connections");
         services_.max_ack_data_size=maximum_bytes;
     }
+    void configure_semantic_payload_mtu(uint32_t payload_bytes) {
+        if (!payload_bytes || payload_bytes>8192) throw std::invalid_argument("invalid semantic Payload MTU");
+        if (stopped_ || (manager_.getPDSStatus().open_cnt && services_.semantic_payload_mtu!=payload_bytes))
+            throw std::logic_error("configure semantic Payload MTU before opening connections");
+        services_.semantic_payload_mtu=payload_bytes;
+    }
     void configure_trimming(const NetworkLayer::TrimmingOptions& options) {
         options.validate();
         if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
@@ -180,7 +186,8 @@ public:
         const auto& response=data.bth_header.Semantic_Response_with_Data_Header;
         // §3.5.17 always returns fetching-atomic results in their ACK. Only
         // READ uses this size-dependent return-direction path in this API.
-        if (request.opcode!=2 || request.request_length<=services_.max_ack_data_size || response.opcode!=2 || response.version ||
+        if (request.opcode!=2 || request.request_length<=services_.max_ack_data_size ||
+            services_.max_ack_data_size>=services_.semantic_payload_mtu || response.opcode!=2 || response.version ||
             response.read_request_msg_id!=request.msg_id || response.job_id!=request.job_id ||
             response.payload_length!=data.payload.size()) return false;
         if (!manager_.pushReturnData(original,data)) return false;

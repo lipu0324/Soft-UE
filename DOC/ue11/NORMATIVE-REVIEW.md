@@ -248,14 +248,14 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0215-001 | §3.4.2.7.3，READ 响应顺序 | 同 PDC 上 ROD/RODL 的带数据 READ 响应按请求接收顺序生成。 | M5/M8 缺失；异步 SES 必须显式维护顺序，不能依赖当前同步 WRITE 实现的回调顺序。 |
 | UE11-p0216-001 | §3.4.2.11，Payload MTU 能力/默认 | 支持 4096；1024/2048/8192 为 SHOULD；规范默认 4096。 | native 可配置并测试 4096/8192；现有入口默认 1024、研究测试还使用非标准小片段，需明确配置策略及后续 Profile 严格模式。 |
 | UE11-p0216-002 | §3.4.2.11，分包/路径限制 | 每个非末包恰好 Payload MTU；包适配全路径 Ethernet MTU；IPv4 DF=1；FEP 不再分片。 | codec DF、原生分片及场景 MTU 校验已有覆盖；动态管理路径变化与所有扩展头的容量校验仍需补全。 |
-| UE11-p0217-001 | §3.4.2.14，message ID | READ 请求携 ID；其他单包有字段时可用有效 ID 或0；DGRAM=0；同目标 PDC 的在途消息 ID 唯一。 | native ID lease、迟到/复用与 DGRAM0 已有回归；READ 未实现，紧凑无 ID 格式另验。 |
+| UE11-p0217-001 | §3.4.2.14，message ID | READ 请求携 ID；其他单包有字段时可用有效 ID 或0；DGRAM=0；同目标 PDC 的在途消息 ID 唯一。 | native ID lease、迟到/复用、DGRAM0 和 READ 原/响应 ID 已有回归；READ 提前确认、失败连接退休有独立策略测试，紧凑无 ID 格式另验。 |
 | UE11-p0218-001 | §3.4.3，保留位总规则 | 保留字段发送为零，接收时忽略。 | 复核发现 SES decoder 原先拒绝多处 reserved 值；新 `ses_reserved_fields_test` 覆盖已实现请求/原子/带数据响应的忽略、规范重编码与 CRC，其他格式仍未实现。 |
 | UE11-p0218-002 | §3.4.3.1，标准头/完成数据 | AI Base/Full/HPC 的请求支持标准头；多包和完整 key/match 使用该头；completion data 使用标准或 medium 头。 | 当前标准头和 SEND/WRITE CQ data 有回归；扩展 opcode、medium 头及全部字段尚不全。 |
 | UE11-p0219-001 | 表 3-9，首部字段 | opcode 六位，前两位 reserved 为零；有效 opcode 按表 3-23。 | encoder 显式字段编码；新增 reserved 接收测试；opcode 支持集仍为子集。 |
 | UE11-p0219-002 | 表 3-9，多字段义务 | DC 等到 GO；IE 阻止该包写入并使消息报错；末包 EOM；Job/PID/index/generation 等按位宽解释。 | native IE/错误完成/权限已有测试，完整 DC/所有响应等级和扩展组合仍待完成；不是一个不可拆分的通过项。 |
 | UE11-p0220-001 | 表 3-9 续，地址/DS/长度 | buffer base+offset+消息偏移寻址；初始 DS 的 initiator token 唯一、target 半部0；每包都填 request_length，零长度合法。 | native 受检偏移、零长度和重复长度字段已有测试；DS token 与 FI_MR_VIRT_ADDR 未实现，当前不声明 VIRT_ADDR。 |
 | UE11-p0221-001 | 表 3-10，非 SOM payload | 十八位 reserved 为零，十四位 payload_length 正确，其余字段继承标准头。 | 显式 codec 和多包 WRITE 有覆盖；新增 reserved 忽略/重编码测试保留有效 payload_length/offset。 |
-| UE11-p0222-001 | 表 3-10 续，长度重复 | 非 SOM 也携带完整 request_length 和消息 offset。 | native 分片和 wire 回归覆盖已有操作；READ/重启消息格式另验。 |
+| UE11-p0222-001 | 表 3-10 续，长度重复 | 非 SOM 也携带完整 request_length 和消息 offset。 | native READ 分片也保留完整总长与 offset，请求 payload_length0；重启消息格式仍另验。 |
 | UE11-p0222-002 | §3.4.3.1，RTR 与重启跨页 | target 不分配 token 时置0，可再次 defer；非零 token 对应重启恰好一次且之后不再 defer；重启 SOM=1，offset 0..2^32−2。 | M5 缺失；已阅读下一页续文，资源耗尽重试不计作 DS deferral。需要区分协议重启和网络重传。 |
 | UE11-p0223-001 | §3.4.3.1，重启字段保持 | 每次 DS 重启保留原请求地址和 header data；request_length 使用 RTR 指定值。 | M5 缺失；重启新 message offset 与目标保留的原始偏移必须分开跟踪。 |
 | UE11-p0226-001 | §3.4.3.3，本地 packing 首消息 | 首个 optimized local 头 ac=0；单消息时 ac=0 且 mm=0。 | M8 未实现；不能把多个标准头直接拼接成 local packing。 |
@@ -276,7 +276,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0233-001 | §3.4.3.6，同步完成类型 | completing SYNC_WRITE 设置 hd；SYNC_ATOMIC 长度至多8、hd=0，只用允许的非取回操作/至多8字节类型，排除 READ/MSWAP/CSWAP。 | M5 缺失；按 opcode、datatype、长度、hd 分别验证，不能直接复用任意普通原子组合。 |
 | UE11-p0233-002 | §3.4.3.6，同步 scope/count | 目标按源 IP+sync_group 查状态；完成操作携包括自身的总消息数，非完成 write 为0。 | M5 缺失；正文“所有 sync write 为0”的宽泛用语需与表 3-15 completing 分支一起解释，不能让 completing write 丢失计数。 |
 | UE11-p0233-003 | 表 3-15，字段编码续文 | group/count 各16位；非 completing count=0，completing count=整组消息数。 | 已阅读下一页续表；M5 缺失，还需零/最大计数与重复完成消息回归。 |
-| UE11-p0235-001 | §3.4.3.7，带数据响应选择 | 请求长度大于 Payload MTU 时使用完整带数据响应；optimized request 不用此完整格式。 | codec 能解析/编码部分格式，但 READ 源/目标和响应关联未实现，不能以 codec round-trip 证明语义功能。 |
+| UE11-p0235-001 | §3.4.3.7，带数据响应选择 | 请求长度大于 Payload MTU 时使用完整带数据响应；optimized request 不用此完整格式。 | 完整数据响应头已用于原生多包 READ、ACK/反向请求两种 carrier，响应关联经真实 PDS 测试；optimized 请求/响应仍缺失。 |
 | UE11-p0237-001 | §3.4.3.8，packed 非 DEFAULT | 一组请求中任意响应不是 DEFAULT 时，PDS ACK 中每个请求都有对应响应。 | M8 缺失；需整组默认/混合错误/含数据响应的组合测试。 |
 | UE11-p0238-001 | 表 3-19，local response | reserved 发送0；mm/opcode/version/code/ehl/payload_length 按本地格式解释。 | M8 缺失；不能由标准 SES reserved 接收测试推广到本地头。 |
 | UE11-p0239-001 | 表 3-21，small 合法集跨页 | optimized non-matching 单包，NO_OP payload0，其他允许请求不超过一 Payload MTU。 | M5 格式未实现；需结合下一页完整 opcode 列表与响应头要求。 |
@@ -303,13 +303,13 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0244-003 | §3.4.4.3，多响应 | 后续响应保持首响应 opcode/code 或为错误；首个错误保证传递，后续错误不得保证传递；每包至多一个语义响应。 | `reply_error` 独立选择显式错误和保证属性；RUD/ROD、丢失/重放及遇到顺序有针对性覆盖，标准请求容量耗尽通过资源NACK和记录准入处理，其他格式尚未完成。 |
 | UE11-p0245-001 | §3.4.4.3，提前 ACK | 未处理包提前 ACK 使用 NO_RESPONSE；DS 首包必须带实际语义响应。 | native RUD 缺口/DS-as-SEND 有回归；真正 DS/RTR M5 缺失。 |
 | UE11-p0245-002 | §3.4.4.3，DC | DC 等到整个消息 GO；“最后收到”不等同于带 EOM 的包。 | provider 各完成等级保守选择 GO，原生乱序缺口有回归；完整操作集尚未完成。 |
-| UE11-p0245-003 | §3.4.4.3，响应 ID | 回显 request message ID 或 read_request_message_id；请求无 ID 时响应 ID 为0。 | 标准请求路径回显已有覆盖；READ/紧凑格式缺失。 |
+| UE11-p0245-003 | §3.4.4.3，响应 ID | 回显 request message ID 或 read_request_message_id；请求无 ID 时响应 ID 为0。 | 标准请求与 READ 原/目标响应 ID 回显已有覆盖；紧凑格式仍缺失。 |
 | UE11-p0245-004 | §3.4.4.3，响应 Job | 请求有 Job 时响应回显，某些 PDS 控制查询例外。 | 当前 SES response 构造回显，管理/TSS 扩展仍待验收。 |
-| UE11-p0245-005 | §3.4.4.3，数据偏移 | SOM 响应 offset0，其余回显请求 offset。 | 带数据 codec 不能代替 READ/fetch 实际语义路径，M5 缺失。 |
+| UE11-p0245-005 | §3.4.4.3，数据偏移 | SOM 响应 offset0，其余回显请求 offset。 | READ 实际请求/数据 ACK/反向请求已验证每片 offset；fetch、optimized/local 仍缺失。 |
 | UE11-p0245-006 | §3.4.4.3，显式响应 | 非 DEFAULT 无数据用 RESPONSE，有数据用 RESPONSE_W_DATA，并遵守保证传递规则及先述重复错误例外。 | 当前无数据显式响应有覆盖；数据响应生命周期与完整保证矩阵未完成。 |
 | UE11-p0245-007 | §3.4.4.3，首错优先 | 成功 RC_OK；首错按 SES 实际遇到顺序，非 PSN 顺序。 | native sticky error 与乱序错误测试已有覆盖；保证归属也按实际遇到次序检查，非 SOM 可先持有保证。 |
 | UE11-p0246-001 | §3.4.4.3，modified_length | 普通响应为整个接受长度；DS defer 为0，RTR 指定重发量。 | 普通接受/错误长度已实现；完整 DS/RTR 缺失。 |
-| UE11-p0246-002 | §3.4.4.3，响应 payload | payload_length 表示本包实际返回字节数。 | READ/fetch 缺失；codec round-trip 不构成完整操作验收。 |
+| UE11-p0246-002 | §3.4.4.3，响应 payload | payload_length 表示本包实际返回字节数。 | 原生 READ 的实际返回长度与放置已验证；fetch 仍缺失，codec round-trip 不构成完整操作验收。 |
 | UE11-p0246-003 | §3.4.4.4，local packed 响应 | ACK 中逐项对应请求，READ/fetch 返回数据；错误数据响应触发整组 ACK。 | M8 缺失，不能独立发送部分结果。 |
 | UE11-p0246-004 | §3.4.4.4，响应排序/完成 | 原文要求 ROD/RODL 响应有序，本地处理完成后才响应，DC 等待 completion。 | 条文位于 Unified Local 小节，跨 Profile 适用范围需继续核对；当前异步 ROD response 排序尚未声明通过。 |
 | UE11-p0247-001 | §3.4.4.5，rendezvous eager | 不超过 eager 长度，末包 EOM；已发送量达到缩短长度时仍发送至少一个 EOM 包；窗口限制为 SHOULD。 | M5 缺失；缩短到0/已发送部分/末包在途需各自测试。 |

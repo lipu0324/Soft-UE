@@ -534,6 +534,8 @@ protected:
     uint32_t initial_psn_range_=Default_MPR;
     uint32_t receive_psn_range_=Default_MPR;
     uint8_t advertised_mpr_=0;
+    uint32_t read_response_payload_mtu_=1024;
+    uint32_t read_ack_data_limit_=16;
     void initializePsnRanges();
     void resetPeerSequenceWindow();
     bool receiveWindowAllows(uint32_t sequence) const {
@@ -674,7 +676,10 @@ protected:
         if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
             request->second.PDS_type!=RUOD_req_header || request->second.SESpkt.bth_type!=Standard_Header) return false;
         const auto& header=request->second.SESpkt.bth_header.Standard_Header;
-        return header.opcode==2 && header.request_length<=runtime_->max_ack_data_size;
+        // §3.4.5.2 Figure 3-32: a large ACK threshold selects data ACKs for
+        // every fragment of a multi-packet READ, even when total>threshold.
+        return header.opcode==2 && (header.request_length<=read_ack_data_limit_ ||
+            read_ack_data_limit_>=read_response_payload_mtu_);
     }
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();

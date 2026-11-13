@@ -1,10 +1,11 @@
 # READ：数据随 ACK 返回
 
 UE 1.1 §3.4.5.2、§3.5.12.1、§3.5.16.2、§3.5.17 是此路径的依据。
-当前原生接口支持 RUD/ROD、标准请求头、单 Payload MTU 内且不超过
-`Max_ACK_Data_Size` 的 READ。默认阈值为 16 B，配置范围为 0～8192 B、
+当前原生接口支持 RUD/ROD、标准请求头和多包 READ 的数据 ACK。每个数据 ACK
+至多一 Payload MTU；阈值达到 MTU 时，整个大消息均选择此返回路径。
+`Max_ACK_Data_Size` 默认阈值为 16 B，配置范围为 0～8192 B、
 16 B 粒度；配置必须在打开 PDC 和创建 SES Endpoint 前完成，且整个 fabric
-使用相同值。超过 ACK 阈值的消息使用 [反向数据通道](RETURN-DATA.md)，其
+使用相同值。阈值低于 MTU 且消息超过阈值时使用 [反向数据通道](RETURN-DATA.md)，其
 原生分片与完成条件见 [READ.md](READ.md)。AI Full/HPC 和 Unified Local 的完整验收仍未完成。
 
 ## 请求、返回与本地放置
