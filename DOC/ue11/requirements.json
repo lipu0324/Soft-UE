@@ -563,14 +563,17 @@
       "id": "SES-SYNC",
       "reference": "§3.4; §3.5.8.2",
       "summary": "Sync Group 状态与完成动作",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "synchronized_header_test"
+      ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Standard SYNC_WRITE0x10/SYNC_ATOMIC0x11 extensions have independent Figure3-24 and Table3-20 golden ordering checks across64 fragment/IP/carrier/CRC combinations. Composite SYNC_ATOMIC carries synchronized then atomic extensions, separate from payload. Source/target group tracking, count/completing action ordering, reuse barriers, bounded errors/management cleanup and optimized forms remain unimplemented; no native synchronization or Profile capability claim. See SYNCHRONIZED-HEADERS.md."
     },
     {
       "id": "PDS-RUDI",

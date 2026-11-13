@@ -340,7 +340,9 @@ enum SES_BTH_header_type{
 
 enum SES_EXH_header_type{
     Rendezvous_Extension_Header,
-    Atomic_Operation_Extension_Header
+    Atomic_Operation_Extension_Header,
+    Synchronized_Operation_Extension_Header,
+    Synchronized_Atomic_Extension_Headers
 };
 
 //header
@@ -443,6 +445,19 @@ struct SES_Atomic_Operation_Extension_Header
     uint8_t     rsvd                : 8;
 }PACKED;
 
+// §3.4.3.6/Figure3-24: both fields are network-order16-bit values on
+// the wire. These host values are encoded explicitly, never memcpy'd.
+struct SES_Synchronized_Operation_Extension_Header {
+    uint16_t sync_group;
+    uint16_t sync_count;
+};
+// Table3-20: SYNC_ATOMIC carries the synchronized extension FIRST, then
+// the ordinary atomic extension. Neither extension is its payload.
+struct SES_Synchronized_Atomic_Extension_Headers {
+    SES_Synchronized_Operation_Extension_Header synchronization;
+    SES_Atomic_Operation_Extension_Header atomic;
+};
+
 struct SES_Semantic_Response_Header
 {
     uint8_t     list                : 2;    //Indicates if the payload was delivered to the expected or unexpected list.
@@ -505,6 +520,8 @@ struct SEStoPDS_pkt //Add any additional SES outputs here
     {
         SES_Atomic_Operation_Extension_Header Atomic_Operation_Extension_Header;
         SES_Rendezvous_Extension_Header Rendezvous_Extension_Header;
+        SES_Synchronized_Operation_Extension_Header Synchronized_Operation_Extension_Header;
+        SES_Synchronized_Atomic_Extension_Headers Synchronized_Atomic_Extension_Headers;
     }eth_header;
 
 

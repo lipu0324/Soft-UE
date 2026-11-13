@@ -146,6 +146,7 @@ if(BUILD_TESTING)
   softue_test(rendezvous_lifecycle_test RendezvousLifecycleTest.cpp)
   softue_test(rendezvous_malformed_test RendezvousMalformedTest.cpp)
   softue_test(rendezvous_addressing_test RendezvousAddressingTest.cpp)
+  softue_test(synchronized_header_test SynchronizedHeaderTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
   softue_test(streaming_read_test StreamingReadTest.cpp)
   # Boundary reports reject a stale binary instead of assigning current HEAD

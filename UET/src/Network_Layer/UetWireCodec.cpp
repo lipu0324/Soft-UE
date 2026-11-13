@@ -88,7 +88,23 @@ void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr
         if (header.som) put(encoded_bytes,header.diff.som_true.header_data,8);
         else put(encoded_bytes,(uint64_t{header.diff.som_false.payload_length}<<32)|header.diff.som_false.message_offset,8);
         put(encoded_bytes,header.request_length,4);
-        if (header.opcode==6 || header.opcode==10) {
+        if (header.opcode==0x10 || header.opcode==0x11) {
+            const bool synchronized_atomic=header.opcode==0x11;
+            if (packet.SESpkt.eth_type!=(synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
+                throw std::invalid_argument("missing synchronized operation extensions");
+            const auto& synchronization=synchronized_atomic?
+                packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+                packet.SESpkt.eth_header.Synchronized_Operation_Extension_Header;
+            // Figure3-24 and Table3-20 apply to every standard fragment.
+            // Group counts/ordering are SES obligations, not codec state.
+            put(encoded_bytes,synchronization.sync_group,2); put(encoded_bytes,synchronization.sync_count,2);
+            if (synchronized_atomic) {
+                const auto& atomic=packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
+                if (atomic.rsvd) throw std::invalid_argument("reserved synchronized atomic extension bits");
+                put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
+                put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
+            }
+        } else if (header.opcode==6 || header.opcode==10) {
             // §3.4.3.4/Figure3-21: this 24-byte extension follows EVERY
             // rendezvous SEND/TSEND fragment, independently of SOM/EOM.
             // Its read address remains data for later checked READ admission;
@@ -157,7 +173,19 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
             header.diff.som_false.message_offset=data&0xffffffff;
         }
         header.request_length=reader.take(4);
-        if (header.opcode==6 || header.opcode==10) {
+        if (header.opcode==0x10 || header.opcode==0x11) {
+            const bool synchronized_atomic=header.opcode==0x11;
+            packet.SESpkt.eth_type=synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header;
+            auto& synchronization=synchronized_atomic?
+                packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+                packet.SESpkt.eth_header.Synchronized_Operation_Extension_Header;
+            synchronization.sync_group=reader.take(2); synchronization.sync_count=reader.take(2);
+            if (synchronized_atomic) {
+                auto& atomic=packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
+                atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
+                atomic.semantic_contol=reader.take(1); reader.take(1); // Reserved after integrity validation.
+            }
+        } else if (header.opcode==6 || header.opcode==10) {
             packet.SESpkt.eth_type=Rendezvous_Extension_Header;
             auto& rendezvous=packet.SESpkt.eth_header.Rendezvous_Extension_Header;
             rendezvous.eager_length=reader.take(4);

@@ -11,6 +11,10 @@ by each regression, concrete remaining placeholders and the next gated work.
 The [PDS configuration field audit](PDS-CONFIGURATION.md) supplements the
 normative-paragraph review with Table 3-35/3-36 obligations.
 
+Standard SYNC_WRITE/SYNC_ATOMIC extensions have independent wire golden checks;
+their transaction/group state is still unimplemented. See
+[synchronized extension boundaries](SYNCHRONIZED-HEADERS.md).
+
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
 
