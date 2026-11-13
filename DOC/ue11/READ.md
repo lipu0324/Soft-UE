@@ -86,3 +86,28 @@ ACK 中的 offset 与本片长度必须匹配原 PSN，不能用整个消息长�
 
 §3.4.5.2 Figure3-32 明确给出大 ACK 阈值下的多包 READ。§3.5.12.1 的“一 MTU”
 按单个请求/响应解释，保留整个消息分片的能力；不能把它变成大消息 API 上限。
+
+## 流式边界实验
+
+`streaming_read_test` 使用真实原生 READ 路径、8192 B Payload MTU 和两端稀疏
+MR。每次实际放置都逐字节核对三个标记与其余零字节；独立校验器最多保留8个
+片段编号，不分配整条消息大小的期望数组。默认 CTest 覆盖两种返回载体、NSCC
+开关和1 MiB+3 B消息，另用64 KiB队列验证数据 ACK 尾丢失后的原 READ 重执行。
+
+正式4 GiB−1实验使用1 MiB链路队列，要求没有队列丢失、524288次唯一放置、
+4294967295字节全部核对、源端生产队列/结果窗口和目标 READ 包占用均不超过8。
+源/目标覆盖各至多一个区间，稀疏 MR 各至多三个页，完成后排空资源和定时器。
+这验证32位消息长度边界，执行器耗时与 RSS 不代表目标硬件性能。
+
+先在干净提交重新配置并构建 Release `streaming_read_test`，再运行：
+
+```sh
+python3 scripts/test_large_read.py --binary build/release/streaming_read_test \
+  --output build/read-boundary
+# 另外分别增加 --nscc、--ack-data 及二者组合。
+```
+
+可执行文件的 `--build-info` 嵌入配置时的提交和工作树状态；脚本拒绝旧二进制或
+脏工作树，保存二进制哈希、命令、逐字节校验计数与资源峰值。NSCC 下的反向
+PDS Request 还跨越24位累计收到字节计数器；数据 ACK 不计入这条请求计数。
+实际实验结果单独保存在生成的 `report.json`，本节不将测试入口当作通过证据。

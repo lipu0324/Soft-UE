@@ -124,6 +124,23 @@ if(BUILD_TESTING)
   softue_test(message_completion_test MessageCompletionTest.cpp)
   softue_test(send_header_data_test SendHeaderDataTest.cpp)
   softue_test(streaming_payload_test StreamingPayloadTest.cpp)
+  softue_test(streaming_read_test StreamingReadTest.cpp)
+  # Boundary reports reject a stale binary instead of assigning current HEAD
+  # to an executable built from an earlier source tree.
+  execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE SOFTUE_READ_BUILD_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+    RESULT_VARIABLE SOFTUE_READ_REVISION_RESULT)
+  execute_process(COMMAND git status --porcelain --untracked-files=normal WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE SOFTUE_READ_BUILD_STATUS ERROR_QUIET RESULT_VARIABLE SOFTUE_READ_STATUS_RESULT)
+  if(NOT SOFTUE_READ_REVISION_RESULT EQUAL 0 OR NOT SOFTUE_READ_BUILD_COMMIT MATCHES "^[0-9a-f]+$")
+    set(SOFTUE_READ_BUILD_COMMIT "unknown")
+  endif()
+  set(SOFTUE_READ_BUILD_DIRTY 1)
+  if(SOFTUE_READ_REVISION_RESULT EQUAL 0 AND SOFTUE_READ_STATUS_RESULT EQUAL 0 AND SOFTUE_READ_BUILD_STATUS STREQUAL "")
+    set(SOFTUE_READ_BUILD_DIRTY 0)
+  endif()
+  target_compile_definitions(streaming_read_test PRIVATE
+    SOFTUE_READ_BUILD_COMMIT="${SOFTUE_READ_BUILD_COMMIT}" SOFTUE_READ_BUILD_DIRTY=${SOFTUE_READ_BUILD_DIRTY})
   softue_test(semantic_error_test SemanticErrorTest.cpp)
   softue_test(guaranteed_error_test GuaranteedErrorTest.cpp)
   softue_test(unexpected_message_test UnexpectedMessageTest.cpp)
