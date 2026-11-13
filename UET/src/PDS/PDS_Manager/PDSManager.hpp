@@ -373,14 +373,12 @@ public:
         else if (is_acknowledgement) local_pdc_id = received_packet.PDS_header.RUOD_ack_header.dpdcid;
         else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
 
-        if (is_request && runtime_ && runtime_->standard_wire) {
-            const bool forward=starts_connection || local_pdc_id>=MAX_PDC;
+        if (is_request && starts_connection && runtime_ && runtime_->standard_wire) {
             // §3.5.12.1: outside RODL, SES requests use only the forward
             // direction; READ/atomic response data uses only the return
             // direction. Drop an illegal combination before allocation or
             // peer-ID learning (local malformed-direction policy).
-            if ((forward && received_packet.SESpkt.bth_type!=Standard_Header) ||
-                (!forward && received_packet.SESpkt.bth_type!=Semantic_Response_with_Data_Header)) {
+            if (received_packet.SESpkt.bth_type!=Standard_Header) {
                 ++event_cnt; return;
             }
         }
@@ -471,6 +469,16 @@ public:
             const bool unbound_probe=is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type==Probe;
             if (!unbound_probe && (is_request || is_control)) sendNack(&received_packet,UET_PDC_HDR_MISMATCH);
             return;
+        }
+        if (is_request && runtime_ && runtime_->standard_wire) {
+            // An unknown DPDCID or mismatched FA must get its mandated NACK
+            // first (§3.5.8.2). Only an existing, correctly addressed PDC tells
+            // us which local direction this request would use.
+            const bool forward=local_pdc_id>=MAX_PDC;
+            if ((forward && received_packet.SESpkt.bth_type!=Standard_Header) ||
+                (!forward && received_packet.SESpkt.bth_type!=Semantic_Response_with_Data_Header)) {
+                ++event_cnt; return;
+            }
         }
         if (!establishment_failure && !identity.remote_pdc_known) {
             identity.remote_pdc_id = remote_pdc_id;
