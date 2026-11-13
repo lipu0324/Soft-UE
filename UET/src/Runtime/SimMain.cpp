@@ -67,6 +67,11 @@ int main(int argc,char** argv) {
                 congestion.validate();
             }
             else if (key=="wire") { int ipv6=0,udp=0,crc=0; row>>ipv6>>udp>>crc; network.ipv6=ipv6; network.udp=udp; network.crc=crc; }
+            else if (key=="udp_destination_port") {
+                uint32_t port=0; row>>port;
+                if (!row || port>UINT16_MAX) throw std::invalid_argument("UDP destination port exceeds 16 bits");
+                network.udp_destination_port=static_cast<uint16_t>(port);
+            }
             else if (key=="host") { uint32_t id; row>>id; nodes.push_back(id); }
             else if (key=="switch") { uint32_t id; row>>id; switches.push_back(id); }
             else if (key=="job") { uint32_t id; row>>id; jobs.push_back(id); }
@@ -117,7 +122,8 @@ int main(int argc,char** argv) {
                         <<",\"traffic_class\":"<<unsigned(frame.traffic_class)<<",\"bytes\":"<<frame.bytes.size()<<"}\n";
             if (from==frame.source) {
                 const auto decoded=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),network.crc,
-                    network.native_ip_protocol,enable_trimming?std::make_optional(UET::NetworkLayer::TrimmingOptions{}):std::nullopt);
+                    network.native_ip_protocol,enable_trimming?std::make_optional(UET::NetworkLayer::TrimmingOptions{}):std::nullopt,
+                    network.udp_destination_port);
                 if (decoded.packet.PDS_type==RUOD_req_header) {
                     ++data_attempts;
                     if (decoded.packet.PDS_header.RUOD_req_header.flags.retx) ++retransmitted_data_attempts;

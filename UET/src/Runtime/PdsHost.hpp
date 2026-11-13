@@ -35,7 +35,7 @@ public:
                     packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
                 else {
                     auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
-                        network_.crc,network_.native_ip_protocol,trimming_);
+                        network_.crc,network_.native_ip_protocol,trimming_,network_.udp_destination_port);
                     if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                         decoded.network.source.ip != address(frame.source).ip ||
                         decoded.network.destination.ip != address(node_).ip)
@@ -267,8 +267,9 @@ private:
                     if (services_.congestion_control && packet.PDS_type==RUOD_ack_header &&
                         packet.PDS_header.RUOD_ack_header.type==ACK_CC && packet.acknowledgment_trigger_arrival_ns) {
                         const auto arrival=*packet.acknowledgment_trigger_arrival_ns;
-                        frame.prepare_transmission=[arrival,crc=options.crc,protocol=options.native_ip_protocol](uint64_t departure,std::vector<uint8_t>& bytes) {
-                            NetworkLayer::UetWireCodec::stamp_service_time(bytes,departure,arrival,crc,protocol);
+                        frame.prepare_transmission=[arrival,crc=options.crc,protocol=options.native_ip_protocol,
+                            udp_destination_port=options.udp_destination_port](uint64_t departure,std::vector<uint8_t>& bytes) {
+                            NetworkLayer::UetWireCodec::stamp_service_time(bytes,departure,arrival,crc,protocol,udp_destination_port);
                         };
                     }
                 }

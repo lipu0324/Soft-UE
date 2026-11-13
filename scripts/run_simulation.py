@@ -79,14 +79,16 @@ def validate(config):
     trimming = config.get("trimming", False)
     if type(trimming) is not bool:
         raise ValueError("trimming must be boolean")
-    wire = mapping(config.get("wire", {}), {"ipv6", "udp", "crc"}, "wire")
+    wire = mapping(config.get("wire", {}), {"ipv6", "udp", "crc", "udp_destination_port"}, "wire")
+    udp_destination_port = integer(wire.get("udp_destination_port", 4793), 0, 65535, "wire.udp_destination_port")
     flags = [wire.get("ipv6", False), wire.get("udp", False), wire.get("crc", True)]
     if any(type(flag) is not bool for flag in flags):
         raise ValueError("wire ipv6/udp/crc fields must be booleans")
     records = ["softue-scenario-v2", f"seed {seed}", f"duration {duration}", f"budget {budget}",
                f"memory {memory}", f"payload_mtu {payload_mtu}", f"rto {rto_ns}",
                f"max_packet_retries {max_packet_retries}", f"trimming {int(trimming)}",
-               "wire " + " ".join(str(int(x)) for x in flags)]
+               "wire " + " ".join(str(int(x)) for x in flags),
+               f"udp_destination_port {udp_destination_port}"]
     if "nack_delays_ns" in config:
         delays = config["nack_delays_ns"]
         if not isinstance(delays, list) or len(delays) != 4:

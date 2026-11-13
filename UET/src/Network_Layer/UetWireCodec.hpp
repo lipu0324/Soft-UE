@@ -8,6 +8,8 @@
 
 namespace UET::NetworkLayer {
 
+constexpr uint16_t kDefaultUetUdpDestinationPort=4793; // UE 1.1 Table 3-35.
+
 struct WireAddress {
     std::array<uint8_t,6> mac{};
     std::array<uint8_t,16> ip{}; // IPv4 uses the first four bytes.
@@ -18,6 +20,7 @@ struct WireOptions {
     bool udp = false;
     bool crc = true; // Fabric-wide UET_Data_Protect setting, never autodetected.
     uint16_t entropy = 0;
+    uint16_t udp_destination_port=kDefaultUetUdpDestinationPort;
     uint8_t dscp = 0;
     uint8_t ecn = 0;
     uint8_t hop_limit = 64;
@@ -53,13 +56,15 @@ public:
     static uint32_t crc32c(const uint8_t* bytes, size_t length);
     static std::vector<uint8_t> encode(const PDStoNET_pkt& packet, const WireOptions& options);
     static DecodedPacket decode(const uint8_t* bytes, size_t size, bool crc_enabled = true,
-                                uint8_t native_ip_protocol = 253,std::optional<TrimmingOptions> trimming={});
+                                uint8_t native_ip_protocol = 253,std::optional<TrimmingOptions> trimming={},
+                                uint16_t udp_destination_port=kDefaultUetUdpDestinationPort);
     static bool mark_ecn(std::vector<uint8_t>& frame); // Only ECT(0/1) transitions to CE.
     static bool trim_packet(std::vector<uint8_t>& frame,const TrimmingOptions& options,bool last_hop=false);
     static std::optional<uint8_t> packet_dscp(const std::vector<uint8_t>& frame);
     // NIC-only plaintext ACK_CC stamp. Preserves all unrelated bytes, including
     // UDP checksum/padding; an invalid or trimmed packet is never reconstituted.
     static bool stamp_service_time(std::vector<uint8_t>& frame,uint64_t departure_ns,uint64_t arrival_ns,
-                                   bool crc_enabled,uint8_t native_ip_protocol=253);
+                                   bool crc_enabled,uint8_t native_ip_protocol=253,
+                                   uint16_t udp_destination_port=kDefaultUetUdpDestinationPort);
 };
 } // namespace UET::NetworkLayer

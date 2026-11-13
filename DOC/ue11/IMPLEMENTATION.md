@@ -18,6 +18,9 @@ DSCP; see [control traffic classes](CONTROL-TRAFFIC-CLASSES.md).
 ROD first acknowledgments wait for earlier asynchronous SES responses while
 historical ACKs remain replayable; see [ROD ACK order](ROD-ACK-ORDER.md).
 
+UET-over-UDP uses the configurable destination port from Table 3-35, default
+4793; see [UDP encapsulation](UDP-ENCAPSULATION.md).
+
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).
 Implemented PDS formats also ignore reserved receive fields while validating
@@ -346,7 +349,7 @@ python3 scripts/extract_spec_requirements.py --text build/ue11.txt --output buil
 ```
 
 Extracted candidates require manual normative/informative, conditional and
-Profile classification. The first 480 are classified and split into obligations
+Profile classification. The first 620 are classified and split into obligations
 in the [manual review ledger](NORMATIVE-REVIEW.md); tables, algorithms and the
 remaining candidates are still open. The inventory deliberately remains incomplete; the
 checker rejects Profile claims until the inventory and applicable requirements

@@ -397,7 +397,7 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | UE11-p0286-002 | §3.4.9.6，sync完成 | completing WRITE CQ在同组所有payload交付后；相对其他CQ没有额外排序保证。 | M5缺失；避免错误实现成全局CQ barrier。 |
 | UE11-p0286-003 | §3.4.9.6，sync atomic | completing ATOMIC在整组WRITE payload交付后执行。 | M5缺失；计数聚合不等于真正延迟执行原子。 |
 | UE11-p0302-001 | §3.5.5，配置集合 | 每FEP至少一套PDS配置；支持reserved pool时另有第二套。 | Runtime Services已分host并支持部分参数，reserved pool未启用；完整配置集合仍缺。 |
-| UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；表3-35/36需逐字段验收，参考默认值不是完整符合性证据。 |
+| UE11-p0303-001 | §3.5.5，参数范围/状态 | 按指定单位及所需范围支持配置，允许更细粒度；表3-36状态也须支持。 | 纳秒RTO/NACK、0～15retry、MPR部分覆盖；新增UDP目的端口4793参考默认与0～65535配置/错端口/trim/stamp回归；表3-35/36仍需逐字段验收。 |
 | UE11-p0305-001 | 表3-35续，MPR/SYN及注释 | MPR0 override 0～127；丢SYN后关闭遵守安全时间；启用加密时设0为SHOULD；native IP协议号可配置。 | MPR override/MAC-time SYN safety已有回归；Syn范围表格与正文位宽有冲突须记录。实验253/254不得当作生产默认分配号，当前研究默认仍为显式符合性缺口。 |
 
 ## 第 281～300 个候选
@@ -690,6 +690,202 @@ TFC的正信用残量可以允许一整个MTU包，目的端必须为此预留�
 | UE11-p0527-005 | 表3-110，PCM条件项 | uet_rx_ack_rtt支持sum/max/min/last。 | PCM未启用；NSCC RTT状态不是该可编程接口的证据。 |
 | UE11-p0527-006 | 表3-110，PCM条件项 | uet_rx_ack_svc支持sum/last；max/min可选。 | PCM未启用。 |
 
-复核进度为上述 480 个候选的分类与义务拆分；其余 249 个候选、表格/算法的额外
+## 第 481～520 个候选
+
+以下是表3-110的CC信号及表3-111的LB信号累积矩阵，均以启用PCM为条件。
+CC与LB对同名信号的必选运算不同；不能复用一个“所有信号支持sum”的简化接口。
+LB的ET表示Event Table模型，PP表示Per-Packet模型，应按所选模型实现对应状态。
+本轮M0只分类这些义务；PCM仍是M8后的未启用增强，表中任何行都没有被标记为实现通过。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0527-007 | 表3-110，PCM/CC | rx_cookie：last必选。 | PCM未启用。 |
+| UE11-p0527-008 | 表3-110，PCM/CC | rx_credit：sum必选，last可选。 | PCM未启用。 |
+| UE11-p0527-009 | 表3-110，PCM/CC | rx_credit_req_value：last必选，其余三种可选。 | PCM未启用。 |
+| UE11-p0528-001 | 表3-110，PCM/CC | rx_nack：sum必选，last可选。 | PCM未启用。 |
+| UE11-p0528-002 | 表3-110，PCM/CC | rx_nack_ecn：last必选，sum可选。 | PCM未启用。 |
+| UE11-p0528-003 | 表3-110，PCM/CC | rx_nack_last_hop_trim：last必选，sum可选。 | PCM未启用。 |
+| UE11-p0528-004 | 表3-110，PCM/CC | rx_nack_rtt：sum/max/min/last全部必选。 | PCM未启用。 |
+| UE11-p0528-005 | 表3-110，PCM/CC | rx_nack_trim：sum必选，last可选。 | PCM未启用。 |
+| UE11-p0528-006 | 表3-110，PCM/CC | rx_probe_id：last必选。 | PCM未启用。 |
+| UE11-p0528-007 | 表3-110，PCM/CC | rx_req：sum必选，last可选。 | PCM未启用。 |
+| UE11-p0528-008 | 表3-110，PCM/CC | rx_req_bytes：sum/last必选。 | PCM未启用。 |
+| UE11-p0528-009 | 表3-110，PCM/CC | rx_telegram_local：last必选。 | PCM未启用；Telegram线编码另有待解决差异。 |
+| UE11-p0528-010 | 表3-110，PCM/CC | rx_telegram_type：last必选。 | PCM未启用。 |
+| UE11-p0528-011 | 表3-110，PCM/CC | time_current：last必选。 | PCM未启用；未来使用注入时钟。 |
+| UE11-p0528-012 | 表3-110，PCM/CC | time_last_update：last必选。 | PCM未启用。 |
+| UE11-p0528-013 | 表3-110，PCM/CC | tx_backlog_bytes：last必选。 | PCM未启用。 |
+| UE11-p0528-014 | 表3-110，PCM/CC | tx_cookie：last必选。 | PCM未启用。 |
+| UE11-p0528-015 | 表3-110，PCM/CC | tx_cwnd：last必选。 | PCM未启用；现有NSCC窗口不等于PCM可编程信号接口。 |
+| UE11-p0528-016 | 表3-110，PCM/CC | tx_inflight_bytes：last必选。 | PCM未启用。 |
+| UE11-p0528-017 | 表3-110，PCM/CC | tx_req_bytes：sum/last必选。 | PCM未启用。 |
+| UE11-p0528-018 | 表3-110，PCM/CC | tx_rto：last必选，sum可选。 | PCM未启用。 |
+| UE11-p0529-001 | 表3-111，PCM/LB | rx_ack：ET/PP均last必选、sum可选。 | PCM未启用。 |
+| UE11-p0529-002 | 表3-111，PCM/LB | rx_ack_ecn：ET/PP均last必选、sum可选。 | PCM未启用。 |
+| UE11-p0529-003 | 表3-111，PCM/LB | rx_ack_rtt：ET/PP均支持全部四种累积。 | PCM未启用。 |
+| UE11-p0529-004 | 表3-111，PCM/LB | rx_cookie：PP的last必选。 | PCM未启用。 |
+| UE11-p0529-005 | 表3-111，PCM/LB | rx_ev：ET/PP的last必选。 | PCM未启用；现有entropy反馈仅为协议基础。 |
+| UE11-p0529-006 | 表3-111，PCM/LB | rx_nack_ecn：ET/PP的last必选、sum可选。 | PCM未启用。 |
+| UE11-p0529-007 | 表3-111，PCM/LB | rx_nack_last_hop_trim：ET/PP的last必选、sum可选。 | PCM未启用。 |
+| UE11-p0529-008 | 表3-111，PCM/LB | rx_nack_rtt：ET/PP均支持全部四种累积。 | PCM未启用。 |
+| UE11-p0529-009 | 表3-111，PCM/LB | rx_nack_trim：ET/PP的last必选、sum可选。 | PCM未启用。 |
+| UE11-p0529-010 | 表3-111，PCM/LB | tx_probe_id：ET/PP的last必选。 | PCM未启用；与CC表的rx_probe_id分别映射。 |
+| UE11-p0529-011 | 表3-111，PCM/LB | rx_telegram_local：ET/PP的last必选。 | PCM未启用。 |
+| UE11-p0529-012 | 表3-111，PCM/LB | rx_telegram_type：ET/PP的last必选。 | PCM未启用。 |
+| UE11-p0529-013 | 表3-111，PCM/LB | time_current：ET/PP的last必选。 | PCM未启用。 |
+| UE11-p0529-014 | 表3-111，PCM/LB | time_last_update：ET/PP的last必选。 | PCM未启用。 |
+| UE11-p0529-015 | 表3-111，PCM/LB | tx_cookie：PP的last必选。 | PCM未启用。 |
+| UE11-p0529-016 | 表3-111，PCM/LB | tx_ev：PP的last必选。 | PCM未启用。 |
+| UE11-p0529-017 | 表3-111，PCM/LB | tx_ev_tbl_depth：ET的last必选。 | PCM未启用。 |
+| UE11-p0530-001 | 表3-111，PCM/LB | tx_ev_tbl_idx：ET的last必选。 | PCM未启用。 |
+| UE11-p0530-002 | 表3-111，PCM/LB | tx_rto：ET/PP的last必选、sum可选。 | PCM未启用。 |
+
+## 第 521～540 个候选
+
+这批继续归入M8后PCM增强，均尚未启用。同时读取了候选提取未完整包含的
+表3-117、fatal条件列表及ERROR数据路径列表。YAML编译失败、回调内原子状态切换
+和无副作用终止是独立义务，不能只靠一个运行时error flag通过整节。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0530-003 | §3.6.18.4.5，optional信号 | YAML引用未支持的optional信号时编译必须失败。 | PCM未启用；未来编译期能力校验。 |
+| UE11-p0531-001 | §3.6.18.4.5.1，CSIG量化 | 暴露opaque bucket s及t/m/d；YAML提供去量化参数，建议提供csig_dequantize。 | PCM/CSIG未启用；不能直接把量化索引当原始延迟。 |
+| UE11-p0531-002 | §3.6.18.4.6，vendor信号 | 若提供，信号名必须含指定vendor别名前缀。 | PCM未启用，未选择vendor信号。 |
+| UE11-p0532-001 | §3.6.18.5.1，trigger语义 | count/time四组合、DISARMED/ONCE/CONTINUOUS、INVOKE/RECORD及deadline；ONCE需显式重arm。 | PCM未启用；未来事件驱动测试应覆盖同时触发与计数/时间清零。 |
+| UE11-p0533-001 | §3.6.18.5.3，触发批处理 | 一次调用交付所有非deferred fired triggers，禁止拆成多次回调。 | PCM未启用；未来以单次bitmask交付并验证exactly-once。 |
+| UE11-p0533-002 | §3.6.18.5.4，更新语义 | 成功更新后重置全部working state，立即按新配置可评估/触发，reference fidelity一致。 | PCM未启用；不得继承旧计数或旧deadline。 |
+| UE11-p0535-001 | §3.6.18.5.7，per-EV作用域 | scope=EV，uniform绑定CCC EV表全部槽位，不可单独选索引。 | PCM未启用；多EV独立状态与uniform配置需区分。 |
+| UE11-p0535-002 | §3.6.18.5.7.2，PP触发 | 支持表3-117每包EVENT-COUNT/1、INVOKE、enable等组合；该模式不支持runtime修改。 | PCM未启用；表内旧字段名与前节formal arm/action schema需交叉复核，不能自行默默改线/配置语义。 |
+| UE11-p0538-001 | §3.6.18.6.3，telegram接收 | 每次回调一个telegram，提供type/context/字段API，交给算法的字段为native endian。 | PCM未启用；与发送端big endian区分。 |
+| UE11-p0539-001 | §3.6.18.6.3，telegram发送 | local发送必选，remote/collector可选；按type和字段API构造。 | PCM未启用；不把未选择remote Telegram作为M8退出条件。 |
+| UE11-p0539-002 | §3.6.18.6.3，结构寿命 | 回调结束后结构失效，下次须重新构造。 | PCM未启用；需代次/句柄失效验证。 |
+| UE11-p0539-003 | §3.6.18.6.3.1，telegram头 | 8位type_id按YAML赋值；8位reserved发送零、接收忽略。 | PCM未启用；详细字段是8+8，不直接把summary“2B type_id”当16位。 |
+| UE11-p0540-001 | §3.6.18.6.3.1，telegram填充 | 不足30字节payload剩余发送零、接收忽略。 | PCM未启用。 |
+| UE11-p0540-002 | §3.6.18.6.3.1，telegram编码 | local/remote均big endian且按YAML紧凑排列。 | PCM未启用；回调侧需单独转换为native endian。 |
+| UE11-p0541-001 | §3.6.18.7，PCM故障总则 | 破坏正确性/安全性/确定性的条件立即永久禁用CCC并进入ERROR。 | PCM未启用；只有外部reset/reinit才允许恢复。 |
+| UE11-p0541-002 | §3.6.18.7.1，fatal触发 | 内部信号/trigger/API故障、非法API/越界、算法显式fatal均原子ACTIVE→ERROR。 | PCM未启用；三类触发分别验收。 |
+| UE11-p0541-003 | §3.6.18.7.1，原子可见性 | fatal状态变化对所有CCC/PDC观察者原子可见。 | PCM未启用；软件模型应在同一事件边界提交。 |
+| UE11-p0541-004 | §3.6.18.7.1，关联PDC失败 | 所有关联PDC同时ERROR，PCM内部不能退出ERROR。 | PCM未启用；应验证多个PDC的统一失败及资源隔离。 |
+| UE11-p0542-001 | §3.6.18.7.2.1，ERROR数据路径 | 禁用CCC、不准入新包、逻辑丢弃关联在途/ACKed/排队包、停止事件和telegram、禁止算法API生效。 | PCM未启用；五项独立义务不能以普通队列清空替代。 |
+| UE11-p0542-002 | §3.6.18.7.2.2，ERROR回调 | 在途调用无可见副作用、不再变更状态；API返回-ENOTRECOVERABLE；不再调用算法。 | PCM未启用；完成/中止两种选择均须满足无副作用。 |
+
+## 第 541～560 个候选
+
+PCM剩余要求继续作为M8后条件项；TSS由路线图M6明确选择，当前整体未实现。
+可信FEP、安全存储、SDME授权、报文认证和nonce不复用是不同边界。软件行为模型可以
+验证状态隔离和协议结果，不能以普通进程内对象冒充经过证明的硬件信任根。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0542-003 | §3.6.18.7.3，PCM错误记录 | 每CCC只记录一个fatal indication，含规定字段。 | PCM未启用。 |
+| UE11-p0542-004 | §3.6.18.7.3，PCM错误来源 | source区分IMPLEMENTATION/PCM_ALGORITHM；算法来源value等于uet_ccc_fatal参数。 | PCM未启用。 |
+| UE11-p0542-005 | §3.6.18.7.3，PCM首错保留 | 后续原因不得覆盖/追加/累计；保留到CCC reset/reinit。 | PCM未启用；须区别事件计数与first-fatal记录。 |
+| UE11-p0543-001 | §3.6.18.7.3，PCM管理访问 | 软件可查询每CCC的ACTIVE/ERROR与fatal信息，并满足后续时序/非破坏要求。 | PCM未启用；完整接口及并发事件边界另验。 |
+| UE11-p0543-002 | §3.6.18.7.3，PCM可见性 | ERROR对软件可见不晚于内部原子转换；查询不清除记录。 | PCM未启用。 |
+| UE11-p0543-003 | §3.6.18.7.4，PCM重置条件 | 若提供外部reset，恢复实例不得保留任何旧PCM状态。 | PCM未启用；reset为可选平台行为，选用后完整清理。 |
+| UE11-p0544-001 | §3.6.18.8.4，PCM实例绑定 | 一个PCM-managed UET instance的全部流量由恰好一个CC及一个LB算法实例控制。 | PCM未启用；不能与旁路native算法同时修改同一CCC。 |
+| UE11-p0545-001 | §3.6.18.8.5，PCM YAML模式 | ev-table需要hw_algo/hw_config；per-packet禁止这些字段。 | PCM未启用；编译器schema按operation model验证。 |
+| UE11-p0546-001 | §3.6.18.9，PCM运行时跨页 | 每CCC最多一个活跃调用；事件批次只含一种触发上下文；TX/RX各自有序但可跳过，TIME可靠可迟到，EV请求可靠有序，telegram各来源有序，控制按发出顺序执行。 | PCM未启用；已读取跨页列表，未来需分别测试跳过、延迟、重入和不同事件类型无全序假设。 |
+| UE11-p0547-001 | §3.6.18.10，可选eBPF | 选择合规时仅有界循环、无递归、可验证指针、栈≤512B、调用深度≤8、tail call≤32。 | PCM/eBPF未启用；真实eBPF验证器集成不属于M8退出门槛。 |
+| UE11-p0548-001 | §3.7.2.1，TSS信任模型 | 负责安全处理的可信FEP部分形成信任根，不信任交换网络。 | M6缺失；软件仅建模此边界，硬件信任验证另属系统集成。 |
+| UE11-p0550-001 | §3.7.2.2.1，TSS安全义务 | 认证所使用的AAD/密文、加密全部payload、隔离域/客户端、安全保存密钥和参数；不把ECN/trim视为可信认证数据。 | M6缺失；需分别验证权限、字段保护范围与不泄露协议秘密，不能只调用AES-GCM通过整段。 |
+| UE11-p0552-001 | §3.7.2.4.2，未认证提示影响范围 | 被篡改密文/头最多影响拥塞或重放状态，不得影响数据放置或完整性/认证决定。 | M6缺失；需认证失败与trim/congestion组合负向测试。 |
+| UE11-p0553-001 | §3.7.2.5，TSS初始化门限 | 发送到TSS前配置SDKDB、全局参数如Rekey_Mask及密码底层。 | M6缺失；未来禁止未初始化发送，不能惰性填默认密钥。 |
+| UE11-p0556-001 | §3.7.3，服务混合 | 同时支持TSS/非TSS服务；其他非UE流量旁路给上层。 | M6缺失；需按服务安全配置分流而非每端口单一加密开关。 |
+| UE11-p0559-001 | §3.7.4，域标识唯一 | 域内SSI或IP唯一；可达网络中SDI唯一。 | M6/M7缺失；JobID与SDI不可互相代替，需管理冲突检查。 |
+| UE11-p0560-001 | §3.7.4，epoch与重入 | TSC不能保存时SDME协调epoch或key变化；同关联epoch单调，新key安装重置epoch。 | M6缺失；需断电/重入与key rotation联合测试。 |
+| UE11-p0560-002 | §3.7.4.1，加入域 | SDME分配SSI和参数，确保所有FEP参数当前后才允许发送。 | M6缺失；可调度SDME模型需有参数安装/ready门限。 |
+| UE11-p0560-003 | §3.7.4.3，nonce不复用 | reboot后保存nonce状态，或重新经SDME更新epoch。 | M6缺失；禁止重新使用旧seed/计数器冒充安全恢复。 |
+| UE11-p0561-001 | §3.7.5，所有KDF轮换 | 所有KDF模式支持显式key rotation；cluster还可用隐式counter重key。 | M6缺失；不能只实现单一KDF或把rekey等同于rotation。 |
+
+## 第 561～580 个候选
+
+本批属于M6已选TSS范围，当前均缺实现。发送调用次数上限、接收伪造尝试上限、
+AN双key过渡和epoch/TSC不复用需要分别计数。重传同一PDS PSN也必须取得新的安全计数器；
+不能直接重发缓存的TSS密文来绕过发送状态。密码运算选OpenSSL EVP，生命周期仍由协议实现。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0561-002 | §3.7.5，发送调用上限 | 发送端跟踪key invocation，不超上限；rotation开始时重置计数。 | M6缺失；需上限前/等于/超过与在途包测试。 |
+| UE11-p0561-003 | §3.7.5，接收调用上限 | counter≥invokeFatalThreshold时丢弃，并向SDME报告该SDI超限。 | M6缺失；须与后文发送counter溢出规则分别实现。 |
+| UE11-p0561-004 | §3.7.5.1，rotation参数 | 更新SDK，可更新IVMask；direct模式必须更新IVMask。 | M6缺失。 |
+| UE11-p0561-005 | §3.7.5.1，AN key槽 | 接收端每SD保存多个AN key；切换关联时counter/epoch归零。 | M6缺失；新key关联允许归零但旧关联不能重用nonce。 |
+| UE11-p0562-001 | §3.7.5.1，rotation步骤总则 | SDME可任意时刻发起，按后续规定步骤执行。 | M6缺失；warn阈值是可选触发，流程本身必选。 |
+| UE11-p0562-002 | §3.7.5.1，rotation五阶段 | 通知新AN/epoch0；所有SDKDB安装并更新TxAN/Rx双AN；新发改用新AN且首包counter0；寿命内停止接收旧AN并静默丢弃计数，清auth-fail计数；完成收敛。 | M6缺失；需不同FEP安装延迟、过渡期丢失/重复与旧AN迟到测试。 |
+| UE11-p0563-001 | §3.7.5.3，默认KDF | 必须支持counter-mode AES-CMAC-256 PRF；其他算法可扩展。 | M6缺失；不能用HMAC或HKDF替代必选默认构造。 |
+| UE11-p0563-002 | §3.7.5.4，AEAD | 使用AEAD，AAD认证不加密、payload加密并携带ICV。 | M6缺失；字段覆盖按正式封装，不按C++结构体内存布局。 |
+| UE11-p0564-001 | §3.7.5.4，默认cipher | AES-GCM-256、16字节ICV，算法由SDKDB选择。 | M6缺失；官方/独立向量及负向tag验证需分别提供。 |
+| UE11-p0564-002 | §3.7.5.4，认证失败门限 | authFail计数超过阈值后整个域丢弃所有包，并向SDME发事件。 | M6缺失；不是只丢弃本次坏包或单个PDC。 |
+| UE11-p0564-003 | §3.7.5.4，cipher key来源 | 输入满足NIST SP800-108的cryptographic key要求。 | M6缺失；需区分确定性测试向量与运行key生成/配置。 |
+| UE11-p0564-004 | §3.7.5.5，nonce唯一 | 同SDK不得重用IV，由epoch/counter构造保证。 | M6缺失；域、SSI、AN及发送重传都需纳入作用域。 |
+| UE11-p0564-005 | §3.7.5.5，IV隐藏 | 送入cipher前，packet IV必须与IVMask XOR。 | M6缺失；需独立字节向量检查。 |
+| UE11-p0564-006 | §3.7.5.5，重启恢复 | AES-GCM采用deterministic IV；reboot/reinit后经SDME更新epoch，或保存完整状态并证明无复用。 | M6缺失；随机重置PSN不是此项证据。 |
+| UE11-p0564-007 | §3.7.5.5，direct IVMask | SDME在rotation时配置，必须为密码学随机值并符合所述随机源要求。 | M6缺失；软件模型须明确随机源/可重放测试注入，不冒充TRNG硬件认证。 |
+| UE11-p0564-008 | §3.7.5.6，TSC单调 | 每个发送包TSC严格增加，不发送重复TSC。 | M6缺失；PDS同PSN重传依然算新的安全发送。 |
+| UE11-p0564-009 | §3.7.5.6，TSC布局 | 64位=16位epoch拼48位counter，每包递增；epoch启动/变化时counter初始化0。 | M6缺失；需独立端序、最大值与首包向量。 |
+| UE11-p0565-001 | §3.7.5.6，发送溢出 | counter回绕或超过fatal阈值时域内发送丢弃，每次增加OutInvokeFail。 | M6缺失；不得回绕后继续加密。 |
+| UE11-p0565-002 | §3.7.6，SDKDB范围 | SDME配置连续SDI范围与base/max；base可置于规定24位范围；lookup失败丢弃计数；SDI0不可分配。 | M6/M7缺失；须验证范围端点、容量协商及失败统计。 |
+| UE11-p0566-001 | §3.7.6，域封装一致 | 一个安全域按SDKDB encap-type使用统一packet encapsulation。 | M6缺失；native/UDP/UFH不能在同域默默混用。 |
+
+## 第 581～600 个候选
+
+M6按路线图覆盖direct、cluster和client-server三个模式；规范本身把direct列MUST、
+其余列SHOULD，不能混淆规范最低要求与本项目选择。KDF采用352位派生结果，包含
+96位IVMask和256位SDK，不是通用HKDF的替代命名。server IPv6 context的简写未列
+cluster格式的前导32位零，与“继承cluster构造”和块对齐文字需用正式向量交叉核对。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0566-002 | §3.7.7，模式/SSI | direct+IPv6必须显式SSI；其他模式可在满足唯一性时使用SSI/IP。 | M6缺失；不能直接截断IPv6源地址构造IV。 |
+| UE11-p0566-003 | §3.7.7，模式能力与错误 | direct必选，cluster/client-server建议；kdfModes如实公布；packet带SSI而配置不用时丢弃计数。 | M6缺失；模式能力、发送配置和接收拒绝均须独立验收。 |
+| UE11-p0567-001 | §3.7.8，KDF输入块 | IPv4/显式SSI使用单块，无SSI的IPv6使用双块；client-server涉及两类KDF。 | M6缺失；不可只验证单块CMAC。 |
+| UE11-p0567-002 | §3.7.8，默认构造 | 每域选择kdf-algo；默认按SP800-108及表3-134实现AES-CMAC-256。 | M6缺失；其他构造为实现特有扩展。 |
+| UE11-p0567-003 | §3.7.8，跨页PRF | SP800-108 §4.1 counter mode，以CMAC为PRF，后页指定AES-256。 | M6缺失。 |
+| UE11-p0568-001 | §3.7.8，CMAC底层 | CMAC按SP800-38B使用AES-256，并支持表3-134输入参数。 | M6缺失；调用库底层仍需自行构造标准输入。 |
+| UE11-p0568-002 | 表3-134，KDF参数 | L=352/16位，i=8位/BE且放fixed data前，label16位，context80/208位，3次PRF，Ki/SDK256位、IVMask96位。 | M6缺失；表中IVMask128指最后PRF块，仅取96有效位，不能把全部128输出当mask。 |
+| UE11-p0568-003 | §3.7.8，fixed data | label/0x00/context/BE长度352，label/context按mode/SSI构造。 | M6缺失；需完整字节输入向量而非只比最终roundtrip。 |
+| UE11-p0568-004 | §3.7.8，三次迭代 | i从1逐次增加；第三次仅取12字节作为IVMask。 | M6缺失；输出分配顺序结合正式示例验证。 |
+| UE11-p0569-001 | §3.7.8，label/对齐 | CMAC AES-256，输入为块大小对齐，16位label是按模式的ASCII文字。 | M6缺失；U1/U2及padding不得按主机端序拼装。 |
+| UE11-p0569-002 | §3.7.8，自动rekey条件 | 仅cluster可从TSC按mask/逻辑右移抽0～32位，零抽取初始化0；所有域成员mask/shift一致。 | M6缺失；rekey与AN轮换独立。 |
+| UE11-p0569-003 | §3.7.8.1，cluster单块 | label U1(5531)，context80位=epoch/Rekey/SSI或IPv4源地址。 | M6缺失；字段均独立golden验证。 |
+| UE11-p0570-001 | §3.7.8.2，cluster双块 | 无SSI的IPv6 context208位=32位零/epoch/Rekey/IPv6源地址。 | M6缺失；必须保留前导零及完整128位地址。 |
+| UE11-p0571-001 | §3.7.8.3，server构造 | 继承cluster结构，label U2(5532)、使用目的SSI/IP，Rekey位置为零。 | M6缺失；IPv6简写padding与正式向量交叉核对后再实现。 |
+| UE11-p0573-001 | §3.7.10，可选epoch拒绝 | 若启用，按wrapSubtract及rxMaxEpochLifetime丢弃过旧epoch并计InLatePkts。 | M6缺失；读取了跨页窗口说明，不能用普通有符号比较处理16位回绕。 |
+| UE11-p0574-001 | §3.7.11，Unified Local TSS | Unified Local支持TSS时必须支持UFH_32普通TSS模式。 | M6/M8缺失；IP-only AES-GCM路径不构成通过。 |
+| UE11-p0579-001 | 表3-135，TSS头 | type=UET_TSS，SP/AN与24位SDI、可选32位SSI、64位TSC按正式字段编码。 | M6缺失；保留位发送/接收规则另依通用要求。 |
+| UE11-p0579-002 | §3.7.11，单包约束 | entropy/TSS/PDS/SES/payload/ICV全部在一个transport Payload MTU内。 | M6缺失；分片器必须扣除安全开销，不能先按明文MTU切片后越界。 |
+| UE11-p0580-001 | §3.7.11.1.1，AAD/Coff | AAD含所有安全相关字段，如用于KDF的源IP；建议Coff仅暴露TSS头。 | M6缺失；可变IP字段与PDS可变提示需按规定屏蔽/覆盖。 |
+| UE11-p0580-002 | 表3-136，IV错误矩阵 | SSI-mode/SP及IP类型组合不合法时丢弃并计InInvalid；合法IV按模式XOR mask。 | M6缺失；已读取8组IPv4/IPv6组合，direct IPv6无SSI禁止，其他组合需独立向量。 |
+
+## 第 601～620 个候选
+
+TSS正常认证失败与截短包的处理不同：后者按§3.7.11.3明确不增加auth-fail计数。
+TSS计数器初始化为零、按位宽回绕，并向SDME提供64位值；不能沿用其他层选择的
+计数器溢出策略。第4章switch trimming与FEP受限接收也分别验收。
+
+| 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
+|---|---|---|---|
+| UE11-p0581-001 | §3.7.11.1.3，ICV | 对AAD/密文计算16字节GCM ICV并附尾；正常认证失败丢弃计数，trim提示按受限规则。 | M6缺失；回包/内存交付不得发生在认证成功前。 |
+| UE11-p0581-002 | §3.7.11.2，TSS发送列表 | 非TSS旁路原样并计数；SDKDB缺失丢弃；按三模式派生key，设置type/SDI/AN/SSI/SP与epoch/counter；溢出/fatal丢弃计数。 | M6缺失；长段拆分为配置、构造、计数和失败门限多项，不能以加密roundtrip通过。 |
+| UE11-p0582-001 | §3.7.11.2，发送失败保护 | warn建议通知；按Aoff/Coff加密并计OutAuthPkts；任何不能安全发送的条件均丢弃计OutErrored，禁止明文泄出。 | M6缺失；需错误key/offset/SDI和发送队列失败负向测试。 |
+| UE11-p0582-002 | §3.7.11.3，接收分流/AN | 非TSS原样给PDS且rx_auth=false并计旁路；按AN/SDI查SDKDB，缺失丢弃；RxActiveAN=00全拒、01拒AN0、10拒AN1、11双接收。 | M6缺失；位序严格按原文及SDKDB定义交叉验证，不自行假定bit0等于AN0。 |
+| UE11-p0582-003 | §3.7.11.3，无效关联 | AN被拒绝时计InInvalidSa，并向PDS发lastAN错误指示。 | M6缺失；指示与网络响应不是同一动作。 |
+| UE11-p0582-004 | §3.7.11.3，SDKDB校验 | encap、Aoff/Coff、key或SSI/SP不匹配均丢弃并计InInvalid。 | M6缺失；不能在错误参数下尝试普通明文解析。 |
+| UE11-p0583-001 | §3.7.11.3，认证交付 | 按模式及packet epoch派生；检查可选epoch窗口；构造IV/AAD并认证；成功rx_auth=true计数，失败计数/域阈值通知；rotation后重置auth-fail；trim可受限解密或丢弃且不计auth-fail；旁路rx_auth=false。 | M6缺失；普通auth-fail、trim、bypass和成功四条路径分别验收，计数不重复。 |
+| UE11-p0584-001 | §3.7.12，TSS统计 | 表3-137必选计数器从0开始按位宽wrap，提供管理访问，给SDME统一64位。 | M6/M7缺失；需回绕与域/端口作用域测试。 |
+| UE11-p0584-002 | 表3-137，统计全集 | InAuth/AuthFail/Invalid/InvalidSa、可选InLate、OutInvokeFail/OutAuth、端口In/OutErrored与加密旁路、SES binding failure分别计数。 | M6/M7缺失；已读取全表，optional epoch功能一旦启用其计数也必选。 |
+| UE11-p0591-001 | §4.1，switch trim准入 | 只对合法IP且buffer admission失败的包执行trim，先完成适用L2/L3/egress校验。 | Fabric/codec已验证IP格式与出口准入；真实FCS尚未建模，M7另验。 |
+| UE11-p0591-002 | §4.1，DSCP类别 | 仅TRIMMABLE可截短，两类至少各有码点，数值由operator选。 | 当前可配置单trimmable/trimmed及可选last-hop，错误码点拒绝与非trimmable不截短已有回归。 |
+| UE11-p0591-003 | §4.1，DSCP映射 | 每个支持trim的switch为每个所选trimmable配置对应trimmed，可多对一。 | 当前选择一组映射，所有相关FEP/出口共享；多trimmable集合尚未启用。 |
+| UE11-p0591-004 | §4.1，MIN_TRIM_SIZE | 网络共同配置；正常截短保留量≥下界，并能识别协议/tunnel/PDS序号标识。 | 当前24字节覆盖已实现明文格式；TSS/CC扩展/tunnel启用前需按完整头链重算。 |
+| UE11-p0591-005 | §4.1，截短与小包 | 可截短且准入失败时执行trim，结果不增长；原IP payload小于下界时可仅换DSCP或丢弃。 | 当前选择小包只改DSCP，长度/内存分配/重准入已有测试。 |
+| UE11-p0592-001 | §4.1，改DSCP | 截短后标为对应TRIMMED码点，使端点/下游识别。 | 普通/last-hop两种输出及链路PCAP已有覆盖。 |
+| UE11-p0592-002 | §4.1，合法IP/FCS | 更新IP长度/IPv4 checksum，并保持合法Ethernet FCS。 | IP部分已测试；IPacketPort帧当前省略FCS，M7链路完整性模型仍需补齐。 |
+| UE11-p0592-003 | §4.1，重新准入 | 截短结果按新DSCP当新包准入对应队列，失败执行正常overflow处理。 | Fabric重分类、独立队列容量及通知队列也可丢失已有回归/实验。 |
+| UE11-p0595-001 | §4.1.3，外部trim表示 | 交给FEP或switch时必须保留TRIMMED DSCP，IPv4 checksum有效。 | 多hop捕获、codec边界和checksum已有测试；其他封装未实现。 |
+| UE11-p0595-002 | §4.1.3，transport识别 | 启用trim时上层能由保留头识别原包，MIN_TRIM_SIZE覆盖必要信息。 | RUD/ROD依peer/PDC/PSN生成NACK且不交付残留SES；RUDI/RODL/TSS仍缺。 |
+| UE11-p0595-003 | §4.1.3，UET头链保留 | 保留entropy、所选tunnel头及完整PDS req/response，含PSN/PDCID。 | 当前明文IP路径部分完成；未启用头型必须在能力打开前补保留长度与恢复验证。 |
+
+复核进度为上述 620 个候选的分类与义务拆分；其余 109 个候选、表格/算法的额外
 义务和每项最终证据仍待完成。此账本与 `requirements.json` 的 51 个开发任务是不同
 粒度的记录，两个数量都不能解释为完整 MUST 总数。

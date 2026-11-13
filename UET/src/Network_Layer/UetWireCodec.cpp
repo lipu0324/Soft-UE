@@ -345,7 +345,8 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
         encoded_bytes[ip_begin+10]=checksum>>8; encoded_bytes[ip_begin+11]=checksum&255;
     }
     if (network_options.udp) {
-        put(encoded_bytes,network_options.entropy,2); put(encoded_bytes,49150,2); put(encoded_bytes,ip_length-ip_size,2); put(encoded_bytes,0,2);
+        put(encoded_bytes,network_options.entropy,2); put(encoded_bytes,network_options.udp_destination_port,2);
+        put(encoded_bytes,ip_length-ip_size,2); put(encoded_bytes,0,2);
     } else { put(encoded_bytes,network_options.entropy,2); put(encoded_bytes,0,2); }
     encoded_bytes.insert(encoded_bytes.end(),body.begin(),body.end());
     if (network_options.crc) {
@@ -357,10 +358,11 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
 }
 
 DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol,
-                                  std::optional<TrimmingOptions> trimming) {
+                                  std::optional<TrimmingOptions> trimming,uint16_t udp_destination_port) {
     if (!bytes || size<34) throw std::invalid_argument("truncated Ethernet/IP frame");
     DecodedPacket result;
     auto& network_options=result.network; network_options.crc=crc_enabled; network_options.native_ip_protocol=native_ip_protocol;
+    network_options.udp_destination_port=udp_destination_port;
     std::copy_n(bytes,6,network_options.destination.mac.begin()); std::copy_n(bytes+6,6,network_options.source.mac.begin());
     const auto ether=get(bytes+12,2);
     if (ether!=0x0800 && ether!=0x86dd) throw std::invalid_argument("unsupported EtherType");
@@ -391,7 +393,7 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         if (!network_options.hop_limit || size<start+transport+2)
             throw std::invalid_argument("truncated trimmed packet");
         network_options.entropy=get(bytes+start,2);
-        if (network_options.udp && get(bytes+start+2,2)!=49150)
+        if (network_options.udp && get(bytes+start+2,2)!=udp_destination_port)
             throw std::invalid_argument("unsupported trimmed UDP destination");
         auto& packet=result.packet;
         packet.trimmed=true;
@@ -421,7 +423,7 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         throw std::invalid_argument("invalid IP length or hop limit");
     network_options.entropy=get(bytes+start,2);
     if (network_options.udp) {
-        if (get(bytes+start+2,2)!=49150 || get(bytes+start+4,2)!=end-start)
+        if (get(bytes+start+2,2)!=udp_destination_port || get(bytes+start+4,2)!=end-start)
             throw std::invalid_argument("unsupported or invalid UET UDP header");
     } // Native entropy's final 16 bits are reserved and ignored (§3.5.10.1).
     if (crc_enabled) {
@@ -519,10 +521,10 @@ std::optional<uint8_t> UetWireCodec::packet_dscp(const std::vector<uint8_t>& fra
 
 namespace UET::NetworkLayer {
 bool UetWireCodec::stamp_service_time(std::vector<uint8_t>& frame,uint64_t departure_ns,uint64_t arrival_ns,
-                                     bool crc_enabled,uint8_t native_ip_protocol) {
+                                     bool crc_enabled,uint8_t native_ip_protocol,uint16_t udp_destination_port) {
     if (departure_ns<arrival_ns) return false;
     DecodedPacket decoded;
-    try { decoded=decode(frame.data(),frame.size(),crc_enabled,native_ip_protocol); }
+    try { decoded=decode(frame.data(),frame.size(),crc_enabled,native_ip_protocol,{},udp_destination_port); }
     catch (const std::invalid_argument&) { return false; }
     if (decoded.packet.PDS_type!=RUOD_ack_header || decoded.packet.PDS_header.RUOD_ack_header.type!=ACK_CC ||
         decoded.packet.congestion_ack.type!=0) return false;

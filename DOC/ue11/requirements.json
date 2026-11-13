@@ -56,14 +56,15 @@
         "uet_wire_test",
         "reference_wire_comparison",
         "ses_reserved_fields_test",
-        "pds_reserved_fields_test"
+        "pds_reserved_fields_test",
+        "udp_encapsulation_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "IPv4/IPv6/native/UDP and configurable native protocol tested; extension headers remain unsupported. Implemented SES formats ignore reserved receive bits after integrity validation; unimplemented formats remain outside this coverage. Implemented PDS reserved bits are ignored after integrity validation; the full CP type is preserved and unsupported types rejected before allocation (PDS-RESERVED-FIELDS.md)."
+      "evidence_note": "IPv4/IPv6 native/UDP frames, configurable native protocol field, entropy and reserved fields tested. UDP destination now defaults to Table 3-35 port 4793 with the full 16-bit setting, wrong-port drops, trimming and MAC service-time stamps. Experimental native-IP default, UFH/TSS/tunnels and provider FI_ADDR_UET remain open."
     },
     {
       "id": "WIRE-CRC",
@@ -105,14 +106,16 @@
         "pdc_ack_test",
         "peer_sequence_window_test",
         "pds_mpr_test",
-        "pds_reserved_fields_test"
+        "pds_reserved_fields_test",
+        "selective_acknowledgment_test",
+        "ordered_acknowledgment_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Selective/cumulative ACK cleanup and wrap plus peer MPR decoding, stale/future CACK rejection, independent local receive capacity and data/retry admission tested. Complete SACK/default-response/control acceptance remains open; see PDS-WINDOWS.md."
+      "evidence_note": "Selective/cumulative ACK cleanup, strict CACK semantic inference, SACK, idle Clear, peer MPR and asynchronous first ROD ACK order tested. READ/fetch response contracts, remaining control formats and optional coalescing remain open; see PDS-SACK.md and ROD-ACK-ORDER.md."
     },
     {
       "id": "PDS-ROD",
@@ -126,14 +129,20 @@
         "pds_feedback_test",
         "pds_probe_test",
         "negative_acknowledgment_test",
-        "pds_reserved_fields_test"
+        "pds_reserved_fields_test",
+        "ordered_acknowledgment_test",
+        "pds_traffic_class_test",
+        "initial_sequence_test",
+        "syn_range_test",
+        "receive_admission_test",
+        "pds_invalid_type_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Missing-middle go-back-N, EV/CE/RETX feedback, fixed control entropy, Probe SACK and close-loss tested; asynchronous response ordering and complete control/error combinations remain under review."
+      "evidence_note": "GoBackN, EV/CE/RETX, Probe/Close, initial PSN/SYN bounds, SES admission, first asynchronous ACK order, held-cache query barriers, historical replay and non-trimmable request-class numbered controls tested. READ response ordering, TSS and complete control/error combinations remain open."
     },
     {
       "id": "PDS-RTO",

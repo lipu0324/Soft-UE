@@ -54,6 +54,8 @@ def main():
                dict(base, nack_delays_ns=[0, 0, 0, 8_000_000_001]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 3, "up": False}]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 2, "up": "false"}])]
+    for port in [-1, 65536, True, 1.5]:
+        invalid.append(dict(base, wire={"udp": True, "udp_destination_port": port}))
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
                      {"trimming": True}, {"scheduling_quantum_bytes": False}, {"mtu": 128}]:
         bad_link = copy.deepcopy(base)
@@ -178,6 +180,15 @@ def main():
 
         leaf = yaml.safe_load((root / "examples" / "simulation" / "leaf-spine.yaml").read_text())
         run(leaf, "ipv6-udp")
+        for ipv6 in [False, True]:
+            custom_udp = dict(base, wire={"ipv6": ipv6, "udp": True, "udp_destination_port": 65535})
+            port_output, _ = run(custom_udp, f"custom-udp-port-ipv6-{ipv6}")
+            frames = read_pcap(port_output / "packets.pcap")
+            check(frames, "custom UDP experiment produced no frames")
+            for _, frame in frames:
+                udp_offset = 14 + (40 if ipv6 else 20)
+                check(struct.unpack_from(">H", frame, udp_offset + 2)[0] == 65535,
+                      "configured UDP destination missing from independent PCAP bytes")
         job_zero = dict(base, jobs=[0], operations=[dict(operation, job=0) for operation in base["operations"]])
         run(job_zero, "job-zero")
         lost = {"version": 1, "hosts": [1, 2], "duration_ns": 100_000_000,
