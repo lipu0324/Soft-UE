@@ -19,8 +19,8 @@ PDStoNET_pkt trim_request() {
     packet.SESpkt.payload.resize(1024,99);
     return packet;
 }
-WireOptions addresses(bool ipv6=false,bool udp=false) {
-    WireOptions options; options.ipv6=ipv6; options.udp=udp; options.ecn=2; options.entropy=0x1234;
+WireOptions addresses(bool ipv6=false,bool udp=true) {
+    WireOptions options; options.ipv6=ipv6; options.udp=udp; options.native_ip_protocol=253; options.ecn=2; options.entropy=0x1234;
     if (ipv6) { options.source.ip[0]=options.destination.ip[0]=0xfd; }
     options.source.ip[ipv6?15:3]=1; options.destination.ip[ipv6?15:3]=2;
     return options;
@@ -32,7 +32,7 @@ public:
     size_t trimmed=0;
     SendResult try_send(const Frame& frame) override {
         if (enabled_) {
-            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
             if (packet.PDS_type==RUOD_req_header && packet.PDS_header.RUOD_req_header.flags.syn) {
                 enabled_=false; ++trimmed;
                 auto notification=frame; CHECK(UetWireCodec::trim_packet(notification.bytes,options_));
@@ -51,7 +51,7 @@ public:
     explicit HoldAcknowledgments(IPacketPort& lower):lower_(lower) {}
     std::vector<Frame> held;
     SendResult try_send(const Frame& frame) override {
-        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
         if (holding_ && packet.PDS_type==RUOD_ack_header) { held.push_back(frame); return SendResult::Accepted; }
         return lower_.try_send(frame);
     }
@@ -84,7 +84,7 @@ void wire_boundaries() {
         CHECK(decoded.packet.PDS_header.RUOD_req_header.spdcid==17 && decoded.packet.PDS_header.RUOD_req_header.dpdcid==512);
         CHECK(decoded.packet.SESpkt.payload.empty() && decoded.nominal_packet_size==0);
         check_throws<std::invalid_argument>([&] { UetWireCodec::encode(decoded.packet,options); });
-        check_throws<std::invalid_argument>([&] { UetWireCodec::decode(truncated.data(),truncated.size(),crc); });
+        check_throws<std::invalid_argument>([&] { UetWireCodec::decode(truncated.data(),truncated.size(),crc,253); });
         CHECK(!UetWireCodec::trim_packet(truncated,trimming)); // Already trimmed is not trimmed a second time.
         for (size_t length=0;length<pds_begin+12;++length)
             check_throws<std::invalid_argument>([&] { UetWireCodec::decode(truncated.data(),length,crc,253,trimming); });
@@ -114,7 +114,7 @@ void trimmed_syn_cannot_create_or_deliver() {
     Endpoint endpoint(2,host,loop,trace); endpoint.memory().add_job(1);
     const auto region=endpoint.memory().register_region(1,1,1024,7);
     std::vector<PDStoNET_pkt> replies;
-    source.set_receiver([&](Frame frame) { replies.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet); });
+    source.set_receiver([&](Frame frame) { replies.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet); });
     auto request=trim_request(); request.SESpkt.bth_header.Standard_Header.match_bits=region.key;
     request.PDS_header.RUOD_req_header.flags.syn=1; request.PDS_header.RUOD_req_header.psn_off=0;
     const auto send_trimmed=[&](PDStoNET_pkt packet) {
@@ -154,7 +154,7 @@ void trimmed_ack_cannot_complete_live_operation() {
     Completion completion{}; CHECK(!source.poll_completion(completion) && !delayed.held.empty());
     CHECK(source_host.manager().getPDSStatus().open_cnt==1 && source.transport_pending(operation));
     auto forged_receipt=delayed.held.front();
-    auto decoded=UetWireCodec::decode(forged_receipt.bytes.data(),forged_receipt.bytes.size());
+    auto decoded=UetWireCodec::decode(forged_receipt.bytes.data(),forged_receipt.bytes.size(),true,253);
     // Fault injection: a control packet incorrectly assigned to TRIMMABLE
     // may also be truncated. The preserved ACK_PSN/CACK must not retire data.
     decoded.network.dscp=trimming.trimmable_dscp;

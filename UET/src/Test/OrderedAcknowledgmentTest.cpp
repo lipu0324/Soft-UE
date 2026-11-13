@@ -68,7 +68,7 @@ void deferred_send_orders_following_write_acks(bool congestion,bool ipv6,bool ud
     EventLoop loop; Trace trace(loop); Fabric fabric(loop,trace,42);
     auto& forward=fabric.add_host(1); auto& reverse=fabric.add_host(2);
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
-    WireOptions network; network.ipv6=ipv6; network.udp=udp;
+    WireOptions network; network.ipv6=ipv6; network.udp=udp; network.native_ip_protocol=253;
     PdsHost source_host(1,loop,trace,forward,PdsHost::WireFormat::Uet11,network);
     PdsHost target_host(2,loop,trace,reverse,PdsHost::WireFormat::Uet11,network);
     source_host.configure_retransmission_timeout(10*kMillisecond);
@@ -84,7 +84,7 @@ void deferred_send_orders_following_write_acks(bool congestion,bool ipv6,bool ud
     std::vector<unsigned> request_opcodes;
     std::optional<uint16_t> current_message;
     fabric.set_capture([&](Time,const Frame& frame) {
-        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
         if (frame.source==1 && packet.PDS_type==RUOD_req_header) {
             const auto local_context=packet.PDS_header.RUOD_req_header.spdcid;
             if (!data_context) data_context=local_context;

@@ -206,11 +206,11 @@ void ordered_retries_preserve_sequence(bool wrapping) {
 }
 void acknowledged_unsent_loss_restores_accounting() {
     EventLoop loop; Trace trace(loop); Services services{loop,loop,[]{}};
-    auto config=UET::CMS::NsccConfig{}; config.nominal_mtu=104; config.initial_maximum_window=4*104;
+    auto config=UET::CMS::NsccConfig{}; config.nominal_mtu=108; config.initial_maximum_window=4*108;
     UET::CMS::NsccEngine congestion(config,loop,[]{},{},&trace); services.congestion_control=&congestion;
     I_PDC sender(&services); initialize(sender,ROD,1000,4);
     const UET::CMS::Connection connection{0,1,1000,true};
-    CHECK(congestion.state(connection).inflight_bytes==416);
+    CHECK(congestion.state(connection).inflight_bytes==432);
     // Naming the last packet still begins recovery at Expected_PSN=1000.
     // The other originals may be accepted before their replacements leave.
     auto packet=nack(UET_TRIMMED,1003); packet.PDS_header.nack_header.payload=1000;
@@ -221,9 +221,9 @@ void acknowledged_unsent_loss_restores_accounting() {
     CHECK(sender.tx_pkt_map.at(1001).congestion_debit_waiting_for_retry);
     auto response=acknowledgment(false); response.PDS_header.RUOD_ack_header.type=ACK_CC;
     response.PDS_header.RUOD_ack_header.cack_psn=1003;
-    response.congestion_ack.received_byte_units=2; // ceil(416 / 256).
+    response.congestion_ack.received_byte_units=2; // ceil(432 / 256).
     sender.rxAck(&response);
-    CHECK(congestion.state(connection).inflight_bytes==416-512);
+    CHECK(congestion.state(connection).inflight_bytes==432-512);
     for (const auto& metadata:sender.tx_pkt_map) CHECK(!metadata.second.congestion_debit_waiting_for_retry);
     const auto before=congestion.state(connection).inflight_bytes;
     sender.rxAck(&response); CHECK(congestion.state(connection).inflight_bytes==before);

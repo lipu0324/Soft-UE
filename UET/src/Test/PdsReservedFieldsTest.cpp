@@ -56,7 +56,7 @@ std::vector<PDStoNET_pkt> packets() {
 }
 void reserved_fields() {
     for (const bool ipv6:{false,true}) for (const bool udp:{false,true}) for (const bool crc:{false,true}) {
-        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.crc=crc;
+        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.native_ip_protocol=253; network.crc=crc;
         const size_t pds=14+(ipv6?40:20)+(udp?8:4);
         for (const auto& packet:packets()) {
             const auto canonical=UetWireCodec::encode(packet,network); auto changed=canonical;
@@ -77,9 +77,9 @@ void reserved_fields() {
             } else {
                 changed[pds+1]|=0x7f; changed[pds+2]=changed[pds+3]=0xff;
             }
-            if (crc) check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),true); });
+            if (crc) check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),true,253); });
             repair_crc(changed,network);
-            const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),crc).packet;
+            const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),crc,253).packet;
             CHECK(UetWireCodec::encode(decoded,network)==canonical);
         }
     }
@@ -89,7 +89,7 @@ void reserved_fields() {
     for (uint8_t type=0;type<4;++type) {
         control.PDS_header.RUOD_cp_header.flags.pdc_type=type;
         const auto wire=UetWireCodec::encode(control,{});
-        CHECK(UetWireCodec::decode(wire.data(),wire.size()).packet.PDS_header.RUOD_cp_header.flags.pdc_type==type);
+        CHECK(UetWireCodec::decode(wire.data(),wire.size(),true,253).packet.PDS_header.RUOD_cp_header.flags.pdc_type==type);
         if (type<2) {
             const auto legacy=PdsPacketCodec::encode(control);
             CHECK(PdsPacketCodec::decode(legacy.data(),legacy.size()).PDS_header.RUOD_cp_header.flags.pdc_type==type);
@@ -106,7 +106,7 @@ void reserved_ack_request_cannot_bind_peer() {
     PDStoNET_pkt original{};
     fabric.set_capture([&](Time,const Frame& frame) {
         if (frame.source==1) {
-            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
             if (packet.PDS_type==RUOD_req_header) original=packet;
         }
     });

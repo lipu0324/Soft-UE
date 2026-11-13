@@ -16,6 +16,8 @@ python3 scripts/run_simulation.py examples/simulation/nscc-incast-trim.yaml \
 
 | YAML 字段 | 含义与单位 |
 |---|---|
+| `wire.udp`、`wire.udp_destination_port` | 默认使用UDP/4793；目的端口范围0～65535。 |
+| `wire.native_ip_protocol` | `wire.udp: false`时必填，范围0～255；没有隐含的实验协议号。详见[默认封装](NETWORK-DEFAULTS.md)。 |
 | `payload_mtu` | SES 单包 payload 上限，默认 1024 字节，范围 1～8192；不等于完整链路帧 MTU。 |
 | `rto_ns` | 初始重传超时，0～8000000000 ns，默认 1000000；零值表示立即到期。NACK 与 RTO 的退避区别见 [重试计时](RETRY-TIMING.md)。 |
 | `max_packet_retries` | 0～14 为共同 NACK/RTO 重试上限，15 为无限，默认5；不计初次发送。 |
@@ -51,7 +53,7 @@ python3 scripts/run_simulation.py examples/simulation/nscc-incast-trim.yaml \
 
 PCAP 使用 Ethernet 链路类型和纳秒时间戳。两份 PCAP 不能混作同一个观测点：
 只检查 `packets.pcap` 无法证明链路上发生了 ECN 或真实截短。
-例如默认 IPv4/native trim 帧只保留 24 字节 IP payload，共 58 字节；IP 长度和
+例如默认 IPv4/UDP trim 帧只保留 24 字节 IP payload，共 58 字节；IP 长度和
 IPv4 校验和已修复，保留的 entropy/PDS/SES 前缀与原包一致，UDP 长度/checksum
 如存在则不修改。接收端继续使用受限 trim 解析器，而不是把通知当完整数据。
 

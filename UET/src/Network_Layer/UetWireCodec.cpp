@@ -325,6 +325,9 @@ uint32_t UetWireCodec::crc32c(const uint8_t* bytes, size_t length) {
 std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const WireOptions& network_options) {
     if (packet.trimmed) throw std::invalid_argument("trimmed packets cannot be reconstituted as complete UET packets");
     if (network_options.dscp>63 || network_options.ecn>3 || !network_options.hop_limit) throw std::invalid_argument("invalid network fields");
+    if (!network_options.udp && !network_options.native_ip_protocol)
+        throw std::invalid_argument("native UET requires an explicit IP protocol number");
+    const uint8_t ip_protocol=network_options.udp?17:*network_options.native_ip_protocol;
     const auto body=encode_pds(packet);
     const size_t ip_size=network_options.ipv6?40:20, transport=network_options.udp?8:4;
     const size_t ip_length=ip_size+transport+body.size()+(network_options.crc?4:0);
@@ -334,11 +337,11 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
     const size_t ip_begin=encoded_bytes.size();
     if (network_options.ipv6) {
         put(encoded_bytes,(6u<<28)|((uint32_t{network_options.dscp}<<2|network_options.ecn)<<20),4);
-        put(encoded_bytes,ip_length-40,2); put(encoded_bytes,network_options.udp?17:network_options.native_ip_protocol,1); put(encoded_bytes,network_options.hop_limit,1);
+        put(encoded_bytes,ip_length-40,2); put(encoded_bytes,ip_protocol,1); put(encoded_bytes,network_options.hop_limit,1);
         encoded_bytes.insert(encoded_bytes.end(),network_options.source.ip.begin(),network_options.source.ip.end()); encoded_bytes.insert(encoded_bytes.end(),network_options.destination.ip.begin(),network_options.destination.ip.end());
     } else {
         put(encoded_bytes,0x45,1); put(encoded_bytes,(network_options.dscp<<2)|network_options.ecn,1); put(encoded_bytes,ip_length,2);
-        put(encoded_bytes,0,2); put(encoded_bytes,0x4000,2); put(encoded_bytes,network_options.hop_limit,1); put(encoded_bytes,network_options.udp?17:network_options.native_ip_protocol,1); put(encoded_bytes,0,2);
+        put(encoded_bytes,0,2); put(encoded_bytes,0x4000,2); put(encoded_bytes,network_options.hop_limit,1); put(encoded_bytes,ip_protocol,1); put(encoded_bytes,0,2);
         encoded_bytes.insert(encoded_bytes.end(),network_options.source.ip.begin(),network_options.source.ip.begin()+4);
         encoded_bytes.insert(encoded_bytes.end(),network_options.destination.ip.begin(),network_options.destination.ip.begin()+4);
         const auto checksum=ip_checksum(encoded_bytes.data()+ip_begin);
@@ -357,8 +360,9 @@ std::vector<uint8_t> UetWireCodec::encode(const PDStoNET_pkt& packet, const Wire
     return encoded_bytes;
 }
 
-DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled, uint8_t native_ip_protocol,
-                                  std::optional<TrimmingOptions> trimming,uint16_t udp_destination_port) {
+DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_enabled,std::optional<uint8_t> native_ip_protocol,
+                                  std::optional<TrimmingOptions> trimming,uint16_t udp_destination_port,
+                                  std::optional<bool> udp_encapsulation) {
     if (!bytes || size<34) throw std::invalid_argument("truncated Ethernet/IP frame");
     DecodedPacket result;
     auto& network_options=result.network; network_options.crc=crc_enabled; network_options.native_ip_protocol=native_ip_protocol;
@@ -381,8 +385,12 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         end=ip_begin+get(ip+2,2); protocol=ip[9]; network_options.hop_limit=ip[8]; network_options.dscp=ip[1]>>2; network_options.ecn=ip[1]&3;
         std::copy_n(ip+12,4,network_options.source.ip.begin()); std::copy_n(ip+16,4,network_options.destination.ip.begin());
     }
-    if (protocol!=17 && protocol!=native_ip_protocol) throw std::invalid_argument("unsupported IP protocol");
-    network_options.udp=protocol==17;
+    // A runtime knows its fabric's encapsulation. Keep that setting separate
+    // from the configurable protocol byte, including native protocol 17.
+    // Diagnostic callers may omit the mode and recognize ordinary UDP first.
+    network_options.udp=udp_encapsulation.value_or(protocol==17);
+    if (network_options.udp?(protocol!=17):(!native_ip_protocol || protocol!=*native_ip_protocol))
+        throw std::invalid_argument("unsupported IP protocol or encapsulation");
     const size_t transport=network_options.udp?8:4, start=ip_begin+ip_size;
     if (trimming) trimming->validate();
     const bool trimmed=trimming && trimming->is_trimmed(network_options.dscp);
@@ -521,10 +529,11 @@ std::optional<uint8_t> UetWireCodec::packet_dscp(const std::vector<uint8_t>& fra
 
 namespace UET::NetworkLayer {
 bool UetWireCodec::stamp_service_time(std::vector<uint8_t>& frame,uint64_t departure_ns,uint64_t arrival_ns,
-                                     bool crc_enabled,uint8_t native_ip_protocol,uint16_t udp_destination_port) {
+                                     bool crc_enabled,std::optional<uint8_t> native_ip_protocol,uint16_t udp_destination_port,
+                                     std::optional<bool> udp_encapsulation) {
     if (departure_ns<arrival_ns) return false;
     DecodedPacket decoded;
-    try { decoded=decode(frame.data(),frame.size(),crc_enabled,native_ip_protocol,{},udp_destination_port); }
+    try { decoded=decode(frame.data(),frame.size(),crc_enabled,native_ip_protocol,{},udp_destination_port,udp_encapsulation); }
     catch (const std::invalid_argument&) { return false; }
     if (decoded.packet.PDS_type!=RUOD_ack_header || decoded.packet.PDS_header.RUOD_ack_header.type!=ACK_CC ||
         decoded.packet.congestion_ack.type!=0) return false;

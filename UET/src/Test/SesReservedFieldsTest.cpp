@@ -41,15 +41,15 @@ void request_reserved_fields(const WireOptions& network,bool start_of_message,bo
     }
     if (atomic) changed[semantic_start+47]=0xff;
     if (network.crc)
-        check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),true); });
+        check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),true,253); });
     repair_crc(changed,network);
-    const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),network.crc).packet;
+    const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),network.crc,253).packet;
     const auto& semantic=decoded.SESpkt.bth_header.Standard_Header;
     CHECK(semantic.opcode==(atomic?3:1) && semantic.PIDonFEP==0x789 && semantic.resource_index==0xabc);
     CHECK(semantic.job_id==0x123456 && decoded.SESpkt.payload==original.SESpkt.payload);
     CHECK(UetWireCodec::encode(decoded,network)==canonical); // Reserved bits never leak into a new transmission.
     changed[semantic_start+1]|=0x40; repair_crc(changed,network);
-    check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),network.crc); });
+    check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),network.crc,253); });
 }
 void response_reserved_fields(const WireOptions& network) {
     PDStoNET_pkt packet{}; packet.PDS_type=RUOD_ack_header;
@@ -66,16 +66,16 @@ void response_reserved_fields(const WireOptions& network) {
     auto changed=canonical;
     changed[semantic_start+4]=0xff; changed[semantic_start+10]|=0xc0;
     repair_crc(changed,network);
-    const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),network.crc).packet;
+    const auto decoded=UetWireCodec::decode(changed.data(),changed.size(),network.crc,253).packet;
     CHECK(decoded.SESpkt.bth_header.Semantic_Response_with_Data_Header.job_id==0x123456);
     CHECK(decoded.SESpkt.bth_header.Semantic_Response_with_Data_Header.payload_length==3);
     CHECK(UetWireCodec::encode(decoded,network)==canonical);
     changed[semantic_start+1]|=0x40; repair_crc(changed,network);
-    check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),network.crc); });
+    check_throws<std::invalid_argument>([&] { UetWireCodec::decode(changed.data(),changed.size(),network.crc,253); });
 }
 int main() {
     for (const bool ipv6:{false,true}) for (const bool udp:{false,true}) for (const bool crc:{false,true}) {
-        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.crc=crc;
+        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.native_ip_protocol=253; network.crc=crc;
         for (const bool start_of_message:{false,true}) for (const bool atomic:{false,true})
             request_reserved_fields(network,start_of_message,atomic);
         response_reserved_fields(network);

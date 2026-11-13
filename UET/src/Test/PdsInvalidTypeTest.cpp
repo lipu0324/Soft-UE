@@ -26,7 +26,7 @@ PDStoNET_pkt noop(uint32_t sequence=1000,bool syn=true) {
 }
 void decode_classification() {
     for (const bool ipv6:{false,true}) for (const bool udp:{false,true}) for (const bool crc:{false,true}) {
-        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.crc=crc;
+        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.native_ip_protocol=253; network.crc=crc;
         const auto canonical=UetWireCodec::encode(noop(),network);
         const auto offset=pds_offset(network);
         for (unsigned type=0;type<32;++type) {
@@ -35,7 +35,7 @@ void decode_classification() {
             auto changed=canonical; changed[offset]=type<<3; changed[offset+1]=0;
             repair_crc(changed,network);
             bool unknown_type=false;
-            try { UetWireCodec::decode(changed.data(),changed.size(),crc); }
+            try { UetWireCodec::decode(changed.data(),changed.size(),crc,253); }
             catch (const PdsDecodeError& error) {
                 CHECK(error.reason()==PdsDecodeError::Reason::UnknownType && error.value()==type);
                 unknown_type=true;
@@ -48,7 +48,7 @@ void decode_classification() {
             changed[offset+1]|=(control_type&1)<<7;
             repair_crc(changed,network);
             bool rejected=false;
-            try { UetWireCodec::decode(changed.data(),changed.size(),crc); }
+            try { UetWireCodec::decode(changed.data(),changed.size(),crc,253); }
             catch (const PdsDecodeError& error) {
                 CHECK(error.reason()==PdsDecodeError::Reason::UnknownControlType && error.value()==control_type);
                 rejected=true;
@@ -57,7 +57,7 @@ void decode_classification() {
             if (crc) {
                 changed.back()^=1;
                 bool invalid_crc=false;
-                try { UetWireCodec::decode(changed.data(),changed.size(),true); }
+                try { UetWireCodec::decode(changed.data(),changed.size(),true,253); }
                 catch (const PdsDecodeError&) { CHECK(false); }
                 catch (const std::invalid_argument&) { invalid_crc=true; }
                 CHECK(invalid_crc); // Integrity validation precedes error classification.
@@ -72,7 +72,7 @@ void unknown_control_does_not_change_context(bool established,bool direct_queue)
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     PdsHost target(2,loop,trace,destination); std::vector<PDStoNET_pkt> responses;
     uint16_t remote_context=0;
-    source.set_receiver([&](Frame frame) { responses.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet); });
+    source.set_receiver([&](Frame frame) { responses.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet); });
     const auto send=[&](PDStoNET_pkt packet) {
         if (!packet.PDS_header.RUOD_cp_header.flags.syn)
             packet.PDS_header.RUOD_cp_header.dpdcid=remote_context;

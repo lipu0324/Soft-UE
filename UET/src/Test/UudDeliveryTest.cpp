@@ -16,9 +16,9 @@ public:
         CHECK(decoded.packet.PDS_type==UUD_req_header);
         const auto& header=decoded.packet.SESpkt.bth_header.Standard_Header;
         CHECK(header.msg_id==0 && header.opcode==7 && !header.dc && header.som && header.eom);
-        // Independent check of the four-byte compact UUD header.
-        CHECK(frame.bytes[38]==0x31 && frame.bytes[39]==0x80);
-        CHECK(frame.bytes[40]==0 && frame.bytes[41]==0);
+        // Independent check: Ethernet14 + IPv4_20 + UDP8 precede compact UUD.
+        CHECK(frame.bytes[42]==0x31 && frame.bytes[43]==0x80);
+        CHECK(frame.bytes[44]==0 && frame.bytes[45]==0);
         return drop_ ? SendResult::Accepted : lower_.try_send(frame);
     }
     void set_receiver(Receiver receiver) override { lower_.set_receiver(std::move(receiver)); }

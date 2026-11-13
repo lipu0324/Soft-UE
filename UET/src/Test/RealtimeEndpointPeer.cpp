@@ -21,7 +21,7 @@ class LossProbe : public IPacketPort {
 public:
     LossProbe(UdpFramePort& port,bool server):port_(port),server_(server) {}
     SendResult try_send(const Frame& frame) override {
-        const auto packet=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        const auto packet=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
         const bool request=packet.PDS_type==RUOD_req_header;
         const bool semantic_reply=packet.PDS_type==RUOD_ack_header && packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE;
         if (request && packet.PDS_header.RUOD_req_header.flags.retx) ++retransmissions;
@@ -51,7 +51,7 @@ int main(int argc,char** argv) {
             const uint32_t local_node=server?2:1,remote_node=server?1:2;
             UdpFramePort port(local_node);
             LossProbe lossy(port,server);
-            UET::NetworkLayer::WireOptions wire; wire.ipv6=ipv6_udp; wire.udp=ipv6_udp;
+            UET::NetworkLayer::WireOptions wire; wire.ipv6=ipv6_udp; wire.udp=ipv6_udp; wire.native_ip_protocol=253;
             PdsHost host(local_node,loop,trace,lossy,PdsHost::WireFormat::Uet11,wire);
             host.services().rto_ns=20*UET::Runtime::kMillisecond;
             Endpoint endpoint(local_node,host,loop,trace,257,2*1000*kMillisecond);

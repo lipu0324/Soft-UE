@@ -1,0 +1,24 @@
+# Explicit laboratory native-IP fabric. UE 1.1 assigns no default protocol
+# number; 253 is experimental. Portable scenarios default to UDP/4793.
+version: 1
+profile: experimental
+seed: 42
+duration_ns: 100000000
+hosts: [1, 2]
+wire:
+  ipv6: false
+  udp: false
+  crc: true
+  native_ip_protocol: 253
+links:
+  - from: 1
+    to: 2
+    rate_bps: 100000000000
+    delay_ns: 1000
+operations:
+  - type: write
+    source: 1
+    target: 2
+    bytes: 4097
+    offset: 17
+    context: 1

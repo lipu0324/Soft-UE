@@ -95,11 +95,11 @@ auto congestion = UET::CMS::NsccConfig::for_link(
     12000,             // 最长空载路径 RTT，ns
     12500000000ULL,    // 源端 100 Gb/s，单位 byte/s
     12500000000ULL,    // 目的端速率，单位 byte/s
-    1128);            // 1024 字节 WRITE payload 的原生/CRC 名义 MTU
+    1132);            // 默认 UDP/CRC，1024 字节 WRITE payload 的名义 MTU
 host.enable_nscc(congestion);
 ```
 
-名义 MTU 必须覆盖实验中最大的语义头、扩展头及 payload。UDP、不同 payload MTU 或
+名义 MTU 必须覆盖实验中最大的语义头、扩展头及 payload。原生封装、不同 payload MTU 或
 原子扩展头需要重新计算，不能直接复制示例数值。NSCC 当前须显式开启，便于
 与尚未配置 CMS 的旧测试、实时适配器和参考实现分别进行实验。
 YAML 的速率单位、窗口配置和实际逐跳抓包边界见 [网络实验](NETWORK-EXPERIMENTS.md)。

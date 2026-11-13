@@ -72,6 +72,11 @@ int main(int argc,char** argv) {
                 if (!row || port>UINT16_MAX) throw std::invalid_argument("UDP destination port exceeds 16 bits");
                 network.udp_destination_port=static_cast<uint16_t>(port);
             }
+            else if (key=="native_ip_protocol") {
+                uint32_t protocol=0; row>>protocol;
+                if (!row || protocol>UINT8_MAX) throw std::invalid_argument("native IP protocol exceeds eight bits");
+                network.native_ip_protocol=static_cast<uint8_t>(protocol);
+            }
             else if (key=="host") { uint32_t id; row>>id; nodes.push_back(id); }
             else if (key=="switch") { uint32_t id; row>>id; switches.push_back(id); }
             else if (key=="job") { uint32_t id; row>>id; jobs.push_back(id); }
@@ -123,7 +128,7 @@ int main(int argc,char** argv) {
             if (from==frame.source) {
                 const auto decoded=UET::NetworkLayer::UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),network.crc,
                     network.native_ip_protocol,enable_trimming?std::make_optional(UET::NetworkLayer::TrimmingOptions{}):std::nullopt,
-                    network.udp_destination_port);
+                    network.udp_destination_port,network.udp);
                 if (decoded.packet.PDS_type==RUOD_req_header) {
                     ++data_attempts;
                     if (decoded.packet.PDS_header.RUOD_req_header.flags.retx) ++retransmitted_data_attempts;

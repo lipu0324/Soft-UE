@@ -18,8 +18,9 @@ DSCP; see [control traffic classes](CONTROL-TRAFFIC-CLASSES.md).
 ROD first acknowledgments wait for earlier asynchronous SES responses while
 historical ACKs remain replayable; see [ROD ACK order](ROD-ACK-ORDER.md).
 
-UET-over-UDP uses the configurable destination port from Table 3-35, default
-4793; see [UDP encapsulation](UDP-ENCAPSULATION.md).
+The portable default is UET-over-UDP/4793. Native IP requires an explicit
+protocol number; see [network defaults](NETWORK-DEFAULTS.md) and
+[UDP encapsulation](UDP-ENCAPSULATION.md).
 
 The implemented SES formats ignore reserved receive fields after integrity
 validation and keep version rejection explicit; see [SES reserved fields](SES-RESERVED-FIELDS.md).

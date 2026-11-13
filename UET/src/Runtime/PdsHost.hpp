@@ -19,6 +19,8 @@ public:
             NetworkLayer::WireOptions network = {})
         : node_(node), loop_(loop), trace_(trace), port_(port),
           services_{loop, loop, [this] { wake(); }}, manager_(&services_), format_(format), network_(network) {
+        if (format_==WireFormat::Uet11 && !network_.udp && !network_.native_ip_protocol)
+            throw std::invalid_argument("native UET requires an explicit IP protocol number");
         services_.standard_wire=format_==WireFormat::Uet11;
         services_.initial_sequence_seed=sequence_seed_for_host(42,node_);
         services_.default_wire_entropy=network_.entropy;
@@ -35,7 +37,7 @@ public:
                     packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
                 else {
                     auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
-                        network_.crc,network_.native_ip_protocol,trimming_,network_.udp_destination_port);
+                        network_.crc,network_.native_ip_protocol,trimming_,network_.udp_destination_port,network_.udp);
                     if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                         decoded.network.source.ip != address(frame.source).ip ||
                         decoded.network.destination.ip != address(node_).ip)
@@ -268,8 +270,8 @@ private:
                         packet.PDS_header.RUOD_ack_header.type==ACK_CC && packet.acknowledgment_trigger_arrival_ns) {
                         const auto arrival=*packet.acknowledgment_trigger_arrival_ns;
                         frame.prepare_transmission=[arrival,crc=options.crc,protocol=options.native_ip_protocol,
-                            udp_destination_port=options.udp_destination_port](uint64_t departure,std::vector<uint8_t>& bytes) {
-                            NetworkLayer::UetWireCodec::stamp_service_time(bytes,departure,arrival,crc,protocol,udp_destination_port);
+                            udp_destination_port=options.udp_destination_port,udp_encapsulation=options.udp](uint64_t departure,std::vector<uint8_t>& bytes) {
+                            NetworkLayer::UetWireCodec::stamp_service_time(bytes,departure,arrival,crc,protocol,udp_destination_port,udp_encapsulation);
                         };
                     }
                 }

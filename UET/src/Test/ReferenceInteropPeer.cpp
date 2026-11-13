@@ -22,7 +22,10 @@ int main() {
             QuietReferenceDiagnostics diagnostics;
             RealtimeRuntime runtime; auto& loop=runtime.events(); Trace trace(loop);
             UdpFramePort port(1);
-            PdsHost host(1,loop,trace,port);
+            // The pinned independent peer uses native IP with experimental protocol 253.
+            // This is an explicit lab interop setting, not Soft-UE's portable default.
+            UET::NetworkLayer::WireOptions network; network.udp=false; network.native_ip_protocol=253;
+            PdsHost host(1,loop,trace,port,PdsHost::WireFormat::Uet11,network);
             // Real-time CPU scheduling is outside the simulated network model.
             // A generous RTO avoids inferring loss merely from a descheduled peer.
             host.services().rto_ns=20*UET::Runtime::kMillisecond;

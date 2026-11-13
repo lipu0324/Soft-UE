@@ -17,7 +17,7 @@ class DeferrableWirePort final : public IPacketPort {
 public:
     DeferrableWirePort(IPacketPort& lower,EventLoop& loop,const SendScenario& scenario):lower_(lower),loop_(loop),scenario_(scenario) {}
     SendResult try_send(const Frame& frame) override {
-        auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
+        auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253);
         auto& packet=decoded.packet;
         if (packet.PDS_type!=RUOD_req_header && packet.PDS_type!=UUD_req_header) return lower_.try_send(frame);
         auto& semantic=packet.SESpkt.bth_header.Standard_Header;
@@ -48,7 +48,7 @@ void transfer(const SendScenario& scenario) {
     auto& forward=fabric.add_host(1); auto& reverse=fabric.add_host(2);
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     DeferrableWirePort source_port(forward,loop,scenario);
-    WireOptions wire; wire.ipv6=scenario.ipv6; wire.udp=scenario.udp;
+    WireOptions wire; wire.ipv6=scenario.ipv6; wire.udp=scenario.udp; wire.native_ip_protocol=253;
     PdsHost source_host(1,loop,trace,source_port,PdsHost::WireFormat::Uet11,wire);
     PdsHost target_host(2,loop,trace,reverse,PdsHost::WireFormat::Uet11,wire);
     Endpoint source(1,source_host,loop,trace,16),target(2,target_host,loop,trace,16);

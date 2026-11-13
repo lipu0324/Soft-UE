@@ -31,8 +31,8 @@ void streaming_write(uint64_t length,bool drop_packet,bool use_nscc=false) {
     StreamFaultPort faults(forward); faults.drop_second=drop_packet;
     PdsHost source_host(1,loop,trace,faults),target_host(2,loop,trace,reverse);
     if (use_nscc) {
-        auto congestion=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,8296);
-        congestion.initial_maximum_window=4*8296;
+        auto congestion=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,8300);
+        congestion.initial_maximum_window=4*8300;
         source_host.enable_nscc(congestion); target_host.enable_nscc(congestion);
     }
     Endpoint source(1,source_host,loop,trace,8192,10000*kMillisecond),target(2,target_host,loop,trace,8192);

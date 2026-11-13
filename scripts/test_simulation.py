@@ -54,6 +54,9 @@ def main():
                dict(base, nack_delays_ns=[0, 0, 0, 8_000_000_001]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 3, "up": False}]),
                dict(base, link_events=[{"at_ns": 0, "from": 1, "to": 2, "up": "false"}])]
+    invalid.append(dict(base, wire={"udp": False}))
+    for protocol in [-1, 256, True, 1.5]:
+        invalid.append(dict(base, wire={"udp": False, "native_ip_protocol": protocol}))
     for port in [-1, 65536, True, 1.5]:
         invalid.append(dict(base, wire={"udp": True, "udp_destination_port": port}))
     for settings in [{"ecn_threshold_bytes": [0] * 7}, {"traffic_class_weights": [0] * 8},
@@ -103,6 +106,8 @@ def main():
             check(fraction < 10**9 and captured == actual, "invalid PCAP record")
             frame = pcap[offset + 16:offset + 16 + captured]
             check(len(frame) == captured and frame[12:14] == b"\x08\x00", "invalid Ethernet capture")
+            check(frame[23] == 17 and struct.unpack_from(">H", frame, 36)[0] == 4793,
+                  "default capture must use UDP/4793 without a native protocol assignment")
             offset += 16 + captured
             frames += 1
         check(offset == len(pcap) and frames > 0, "missing/truncated capture")
@@ -189,6 +194,13 @@ def main():
                 udp_offset = 14 + (40 if ipv6 else 20)
                 check(struct.unpack_from(">H", frame, udp_offset + 2)[0] == 65535,
                       "configured UDP destination missing from independent PCAP bytes")
+        for ipv6 in [False, True]:
+            for protocol in [0, 17, 252, 253, 254, 255]:
+                native = dict(base, wire={"ipv6": ipv6, "udp": False, "native_ip_protocol": protocol})
+                native_output, _ = run(native, f"native-ipv6-{ipv6}-protocol-{protocol}")
+                for _, frame in read_pcap(native_output / "packets.pcap"):
+                    check(frame[20 if ipv6 else 23] == protocol,
+                          "explicit native protocol missing from independent PCAP bytes")
         job_zero = dict(base, jobs=[0], operations=[dict(operation, job=0) for operation in base["operations"]])
         run(job_zero, "job-zero")
         lost = {"version": 1, "hosts": [1, 2], "duration_ns": 100_000_000,

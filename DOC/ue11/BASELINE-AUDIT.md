@@ -56,13 +56,13 @@ uet-ref-prov `5b4e0491329b8e28764bca6847e2f6a0eaa84b9b` 与 UE 1.1。
 
 ## 继续推进顺序
 
-1. 完成 M0 全规范条目人工复核，把 729 个自动抽取候选区分为规范性、条件性、
-   可选和资料性文字；提取数量不等于 MUST 数量。
+1. 729个自动抽取候选均已区分规范性、条件性、可选与资料性文字；继续补全M0中的
+   表格字段、状态机、算法及逐条证据映射。提取数量不等于MUST数量。
 2. 在现有虚拟运行时上完成 M2 的 ROD 生命周期、NACK、RUD、UUD 和官方共同路径互通。
 3. 补齐 M3 的寻址、immediate、非取回原子、完成语义及真实 libfabric 2.0 provider。
 4. 通过上述门槛后，实施 M4 NSCC 并验收 AI Base，然后依原计划推进 M5–M8。
 
 2026-11-12 续开发时网络已恢复，CMake/CTest、libfabric 2.0 与官方参考程序均已构建。
-新增官方解析器/CRC 差分覆盖 24 组报文；这不是官方端点进程互通。
+官方解析器/CRC差分目前覆盖36组报文（含两种显式UDP端口配置）；这不是官方端点进程互通。
 当前执行环境创建 raw packet socket 返回 EPERM，未提供 CAP_NET_RAW；veth/raw-socket
 互通仍须在具备对应能力的环境验证。softue 动态 provider 已通过公开 fi_* API 的独立进程测试，当前支持范围见 [PROVIDER.md](PROVIDER.md)；硬件 RDMA 适配仍待验证。

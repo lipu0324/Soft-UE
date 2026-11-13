@@ -11,7 +11,7 @@ Frame data_frame(size_t length,uint8_t traffic_class=0,uint8_t ecn=2,bool ipv6=f
     packet.SESpkt.bth_type=Standard_Header;
     auto& semantic=packet.SESpkt.bth_header.Standard_Header;
     semantic.opcode=1; semantic.som=1; semantic.eom=1;
-    const size_t overhead=14+(ipv6?40:20)+4+12+44+4;
+    const size_t overhead=14+(ipv6?40:20)+8+12+44+4;
     CHECK(length>=overhead); packet.SESpkt.payload.resize(length-overhead);
     semantic.request_length=packet.SESpkt.payload.size();
     WireOptions options; options.ecn=ecn; options.ipv6=ipv6;

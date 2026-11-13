@@ -126,26 +126,26 @@ void service_stamp_preserves_the_actual_frame() {
         auto& acknowledgment=packet.PDS_header.RUOD_ack_header;
         acknowledgment.type=ACK_CC; acknowledgment.next_hdr=UET_HDR_NONE;
         acknowledgment.cack_psn=1000; packet.congestion_ack.received_byte_units=123;
-        WireOptions options; options.ipv6=ipv6; options.udp=udp; options.crc=crc; options.ecn=2;
+        WireOptions options; options.ipv6=ipv6; options.udp=udp; options.native_ip_protocol=253; options.crc=crc; options.ecn=2;
         auto frame=UetWireCodec::encode(packet,options);
         if (udp) { const size_t start=14+(ipv6?40:20); frame[start+6]=0xbe; frame[start+7]=0xef; }
         CHECK(UetWireCodec::mark_ecn(frame));
         frame.insert(frame.end(),7,0xa5); // Ethernet padding lies outside the IP/CRC extent.
         const auto before=frame;
-        CHECK(UetWireCodec::stamp_service_time(frame,1000,1,crc));
-        const auto decoded=UetWireCodec::decode(frame.data(),frame.size(),crc);
+        CHECK(UetWireCodec::stamp_service_time(frame,1000,1,crc,253));
+        const auto decoded=UetWireCodec::decode(frame.data(),frame.size(),crc,253);
         CHECK(decoded.packet.congestion_ack.service_time==8 && decoded.packet.congestion_ack.received_byte_units==123);
         CHECK(decoded.network.ecn==3 && frame.size()==before.size());
         const size_t transport=14+(ipv6?40:20),pds=transport+(udp?8:4),crc_end=before.size()-7;
         for (size_t byte=0;byte<frame.size();++byte)
             if (byte!=pds+24 && byte!=pds+25 && !(crc && byte>=crc_end-4 && byte<crc_end)) CHECK(frame[byte]==before[byte]);
-        CHECK(UetWireCodec::stamp_service_time(frame,UINT64_MAX,0,crc));
-        CHECK(UetWireCodec::decode(frame.data(),frame.size(),crc).packet.congestion_ack.service_time==0xffff);
-        CHECK(UetWireCodec::stamp_service_time(frame,10,10,crc));
-        CHECK(UetWireCodec::decode(frame.data(),frame.size(),crc).packet.congestion_ack.service_time==1);
+        CHECK(UetWireCodec::stamp_service_time(frame,UINT64_MAX,0,crc,253));
+        CHECK(UetWireCodec::decode(frame.data(),frame.size(),crc,253).packet.congestion_ack.service_time==0xffff);
+        CHECK(UetWireCodec::stamp_service_time(frame,10,10,crc,253));
+        CHECK(UetWireCodec::decode(frame.data(),frame.size(),crc,253).packet.congestion_ack.service_time==1);
         TrimmingOptions trimming; frame=UetWireCodec::encode(packet,options);
         CHECK(UetWireCodec::trim_packet(frame,trimming)); const auto trimmed=frame;
-        CHECK(!UetWireCodec::stamp_service_time(frame,1000,0,crc) && frame==trimmed);
+        CHECK(!UetWireCodec::stamp_service_time(frame,1000,0,crc,253) && frame==trimmed);
     }
 }
 
@@ -187,7 +187,7 @@ void receiver_output_queue_is_service_not_network_delay() {
     uint16_t local_pdc=0; uint32_t start=0; uint16_t service=0; Time ack_departure=0;
     fabric.set_link_capture([&](Time time,uint32_t from,uint32_t,const Frame& frame) {
         try {
-            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+            const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
             if (packet.PDS_type==RUOD_req_header) { local_pdc=packet.PDS_header.RUOD_req_header.spdcid; start=packet.PDS_header.RUOD_req_header.psn; }
             if (from==2 && packet.PDS_type==RUOD_ack_header && packet.PDS_header.RUOD_ack_header.type==ACK_CC) {
                 service=packet.congestion_ack.service_time; ack_departure=time;

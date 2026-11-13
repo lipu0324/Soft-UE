@@ -90,8 +90,8 @@ void deferred_nack_retains_its_cause() {
     CHECK(sender.rto_timer_.getTimerInfo(1000).duration_ns==128);
     sender.freePDC(); CHECK(loop.pending()==0);
 
-    UET::CMS::NsccConfig config=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,104);
-    config.initial_maximum_window=104;
+    UET::CMS::NsccConfig config=UET::CMS::NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,108);
+    config.initial_maximum_window=108;
     UET::CMS::NsccEngine congestion(config,loop,[]{},{});
     services.congestion_control=&congestion;
     CHECK(sender.initPDC(1)); sender.state=ESTABLISHED; sender.DPDCID=MAX_PDC; sender.sesTxReq(&request);

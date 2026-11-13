@@ -7,6 +7,8 @@ using namespace UET::Runtime;
 using namespace UET::SES;
 using namespace UET::CMS;
 using UET::NetworkLayer::UetWireCodec;
+// 64-byte payload + PDS12 + SES44 + UDP8 + CRC4 + nominal IP40.
+constexpr uint32_t nominal_data_packet_bytes=172;
 
 class CongestionFaultPort final : public IPacketPort {
 public:
@@ -46,8 +48,8 @@ void transport_case(bool ordered,bool lose_data,bool lose_semantics) {
     CongestionFaultPort forward(source_port),reverse(target_port);
     forward.drop_first_data=lose_data; reverse.replace_semantic_ack=lose_semantics;
     PdsHost source_host(1,loop,trace,forward),target_host(2,loop,trace,reverse);
-    auto config=NsccConfig::for_link(100000,12500000000ULL,12500000000ULL,168);
-    config.initial_maximum_window=168; // Exactly one 64-byte payload packet including nominal headers.
+    auto config=NsccConfig::for_link(100000,12500000000ULL,12500000000ULL,nominal_data_packet_bytes);
+    config.initial_maximum_window=nominal_data_packet_bytes; // Exactly one 64-byte payload packet including nominal headers.
     source_host.enable_nscc(config); target_host.enable_nscc(config);
     Endpoint source(1,source_host,loop,trace,64),target(2,target_host,loop,trace,64);
     source.memory().add_job(1); target.memory().add_job(1);
@@ -121,8 +123,8 @@ void duplicate_feedback_and_cancelled_first_send() {
     auto& source_port=fabric.add_host(1); fabric.add_host(2);
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     PdsHost host(1,cancel_loop,cancel_trace,source_port);
-    auto config=NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,168);
-    config.initial_maximum_window=168; host.enable_nscc(config);
+    auto config=NsccConfig::for_link(12000,12500000000ULL,12500000000ULL,nominal_data_packet_bytes);
+    config.initial_maximum_window=nominal_data_packet_bytes; host.enable_nscc(config);
     Endpoint endpoint(1,host,cancel_loop,cancel_trace,64);
     for (const auto job:{1u,2u}) {
         endpoint.memory().add_job(job);

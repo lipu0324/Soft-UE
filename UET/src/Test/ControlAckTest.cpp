@@ -12,14 +12,14 @@ int main() {
         acknowledgement.control_ack.cp_ack_type=Close_cmd;
         WireOptions options; options.crc=false;
         auto bytes=UetWireCodec::encode(acknowledgement,options);
-        // Independent §3.5.16.4.1 field locations: ACK starts at byte 38;
+        // Independent §3.5.16.4.1 field locations: IPv4/UDP ACK starts at byte 42;
         // next-header=9, followed by an eight-byte Close Command ACK payload.
-        CHECK(bytes.size()==58 && bytes[38]==0x3c && bytes[39]==0x80);
-        CHECK(std::vector<uint8_t>(bytes.begin()+50,bytes.end())==std::vector<uint8_t>({4,2,0,0,0,0,0,0}));
+        CHECK(bytes.size()==62 && bytes[42]==0x3c && bytes[43]==0x80);
+        CHECK(std::vector<uint8_t>(bytes.begin()+54,bytes.end())==std::vector<uint8_t>({4,2,0,0,0,0,0,0}));
         const auto decoded=UetWireCodec::decode(bytes.data(),bytes.size(),false).packet;
         CHECK(decoded.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_CP_ACK);
         CHECK(decoded.control_ack.cp_ack_type==Close_cmd && decoded.control_ack.cp_ack_length==2);
-        bytes[51]=7;
+        bytes[55]=7;
         check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),bytes.size(),false); });
         acknowledgement.control_ack.start_psn_method=1;
         acknowledgement.control_ack.expected_psn=0xfedcba98;

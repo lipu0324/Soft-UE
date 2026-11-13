@@ -10,7 +10,7 @@ class OpeningFaultPort : public IPacketPort {
 public:
     OpeningFaultPort(IPacketPort& lower,EventLoop& loop,bool source):lower_(lower),loop_(loop),source_(source) {}
     SendResult try_send(const Frame& frame) override {
-        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet;
+        const auto packet=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet;
         if (packet.PDS_type==RUOD_cp_header) {
             const auto& header=packet.PDS_header.RUOD_cp_header;
             if (header.ctl_type==Noop || header.ctl_type==Negotiation) {
@@ -46,7 +46,10 @@ void control_open(pdc_mode mode,bool negotiation,bool lose_syn,bool lose_ack) {
     fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
     OpeningFaultPort source_port(forward,loop,true),target_port(reverse,loop,false);
     source_port.mode=target_port.mode=mode; source_port.drop_first=lose_syn; target_port.drop_first=lose_ack;
-    PdsHost source_host(1,loop,trace,source_port),target_host(2,loop,trace,target_port);
+    // This native-IP golden fixture explicitly selects an experimental lab number.
+    WireOptions native_network; native_network.udp=false; native_network.native_ip_protocol=253;
+    PdsHost source_host(1,loop,trace,source_port,PdsHost::WireFormat::Uet11,native_network),
+        target_host(2,loop,trace,target_port,PdsHost::WireFormat::Uet11,native_network);
     Endpoint source(1,source_host,loop,trace),target(2,target_host,loop,trace);
     source.memory().add_job(1); target.memory().add_job(1);
     loop.run_until(10*kMillisecond); // Catch SYN timestamps accidentally left at zero.
@@ -84,7 +87,7 @@ struct RawTarget {
     std::vector<PDStoNET_pkt> responses;
     explicit RawTarget():source(fabric.add_host(1)),destination(fabric.add_host(2)),host(2,loop,trace,destination) {
         fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
-        source.set_receiver([this](Frame frame) { responses.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size()).packet); });
+        source.set_receiver([this](Frame frame) { responses.push_back(UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253).packet); });
     }
     void send(PDStoNET_pkt packet) {
         WireOptions network; network.source.ip[3]=1; network.destination.ip[3]=2;

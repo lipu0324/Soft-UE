@@ -96,7 +96,7 @@ public:
     EntropyAuditPort(IPacketPort& lower,EntropyObservation& observation,bool forward)
         :lower_(lower),observation_(observation),forward_(forward) {}
     SendResult try_send(const Frame& frame) override {
-        const auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size());
+        const auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),true,253);
         const auto& packet=decoded.packet;
         CHECK(frame.entropy==decoded.network.entropy); // Fabric ECMP and wire must agree.
         if (forward_ && packet.PDS_type==RUOD_req_header) {
@@ -129,7 +129,7 @@ void actual_wire_feedback(bool ipv6,bool udp,bool congestion,bool ordered) {
     EntropyObservation observation;
     EntropyAuditPort source_port(forward,observation,true),target_port(reverse,observation,false);
     WireOptions source_wire,target_wire;
-    source_wire.ipv6=target_wire.ipv6=ipv6; source_wire.udp=target_wire.udp=udp;
+    source_wire.ipv6=target_wire.ipv6=ipv6; source_wire.udp=target_wire.udp=udp; source_wire.native_ip_protocol=target_wire.native_ip_protocol=253;
     source_wire.entropy=0xbeef; target_wire.entropy=0x9876;
     PdsHost source_host(1,loop,trace,source_port,PdsHost::WireFormat::Uet11,source_wire);
     PdsHost target_host(2,loop,trace,target_port,PdsHost::WireFormat::Uet11,target_wire);

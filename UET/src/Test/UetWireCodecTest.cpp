@@ -30,21 +30,21 @@ void nscc_ack_golden() {
         0,3,0xff,0xfc,0x80,0,0,0,0,0,0,1,
         0x12,0x34,0x85,0xab,0xcd,0xef,0x45,0x67};
     for (const auto ipv6:{false,true}) for (const auto udp:{false,true}) for (const auto crc:{false,true}) {
-        WireOptions options; options.ipv6=ipv6; options.udp=udp; options.crc=crc;
+        WireOptions options; options.ipv6=ipv6; options.udp=udp; options.native_ip_protocol=253; options.crc=crc;
         auto bytes=UetWireCodec::encode(packet,options);
         const size_t start=14+(ipv6?40:20)+(udp?8:4);
         CHECK(std::vector<uint8_t>(bytes.begin()+start,bytes.begin()+start+32)==expected);
-        const auto decoded=UetWireCodec::decode(bytes.data(),bytes.size(),crc);
+        const auto decoded=UetWireCodec::decode(bytes.data(),bytes.size(),crc,253);
         CHECK(decoded.packet.congestion_ack.sack_bitmap==congestion.sack_bitmap);
         CHECK(decoded.packet.congestion_ack.service_time==0x1234 && decoded.packet.congestion_ack.restore_window);
         CHECK(decoded.packet.congestion_ack.receiver_window_penalty==5 && decoded.packet.congestion_ack.received_byte_units==0xabcdef);
         CHECK(decoded.packet.congestion_ack.out_of_order_count==0x4567 && decoded.packet.congestion_ack.sack_psn_offset==-4);
         CHECK(decoded.nominal_packet_size==32+(udp?8:4)+(crc?4:0)+40);
         for (size_t length=0;length<bytes.size();++length)
-            check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),length,crc); });
+            check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),length,crc,253); });
         if (!crc) {
             bytes[start+12]=0xdf; // Unknown CC_TYPE and reserved CC flags preserve the base ACK/SACK.
-            const auto unknown=UetWireCodec::decode(bytes.data(),bytes.size(),false);
+            const auto unknown=UetWireCodec::decode(bytes.data(),bytes.size(),false,253);
             CHECK(unknown.packet.PDS_header.RUOD_ack_header.cack_psn==0x01020304);
             CHECK(unknown.packet.congestion_ack.type==13 && unknown.packet.congestion_ack.received_byte_units==0);
         }
@@ -66,12 +66,12 @@ int main() {
             0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
             0,0,0,0,0,0,0,0,0,0,0,3,0xaa,0xbb,0xcc};
         for (bool ipv6 : {false,true}) for (bool udp : {false,true}) for (bool crc : {false,true}) {
-            WireOptions o; o.ipv6=ipv6; o.udp=udp; o.crc=crc; o.entropy=0xbeef; o.ecn=2;
+            WireOptions o; o.ipv6=ipv6; o.udp=udp; o.native_ip_protocol=253; o.crc=crc; o.entropy=0xbeef; o.ecn=2;
             o.source.ip[0]=10; o.source.ip[3]=1; o.destination.ip[0]=10; o.destination.ip[3]=2;
             auto bytes=UetWireCodec::encode(packet,o);
             const size_t start=14+(ipv6?40:20)+(udp?8:4);
             CHECK(std::vector<uint8_t>(bytes.begin()+start,bytes.begin()+start+expected.size())==expected);
-            const auto decoded=UetWireCodec::decode(bytes.data(),bytes.size(),crc);
+            const auto decoded=UetWireCodec::decode(bytes.data(),bytes.size(),crc,253);
             CHECK(decoded.packet.PDS_header.RUOD_req_header.psn==0x01020304);
             CHECK(decoded.packet.SESpkt.payload==packet.SESpkt.payload);
             CHECK(decoded.network.ipv6==ipv6); CHECK(decoded.network.udp==udp);
@@ -80,10 +80,10 @@ int main() {
                 auto nonzero_checksum=bytes;
                 const size_t udp_header=14+(ipv6?40:20);
                 nonzero_checksum[udp_header+6]=0x12; nonzero_checksum[udp_header+7]=0x34;
-                CHECK(UetWireCodec::decode(nonzero_checksum.data(),nonzero_checksum.size(),crc).packet.SESpkt.payload==packet.SESpkt.payload);
+                CHECK(UetWireCodec::decode(nonzero_checksum.data(),nonzero_checksum.size(),crc,253).packet.SESpkt.payload==packet.SESpkt.payload);
             }
             UetWireCodec::mark_ecn(bytes);
-            CHECK(UetWireCodec::decode(bytes.data(),bytes.size(),crc).network.ecn==3);
+            CHECK(UetWireCodec::decode(bytes.data(),bytes.size(),crc,253).network.ecn==3);
             if (!ipv6) {
                 auto reserved=bytes; reserved[20]|=0x80; reserved[24]=reserved[25]=0;
                 uint32_t sum=0;
@@ -91,25 +91,25 @@ int main() {
                 while (sum>>16) sum=(sum&0xffff)+(sum>>16);
                 const auto checksum=static_cast<uint16_t>(~sum);
                 reserved[24]=checksum>>8; reserved[25]=checksum&255;
-                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(reserved.data(),reserved.size(),crc); });
+                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(reserved.data(),reserved.size(),crc,253); });
             }
             if (crc) {
                 bytes[start+expected.size()-1]^=1;
-                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),bytes.size(),true); });
+                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),bytes.size(),true,253); });
             }
             for (size_t length=0; length<start+expected.size()+(crc?4:0); ++length)
-                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),length,crc); });
+                check_throws<std::invalid_argument>([&] { UetWireCodec::decode(bytes.data(),length,crc,253); });
         }
         auto cp=packet; cp.PDS_type=RUOD_cp_header; cp.PDS_header={}; cp.SESpkt={};
         auto& control=cp.PDS_header.RUOD_cp_header; control.type=CP; control.ctl_type=9; control.psn=7;
         check_throws<std::invalid_argument>([&] { UetWireCodec::encode(cp,{}); });
         cp.control_extension.assign(28,0); // §3.5.16.7: NO_NEG has 32 payload bytes.
         const auto control_bytes=UetWireCodec::encode(cp,{});
-        const auto decoded_control=UetWireCodec::decode(control_bytes.data(),control_bytes.size()).packet;
+        const auto decoded_control=UetWireCodec::decode(control_bytes.data(),control_bytes.size(),true,253).packet;
         CHECK(decoded_control.PDS_header.RUOD_cp_header.ctl_type==9 && decoded_control.control_extension.size()==28);
         auto unsupported=packet; unsupported.SESpkt.bth_header.Standard_Header.version=1;
         check_throws<std::invalid_argument>([&] { UetWireCodec::encode(unsupported,{}); });
-        WireOptions configured; configured.native_ip_protocol=252;
+        WireOptions configured; configured.udp=false; configured.native_ip_protocol=252;
         const auto configured_frame=UetWireCodec::encode(packet,configured);
         CHECK(UetWireCodec::decode(configured_frame.data(),configured_frame.size(),true,252).packet.SESpkt.payload==packet.SESpkt.payload);
         check_throws<std::invalid_argument>([&] { UetWireCodec::decode(configured_frame.data(),configured_frame.size()); });

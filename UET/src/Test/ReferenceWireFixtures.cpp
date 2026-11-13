@@ -47,7 +47,7 @@ int main(int argument_count,char** arguments) {
             header.type=CP; header.ctl_type=Clear_cmd;
             header.psn=1000; header.payload=998; header.spdcid=17; header.dpdcid=29;
         }
-        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.entropy=0xbeef;
+        WireOptions network; network.ipv6=ipv6; network.udp=udp; network.native_ip_protocol=253; network.entropy=0xbeef;
         network.udp_destination_port=port;
         network.source.ip[0]=10; network.source.ip[3]=1;
         network.destination.ip[0]=10; network.destination.ip[3]=2;
