@@ -652,6 +652,8 @@ struct PDC_SES_req
     uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
     uint8_t delivery_mode = ROD; /**< UUD has no PDC and must never generate ACKs. */
     uint32_t connection_start_psn = 0; /**< Local context generation, not an SES wire field. */
+    uint32_t rudi_packet_id=0; /**< RUDI response correlation; never a PDC PSN. */
+    bool rudi_retransmission=false,rudi_congestion_marked=false;
 };
 /**
  * @struct PDC_SES_rsp
@@ -661,6 +663,10 @@ struct PDC_SES_req
  */
 struct PDC_SES_rsp
 {
+    uint8_t delivery_mode=ROD;
+    uint32_t rudi_packet_id=0,rudi_request_offset=0;
+    uint16_t rudi_message_id=0; // Trusted initiator association, including local timeout upcalls.
+    bool rudi_timed_out=false;
     uint32_t original_sequence=0,connection_start_psn=0; // Local response association, never wire fields.
     uint16_t PDCID;          /**< SPDC identifier */
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */

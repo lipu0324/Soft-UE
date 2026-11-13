@@ -179,6 +179,16 @@ public:
         wake();
         return true;
     }
+    std::optional<uint32_t> submit_rudi(const SES_PDS_req& request) {
+        if (stopped_ || format_!=WireFormat::Uet11 || request.src_fep!=node_) return {};
+        const auto packet_id=manager_.submitRudi(request);
+        if (packet_id) { trace_.record(node_,"rudi_submit",*packet_id); wake(); }
+        return packet_id;
+    }
+    bool respond_rudi(const PDC_SES_req& request,const SEStoPDS_pkt& response) {
+        if (stopped_ || !manager_.respondRudi(request,node_,response)) return false;
+        wake(); return true;
+    }
     bool submit_return_data(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
         if (stopped_ || format_!=WireFormat::Uet11 || original.pkt.bth_type!=Standard_Header ||
             data.bth_type!=Semantic_Response_with_Data_Header || data.payload.size()>8192) return false;
@@ -288,12 +298,18 @@ private:
                 else {
                     auto options=network_;
                     options.source=address(packet.src_fep); options.destination=address(packet.dst_fep);
-                    const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header;
+                    const bool rudi=packet.PDS_type==RUDI_header;
+                    // Table3-86: RUDI WRITE responses are CONTROL; READ data
+                    // responses may be trimmed just like the requests.
+                    const bool rudi_data=rudi && (packet.PDS_header.RUDI_header.type==RUDI_REQ ||
+                        packet.SESpkt.bth_type==Semantic_Response_with_Data_Header);
+                    const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header || rudi_data;
                     const bool ordered_control=packet.PDS_type==RUOD_cp_header && packet.control_uses_request_traffic_class;
                     frame.traffic_class=(data || ordered_control)?0:1;
+                    if (rudi_data) frame.traffic_class=2; // Local policy: separate uncontrolled RUDI from UET-CC traffic (§3.5.7.4).
                     if (services_.congestion_control || !data) options.entropy=packet.wire_entropy;
                     frame.entropy=options.entropy; // ECMP uses the actual on-wire EV, including without CMS.
-                    if (services_.congestion_control) {
+                    if (services_.congestion_control || rudi) {
                         options.ecn=packet.network_ecn;
                         if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
                     }
@@ -332,6 +348,9 @@ private:
             }
             while (!outbound_.empty()) {
                 auto& queued=outbound_.front();
+                if (queued.identity && queued.identity->kind==TransmitKind::RudiRequest && !manager_.activeRudiAttempt(*queued.identity)) {
+                    outbound_.pop_front(); worked=true; continue; // Cancelled/backpressured attempt, no stale transmit.
+                }
                 std::optional<Frame> submission_frame;
                 if (!services_.actual_transmit_notifications && queued.frame.prepare_transmission) {
                     // Unsupported adapters expose the send-submission boundary.
@@ -352,6 +371,11 @@ private:
                 }
                 const auto transmitted=std::move(outbound_.front());
                 outbound_.pop_front();
+                if (!services_.actual_transmit_notifications && result==SendResult::Accepted && transmitted.identity &&
+                    transmitted.identity->kind==TransmitKind::RudiRequest) {
+                    transmit_notifications_.push_back({*transmitted.identity,loop_.now(),TransmitOutcome::Started});
+                    wake(); // Adapters without NIC timing expose local acceptance as their documented boundary.
+                }
                 if (transmitted.is_datagram && datagram_transmit_handler_)
                     datagram_transmit_handler_(transmitted.local_tx_handle,result);
                 if (stopped_) return;

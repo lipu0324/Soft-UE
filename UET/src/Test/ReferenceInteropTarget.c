@@ -40,6 +40,10 @@ static int tunnel_transmit(struct uet_nic *nic,void *frame,void *ip_header,size_
     if (sent==(ssize_t)size && size>=54) {
         const uint8_t *bytes=frame;
         const unsigned int prologue=((unsigned int)bytes[38]<<8)|bytes[39];
+        if ((prologue>>11)==5 && getenv("SOFTUE_TEST_TRACE_RUDI")) {
+            fprintf(stderr,"RUDI response size=%zu next=%u id=%u ses=%02x,%02x\n",size,(prologue>>7)&15,
+                (unsigned int)bytes[42]<<24|(unsigned int)bytes[43]<<16|(unsigned int)bytes[44]<<8|bytes[45],bytes[46],bytes[47]);
+        }
         if ((prologue>>11)==11 && ((prologue>>7)&15)==2) ++clear_commands_sent;
     }
     return sent==(ssize_t)size?0:-errno;
@@ -94,7 +98,7 @@ int main(void) {
     struct fid_fabric fabric={0}; struct fid_domain fabric_domain={0};
     struct fid_ep fabric_endpoint={0}; struct fid_cq fabric_cq={0};
     struct fi_info *hints=fi_allocinfo(),*info=NULL;
-    uint8_t memory[4096]={0},receive_buffer[32]={0},tagged_buffer[16]={0},final_buffer[4]={0};
+    uint8_t memory[8192]={0},receive_buffer[32]={0},tagged_buffer[16]={0},final_buffer[4]={0};
     setenv("UET_PDS","pds",1); setenv("UET_PDS_ACK_TYPE","ack",1);
     /* The pinned reference defaults to a 5 ms wall-clock timeout. An ASan
      * process sharing a CPU with stress tests can be descheduled longer than
@@ -110,7 +114,7 @@ int main(void) {
     info->domain_attr->mr_mode|=FI_MR_PROV_KEY;
     REQUIRE_SUCCESS(uet_domain(instance,&fabric,info,&fabric_domain,NULL,NULL,NULL,&domain));
     REQUIRE_SUCCESS(uet_mr_reg(domain,memory,sizeof(memory),FI_READ|FI_WRITE|FI_REMOTE_READ|FI_REMOTE_WRITE|FI_ATOMIC,
-        UET_MR_KEY_NONE,0,NULL,&region));
+        UET_MR_KEY_IDEMPOTENT_SAFE,0,NULL,&region));
     REQUIRE_SUCCESS(uet_endpoint(domain,info,&fabric_endpoint,NULL,&endpoint));
     REQUIRE_SUCCESS(uet_ep_bind_mr(endpoint,region,0));
     struct fi_cq_attr attributes={0}; attributes.format=FI_CQ_FORMAT_TAGGED; attributes.size=32;
@@ -192,11 +196,12 @@ int main(void) {
     for (size_t byte=3200;byte<3219;++byte) if (memory[byte]!=0x71) return 1;
     for (size_t byte=3232;byte<3249;++byte) if (memory[byte]!=0x82) return 1;
     for (size_t byte=3264;byte<3272;++byte) if (memory[byte]!=(byte==3264?5:0)) return 1;
+    for (size_t byte=4096;byte<4096+1113;++byte) if (memory[byte]!=0x63) return 1;
     REQUIRE_SUCCESS(uet_ep_close(endpoint)); REQUIRE_SUCCESS(uet_av_remove(peer));
     REQUIRE_SUCCESS(uet_cq_close(send_cq));
     REQUIRE_SUCCESS(uet_cq_close(receive_cq)); REQUIRE_SUCCESS(uet_mr_close(region));
     REQUIRE_SUCCESS(uet_domain_close(domain)); REQUIRE_SUCCESS(uet_finalize(instance));
     fi_freeinfo(info); fi_freeinfo(hints);
-    puts("PASS reference: unchanged SES/PDS exchanged synchronized operations and observed expected CPU-coherent atomic error");
+    puts("PASS reference: unchanged SES/PDS served multi-packet RUDI WRITE, independent READs and synchronized operations with CPU-coherent rejection");
     return 0;
 }

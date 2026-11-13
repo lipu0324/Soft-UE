@@ -24,7 +24,9 @@ READ 请求没有 payload，也不接受 payload reader 或 immediate data。零
 
 UE 1.1 §3.4.5.2：每个请求最多索取一 Payload MTU 的数据。标准头中所有分片的
 `request_length` 仍是整个消息长度；非 SOM 请求用 `message_offset` 标识位置，
-其 `payload_length` 为0。目标按总长度与 offset 推导这一个请求要读取的字节数。
+当前实现把 `payload_length` 按Table3-10的实际请求payload解释为0，目标按总长度与
+offset推导本次读取量。该字段在READ续包中的特殊含义尚需完整规范复核；此处不将这项
+解释声明为已解决的互通结论。
 
 - 整个消息不超过阈值，或阈值达到 Payload MTU：使用 [数据 ACK](READ-ACK-DATA.md)。ACK 丢失后重发原
   READ 并重新读取；目标发送后保留 PSN 标记，不保留结果快照。
@@ -113,3 +115,16 @@ python3 scripts/test_large_read.py --binary build/release/streaming_read_test \
 PDS Request 还跨越24位累计收到字节计数器；数据 ACK 不计入这条请求计数。
 实际实验结果单独保存在生成的 `report.json`，本节不将测试入口当作通过证据。
 四个组合的实际通过记录见 [READ 边界证据](READ-BOUNDARY.md)。
+
+## 固定参考的续包长度差异
+
+RUDI互通新增了1113字节单消息READ负例。固定5b4e049参考实现的
+`uet_get_ses_req_payload_len` 对非SOM READ直接使用payload_length，因此为当前零字段
+续包返回空数据；本地逐包校验保持严格，最终超时，未把空尾片当成功。失败与观察日志为
+`/tmp/softue-rudi-reference-tests.log`、`/tmp/softue-rudi-reference-tests2.log`。
+Table3-10按本包payload描述该字段，§3.4.5.2另规定每请求一MTU及末片；这个特殊字段
+解释仍需进一步规范复核，不能仅依据参考实现修改所有原生READ路径。
+
+当前真实互通使用一个多包RUDI WRITE，完成后发两个具有独立MID的READ分别检查1024和
+89字节。它通过了参考目标的放置与返回数据检查，却不证明同一多包READ与参考互通。
+原生对原生的多包READ及旧4GiB−1实验是不同范围的证据，不将它们替代该差异。

@@ -16,8 +16,10 @@ NACKs and the original PDS to delayed target notifications and checked integer
 atomic actions. See [synchronized transactions](SYNCHRONIZED-TRANSACTIONS.md)
 for source scheduling, independent target tests, reference differences and the
 remaining reuse/management boundaries.
-RUDI request/response headers have independent8-byte golden vectors and fixed
-reference parser comparisons; the stateless transaction path remains open.
+Native RUDI standard-header WRITE/READ uses source-only packet recovery, checked
+idempotent-safe memory and no target PDC/message state or target CQ. Independent
+8-byte wire vectors, parser comparisons, lifecycle tests and selected reference
+transactions bound the capability; full HPC acceptance remains open.
 See [RUDI boundaries](RUDI.md).
 
 Unknown PDS/control types are silently dropped before connection state changes,

@@ -103,6 +103,10 @@ struct Services {
     // A 16-bit synchronized group may be reused only after all members are
     // acknowledged. Keep fresh allocation monotonic across SES replacement.
     uint32_t next_synchronization_group_id=0;
+    // §3.5.23: packet IDs are locally unique, including after replacing SES.
+    // Exhaust the 32-bit wire space rather than aliasing a delayed response.
+    uint64_t next_rudi_packet_id=0;
+    size_t rudi_packet_limit=4096; // Initiator storage policy; target has no recovery state.
 
 };
 

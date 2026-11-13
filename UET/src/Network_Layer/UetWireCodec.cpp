@@ -483,6 +483,13 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
             const auto destination=get(pds+10,2);
             if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
             else header.dpdcid=destination;
+        } else if (type==4 || type==5) {
+            if (size<start+transport+8) throw std::invalid_argument("incomplete trimmed RUDI header");
+            packet.PDS_type=RUDI_header;
+            auto& header=packet.PDS_header.RUDI_header;
+            header.type=type==4?RUDI_REQ:RUDI_RESP; header.next_hdr=UET_HDR_NONE;
+            header.flags.retx=(get(pds,2)>>4)&1; header.flags.m=type==5?((get(pds,2)>>5)&1):0;
+            header.pkt_id=get(pds+4,4);
         } else if (type==7 || type==8 || type==9) packet.PDS_type=RUOD_ack_header;
         else if (type==11) packet.PDS_type=RUOD_cp_header;
         else if (type==10 || type==12) packet.PDS_type=nack_header;

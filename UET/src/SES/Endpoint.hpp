@@ -102,6 +102,7 @@ struct Completion {
 struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
     bool datagram_send=true;
+    bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
     bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
@@ -233,8 +234,13 @@ private:
         const bool is_synchronized_write=operation.type==OperationType::SynchronizedWrite;
         const bool is_atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || is_fetching_atomic;
         const bool is_read=operation.type==OperationType::Read;
+        const bool is_rudi=operation.delivery_mode==RUDI;
+        if (is_rudi && ((operation.type!=OperationType::Write && !is_read) || operation.immediate_data ||
+            synchronization_owner || rendezvous_read_owner || !(operation.remote_key&MemoryRegistry::kIdempotentSafe))) {
+            complete_local(CompletionStatus::Unsupported); return 0;
+        }
         const bool is_deferrable=operation.type==OperationType::DeferrableSend || operation.type==OperationType::DeferrableTaggedSend;
-        if (!is_datagram && operation.delivery_mode!=ROD && operation.delivery_mode!=RUD) {
+        if (!is_datagram && operation.delivery_mode!=ROD && operation.delivery_mode!=RUD && !is_rudi) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (operation.type!=OperationType::Noop && operation.type!=OperationType::Send &&
@@ -346,6 +352,7 @@ private:
         pending.rendezvous_read_owner=rendezvous_read_owner;
         pending.synchronization_owner=synchronization_owner;
         pending.is_datagram=is_datagram;
+        pending.is_rudi=is_rudi;
         pending.is_read=is_read; pending.read_result=operation.read_result;
         pending.read_registration=std::move(read_registration);
         pending.is_fetching_atomic=is_fetching_atomic; pending.atomic_result=operation.atomic_result;
@@ -445,6 +452,13 @@ public:
         }
         return false;
     }
+    bool cancel_rudi(uint64_t operation) {
+        for (const auto& pending:pending_) if (pending.second.id==operation && pending.second.is_rudi) {
+            finish(pending.first,CompletionStatus::Cancelled,static_cast<uint32_t>(pending.second.read_results.bytes()),0);
+            return true;
+        }
+        return false;
+    }
     bool transport_pending(uint64_t operation) const {
         if (!operation) return false;
         if (rendezvous_sources_.count(operation)) return true;
@@ -514,6 +528,8 @@ private:
         uint16_t local_pdc=UINT16_MAX;
         uint32_t connection_start_psn=0,last_transmitted_psn=0;
         bool is_datagram=false;
+        bool is_rudi=false,rudi_all_submitted=false;
+        std::set<uint32_t> awaiting_rudi_responses; // Locally unique packet IDs, not PSNs.
         bool is_read=false;
         bool is_fetching_atomic=false,atomic_result_placed=false;
         uint32_t atomic_result_length=0;
@@ -1717,7 +1733,17 @@ private:
                 convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+
                 ((operation.synchronization && !transfer.aborting)?4:0)+request.pkt.payload.size());
-            if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
+            const bool rudi=operation.delivery_mode==RUDI;
+            if (rudi && read_failed) {
+                // A stateless peer has no message to terminate with MSG_ERROR.
+                finish(message,CompletionStatus::LocalError,0,static_cast<uint8_t>(SemanticReturnCode::InitiatorError)); return;
+            }
+            if (rudi) {
+                const auto packet_id=host_.submit_rudi(request);
+                if (!packet_id) { finish(message,CompletionStatus::ResourceExhausted,0,0); return; }
+                pending_.at(message).awaiting_rudi_responses.insert(*packet_id);
+                pending_.at(message).rudi_all_submitted=header.eom;
+            } else if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
@@ -1745,6 +1771,11 @@ private:
         const auto it=pending_.find(message);
         if (it==pending_.end()) return;
         loop_.cancel(it->second.timer);
+        const bool rudi=it->second.is_rudi;
+        if (rudi) {
+            host_.cancel_queued_message(it->second.peer,it->second.job,message);
+            discard_source(message); // Stop payload reads and packet timers before exposing completion.
+        }
         if (status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess) {
             if (auto source=sources_.find(message);source!=sources_.end()) {
                 // §3.4.6.4.1: already queued fragments own byte copies. Stop
@@ -1763,7 +1794,7 @@ private:
             completions_.push_back({it->second.id,it->second.context,status,length,code,false,{},remote_generation});
             trace_.record(node_,"operation_complete",it->second.id);
         } else trace_.record(node_,"wire_message_complete",message);
-        if (!it->second.is_datagram && !closed_) {
+        if (!it->second.is_datagram && !rudi && !closed_) {
             const ConnectionKey connection{it->second.peer,it->second.local_pdc,it->second.connection_start_psn};
             const auto cleared=transmit_clear_frontiers_.find(connection);
             const bool missing_read_data=it->second.is_read && it->second.read_results.bytes()<it->second.length;
@@ -1780,7 +1811,7 @@ private:
         if (rendezvous_read_owner) rendezvous_read_complete(rendezvous_read_owner,status,length,code);
         if (rendezvous_owner) rendezvous_eager_complete(rendezvous_owner,message,status,length,code,remote_generation);
         if (restart_owner && status!=CompletionStatus::Success) fail_deferred_target(restart_owner,status,code);
-        if (finish_read_tail) feed_submissions();
+        if (finish_read_tail || rudi) feed_submissions();
     }
 
     void context_event(const Runtime::PdcEvent& event) {
@@ -2122,6 +2153,7 @@ private:
         host_.wake();
     }
     void respond(const PDC_SES_rsp& response) {
+        if (response.delivery_mode==RUDI) { respond_rudi(response); return; }
         if (response.PDCID>=MAX_PDC && response.PDCID<MAX_PDC*2) { complete_read_return(response); return; }
         if (response.pkt.bth_type==Semantic_Response_with_Data_Header) {
             const auto& header=response.pkt.bth_header.Semantic_Response_with_Data_Header;
@@ -2171,6 +2203,35 @@ private:
                 semantic_header.return_code,it->second.returned_generation);
     }
     enum class ResponseDelivery { Guaranteed, BestEffort };
+    void respond_rudi(const PDC_SES_rsp& response) {
+        const auto message=response.rudi_message_id;
+        const auto found=pending_.find(message);
+        if (found==pending_.end() || !found->second.is_rudi || response.source_fep!=found->second.peer ||
+            !found->second.awaiting_rudi_responses.erase(response.rudi_packet_id)) return;
+        if (response.rudi_timed_out) { finish(message,CompletionStatus::Timeout,0,0); return; }
+        const bool read=found->second.is_read;
+        if (response.pkt.bth_type==Semantic_Response_Header) {
+            const auto& header=response.pkt.bth_header.Semantic_Response_Header;
+            if (header.return_code!=1) {
+                finish(message,CompletionStatus::RemoteError,0,header.return_code,header.ri_generation); return;
+            }
+            if (read || header.modified_length!=found->second.length) {
+                finish(message,CompletionStatus::LocalError,0,0); return;
+            }
+            found->second.completed_length+=std::min<uint32_t>(mtu_,found->second.length-response.rudi_request_offset);
+            found->second.returned_generation=header.ri_generation;
+        } else if (read) place_read_result(message,response.pkt);
+        else { finish(message,CompletionStatus::LocalError,0,0); return; }
+        // Keep the ordinary source producer bounded by actual per-packet
+        // responses. RUDI has no PDC window to provide this storage bound.
+        fragment_transmitted(message);
+        const auto active=pending_.find(message);
+        if (active!=pending_.end() && active->second.rudi_all_submitted && active->second.awaiting_rudi_responses.empty()) {
+            const auto length=read?static_cast<uint32_t>(active->second.read_results.bytes()):active->second.completed_length;
+            if (length!=active->second.length) finish(message,CompletionStatus::LocalError,length,0);
+            else finish(message,CompletionStatus::Success,length,1,active->second.returned_generation);
+        }
+    }
     void reply(const PDC_SES_req& request, uint8_t code, uint32_t length, bool report_message_result=true,
                 std::optional<uint8_t> returned_generation={},ResponseDelivery delivery=ResponseDelivery::Guaranteed) {
         SES_PDS_rsp response{}; response.PDCID=request.PDCID;
@@ -2874,7 +2935,64 @@ private:
             host_.wake(); trace_.record(node_,"fetching_atomic_executed",zero_length?0:width);
         } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
+    // §3.4.2.13 / §3.5.23: inspect and place each packet independently.
+    // Duplicates repeat the idempotent access. There is no Incoming record,
+    // message assembly, recovery cache, target CQ, or Clear lifetime here.
+    void receive_rudi(const PDC_SES_req& request) {
+        if (request.pkt.bth_type!=Standard_Header) return;
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto respond=[&](SemanticReturnCode code,uint8_t generation) {
+            SEStoPDS_pkt response{}; response.bth_type=Semantic_Response_Header;
+            auto& result=response.bth_header.Semantic_Response_Header;
+            result.opcode=1; result.return_code=static_cast<uint8_t>(code); result.job_id=header.job_id;
+            result.message_id=header.msg_id; result.ri_generation=generation;
+            result.modified_length=code==SemanticReturnCode::Ok?header.request_length:0;
+            host_.respond_rudi(request,response); // A full output queue is recovered by source RTO.
+        };
+        const auto reject=[&](SemanticReturnCode code) { respond(code,header.ri_generation); };
+        if (request.next_hdr!=UET_HDR_REQUEST_STD || header.version || header.hd || (header.opcode!=1 && header.opcode!=2)) {
+            reject(SemanticReturnCode::UnsupportedOperation); return;
+        }
+        if (header.ie) { reject(SemanticReturnCode::InitiatorError); return; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        const uint32_t offset=header.som?0:header.diff.som_false.message_offset;
+        const bool read=header.opcode==2;
+        if (offset>header.request_length || request.pkt.payload.size()>header.request_length-offset ||
+            request.pkt.payload.size()>mtu_ || (read && (!request.pkt.payload.empty() || offset%mtu_ ||
+                (!header.som && header.diff.som_false.payload_length))) ||
+            (!read && !header.som && header.diff.som_false.payload_length!=request.pkt.payload.size())) {
+            reject(SemanticReturnCode::UnsupportedSize); return;
+        }
+        // Private rendezvous aliases require ACK/Clear-confirmed ownership.
+        // An unacknowledged RUDI response cannot satisfy that contract. Do not
+        // inherit the trusted RendezvousSource memory-access origin here.
+        if (rendezvous_source_aliases_.count(header.match_bits)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
+        ResourceSelection selected{};
+        try {
+            selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,ResourceSpace::Rma,header.ri_generation);
+        } catch (const AddressingError& error) { respond(error.code,error.generation); return; }
+        const auto count=read?std::min<uint32_t>(mtu_,header.request_length-offset):static_cast<uint32_t>(request.pkt.payload.size());
+        try {
+            const auto& registration=memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,header.buffer_offset,
+                header.request_length,read?Access::Read:Access::Write,selected.resource_index,header.rel);
+            if (!registration.idempotent_safe) { reject(SemanticReturnCode::OperationViolation); return; }
+            // Authorizing the full [base,base+request_length) span above proves
+            // this addition fits. No wire address is a process pointer.
+            const auto placement_offset=header.buffer_offset+offset;
+            if (!read) {
+                memory_.write(header.job_id,selected.absolute_pid,header.match_bits,placement_offset,request.pkt.payload,selected.resource_index,header.rel);
+                trace_.record(node_,"rudi_write_placed",count); respond(SemanticReturnCode::Ok,selected.generation); return;
+            }
+            SEStoPDS_pkt response{}; response.bth_type=Semantic_Response_with_Data_Header;
+            response.payload=memory_.read(header.job_id,selected.absolute_pid,header.match_bits,placement_offset,count,selected.resource_index,header.rel);
+            auto& result=response.bth_header.Semantic_Response_with_Data_Header;
+            result.opcode=2; result.return_code=1; result.job_id=header.job_id; result.read_request_msg_id=header.msg_id;
+            result.message_offset=offset; result.payload_length=count; result.modified_length=header.request_length;
+            host_.respond_rudi(request,response); trace_.record(node_,"rudi_read_executed",count);
+        } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
+    }
     void receive(const PDC_SES_req& request) {
+        if (request.delivery_mode==RUDI) { receive_rudi(request); return; }
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type==Semantic_Response_with_Data_Header) { receive_return_data(request); return; }
         if (request.pkt.bth_type!=Standard_Header) { reply(request,SemanticReturnCode::UnsupportedOperation,0); return; }
