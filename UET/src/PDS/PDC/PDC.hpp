@@ -670,6 +670,10 @@ protected:
     std::set<uint32_t> completed_rx_psns_;
     // §3.5.17: retain only the required-delivery PSN, never READ result bytes.
     std::set<uint32_t> uncached_read_responses_;
+    // A Clear for an earlier READ data ACK can arrive while a duplicate READ
+    // is executing again. Preserve that valid frontier until its current RX
+    // handle is consumed; never require the source to repeat an accepted fact.
+    std::optional<uint32_t> deferred_read_clear_;
     bool reissueReceivedRead(PDStoNET_pkt* packet);
     bool requiresReadReissue(uint32_t sequence) const {
         const auto request=tx_pkt_buffer.find(sequence);

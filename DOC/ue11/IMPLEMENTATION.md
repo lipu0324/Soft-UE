@@ -45,7 +45,9 @@ local-ID separation; see [initial sequences](INITIAL-SEQUENCES.md).
 Standard SES requests reserve bounded message state before PDS receipt and use
 resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
 Clear cannot cross a retained receive handle before its first SES response;
-valid prefixes and NO_RESPONSE retain their standard behavior. See
+valid prefixes and NO_RESPONSE retain their standard behavior. A valid Clear
+for an earlier READ data ACK waits until a currently reissued READ consumes its
+handle, then applies without requiring another source Clear. See
 [Clear processing](CLEAR-PROCESSING.md).
 
 Native tagged matching keeps tag, Job-level rank and RMA keys separate. Exact and

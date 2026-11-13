@@ -570,15 +570,24 @@ void PDC::clearReceivedPacketsThrough(uint32_t clear_through)
     // A clear may cover only already received contiguous PSNs. Otherwise a
     // malformed peer could silently discard a hole in the RUD receive window.
     if (clear_through-rx_cur_psn && clear_through-rx_cur_psn<0x80000000u) return;
-    // §3.5.11.4.3: Clear claims receipt of the associated ACKs. A retained
-    // receive handle has not produced ANY SES response yet, so that claim
-    // cannot cover it. Ignore the malformed advance before emitting an event
-    // that could retire an asynchronous SES owner. NO_RESPONSE consumes its
-    // handle normally and therefore remains eligible for Clear (§3.5.13).
-    if (advance && std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),[&](const auto& request) {
+    // §3.5.11.4.3: a first response still pending in SES cannot have been
+    // acknowledged. A reissued READ is different: its old data ACK may have
+    // arrived before a duplicate request was forwarded (§3.5.17). Keep that
+    // valid Clear until the new invocation consumes its handle, preserving
+    // asynchronous SES ownership without losing the source's received fact.
+    bool read_reexecution_active=false;
+    if (advance) for (const auto& request:rx_pkt_map) {
         const uint32_t distance=request.second.psn-rx_clear_psn;
-        return distance && distance<=advance;
-    })) return;
+        if (!distance || distance>advance) continue;
+        if (!uncached_read_responses_.count(request.second.psn)) return;
+        read_reexecution_active=true;
+    }
+    if (read_reexecution_active) {
+        if (!deferred_read_clear_ || clear_through-*deferred_read_clear_<0x80000000u)
+            deferred_read_clear_=clear_through;
+        return;
+    }
+    if (deferred_read_clear_ && clear_through-*deferred_read_clear_<0x80000000u) deferred_read_clear_.reset();
     rx_clear_psn=clear_through;
     if (congestion_engaged_ && runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->receive_cleared(congestionConnection(),clear_through);
@@ -873,6 +882,7 @@ void PDC::freePDC()
     tx_pkt_buffer.clear();
     tx_ack_buffer.clear();
     uncached_read_responses_.clear();
+    deferred_read_clear_.reset();
 
     
     while (!tx_pkt_q.empty()) tx_pkt_q.pop();
@@ -1837,6 +1847,10 @@ void PDC::txRsp(SES_PDC_rsp *rsp){
     else sendAck(rsp->pkt.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
         0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
     rx_pkt_map.erase(rsp->rx_pkt_handle);//Delete metadata //删除元数据
+    if (deferred_read_clear_) {
+        const auto clear_through=*deferred_read_clear_; deferred_read_clear_.reset();
+        clearReceivedPacketsThrough(clear_through);
+    }
 
     //FUNCTION_LOG_EXIT();
 }

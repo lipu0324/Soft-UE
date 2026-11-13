@@ -9,7 +9,7 @@
 `clear_processing_safety_test` 的旧版本负例已复现该推进，日志为
 `/tmp/softue-clear-processing-before-tests.log`。
 
-当前对这种源尚不可能拥有相应ACK的Clear采用防御策略：如果拟推进区间内仍有真实
+当前对这种源尚不可能拥有相应ACK的Clear采用防御策略：如果拟推进区间内仍有尚未产生首次响应的真实
 RX句柄，则忽略整次非法推进，保留响应、窗口和SES所有权。有效的较短prefix仍可清理；
 SES实际返回后，重发Clear正常退休响应cache。该检查在发ReceiveCleared事件之前进行，
 对显式Clear和请求中的piggyback Clear使用相同入口。
@@ -34,3 +34,22 @@ Profile验收声明。
 发送响应并核对句柄消费，保留所有窗口、保证响应和回绕断言。窗口/新Clear两项普通及
 消毒器回归另行通过；原失败保留在
 `/tmp/softue-clear-processing-ci-off-failure.log`。
+
+## READ重执行期间的合法Clear
+
+§3.5.17允许不缓存READ数据ACK，只保留其PSN。丢包恢复再次交给SES执行READ时，
+会产生一个新的RX句柄；但源可能已经收到早先的ACK。因此，不能把所有活动句柄都当成
+“尚未产生首次响应”。直接忽略这次合法Clear会丢失清理事实；直接应用则可能先退休
+仍在执行READ的SES所有者。
+
+PDC现在用 `uncached_read_responses_` 区分这两种情况。首次响应尚未产生的Clear仍被
+拒绝；已产生过READ数据ACK、但正在重执行的区间，把最新合法前沿保存在
+`deferred_read_clear_`。当前句柄被真实 `txRsp` 消费后，重新经过同一Clear入口应用；
+如果区间还有READ重执行，就继续等待。这个可选32位前沿归属于单个PDC，关闭时清空，
+不增加目标数据缓存，也不要求源重复发送已经成立的事实。
+
+新增4个RUD/ROD与32位序号边界场景，真实执行首次READ响应、重复请求、控制Clear和
+第二次响应。负例 `/tmp/softue-read-clear-race-before-tests.log` 在旧守卫上失败；
+修复后的Clear与RUD窗口两项普通回归2/2通过（0.01s），ASan/UBSan/泄漏检查2/2通过
+（0.08s），日志分别为 `/tmp/softue-read-clear-race-after-tests.log` 与
+`/tmp/softue-read-clear-race-asan-tests.log`。该内核测试现共20个场景，完整版本回归另行记录。
