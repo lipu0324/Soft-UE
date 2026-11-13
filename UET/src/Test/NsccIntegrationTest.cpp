@@ -26,7 +26,10 @@ public:
         }
         if (packet.PDS_type==RUOD_cp_header && packet.PDS_header.RUOD_cp_header.ctl_type==ACK_req) ++ack_queries;
         if (replace_semantic_ack && packet.PDS_type==RUOD_ack_header &&
-            packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE) {
+            packet.PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE &&
+            (packet.PDS_header.RUOD_ack_header.flags.req&1)) {
+            // Lose the guaranteed EOM result. An intermediate DEFAULT can be
+            // inferred from a later CACK and need not trigger an ACK Request.
             replace_semantic_ack=false; ++dropped;
             auto receipt=packet; receipt.PDS_header.RUOD_ack_header.next_hdr=UET_HDR_NONE; receipt.SESpkt={};
             auto receipt_frame=frame; receipt_frame.bytes=UetWireCodec::encode(receipt,decoded.network);

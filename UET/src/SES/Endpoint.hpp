@@ -75,11 +75,13 @@ public:
     Endpoint(uint32_t node, Runtime::PdsHost& host, Runtime::EventLoop& loop,
              Runtime::Trace& trace, size_t payload_mtu=1024,
              Runtime::Time timeout=100*Runtime::kMillisecond,MemoryRegistry* domain_memory=nullptr,size_t submission_window=8,
-             size_t receive_message_limit=4096,size_t unexpected_buffer_bytes=256*1024,size_t read_response_limit=8)
+             size_t receive_message_limit=4096,size_t unexpected_buffer_bytes=256*1024,size_t read_response_limit=8,
+             size_t read_result_window=8)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
           memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit),
-          unexpected_limit_(unexpected_buffer_bytes),read_response_limit_(read_response_limit) {
-        if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ || !read_response_limit_ || read_response_limit_>UINT16_MAX)
+          unexpected_limit_(unexpected_buffer_bytes),read_response_limit_(read_response_limit),read_result_window_(read_result_window) {
+        if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ ||
+            !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
         // §3.5.12.1: a threshold at/above MTU selects a single-MTU READ
         // fabric. Otherwise large messages use reverse PDS requests.
@@ -239,6 +241,11 @@ public:
     }
     size_t retained_read_packets() const { return read_packet_reservations_.size(); }
     size_t pending_read_returns() const { return read_returns_.size(); }
+    size_t pending_read_results() const {
+        size_t count=0;
+        for (const auto& operation:pending_) count+=operation.second.read_requests_awaiting_data.size();
+        return count;
+    }
     size_t retained_receive_messages() const { return incoming_.size(); }
     size_t leased_message_ids() const { return message_leases_.size(); }
     void close() {
@@ -273,6 +280,7 @@ private:
         std::optional<ReadResultBuffer> read_result;
         std::optional<Region> read_registration;
         ReadCoverage read_results;
+        std::set<uint32_t> read_requests_awaiting_data;
         bool end_of_message_transmitted=false;
         // Only outstanding PSNs are retained, so a multi-gigabyte stream
         // consumes the PDS window's space rather than one entry per fragment.
@@ -281,7 +289,16 @@ private:
         uint8_t returned_generation=0;
     };
     using ConnectionKey=std::tuple<uint32_t,uint16_t,uint32_t>;
-    struct MessageLease { ConnectionKey connection; uint32_t last_psn; bool end_of_message_transmitted; uint64_t operation; };
+    struct MessageLease {
+        ConnectionKey connection;
+        uint32_t last_psn;
+        bool end_of_message_transmitted;
+        uint64_t operation;
+        // A peer may accept READ before sending its data. Forward Clear alone
+        // cannot retire a failed READ MID while unique return data is late.
+        bool requires_connection_retirement=false;
+        bool connection_close_requested=false;
+    };
     struct Posted { uint32_t job; uint16_t pid; uint64_t key,offset; uint32_t capacity; uint64_t context; uint16_t resource_index; Region registration; };
     struct Incoming {
         uint8_t opcode;
@@ -345,6 +362,7 @@ private:
     // Holding each original READ ACK until its return packet completes keeps
     // PDS payload storage and response tokens bounded (§3.5.20.2.2).
     size_t read_response_limit_;
+    size_t read_result_window_;
     uint16_t next_read_response_=0;
     struct ReadReservation { MessageKey message; bool processed=false; };
     std::map<ReadPacketIdentity,ReadReservation> read_packet_reservations_;
@@ -368,6 +386,7 @@ private:
             const bool datagram=operation.type==OperationType::DatagramSend;
             const bool atomic=operation.type==OperationType::Atomic;
             const bool read=operation.type==OperationType::Read && !transfer.aborting;
+            if (read && pending_.at(message).read_requests_awaiting_data.size()>=read_result_window_) break;
             const auto atomic_width=atomic?integer_atomic_width(operation.atomic_datatype):1;
             const auto fragment_capacity=mtu_-(mtu_%atomic_width);
             auto count=transfer.aborting?size_t{0}:static_cast<size_t>(std::min<uint64_t>(fragment_capacity,transfer.length-transfer.offset));
@@ -413,6 +432,7 @@ private:
             if (atomic && !transfer.aborting) convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:0)+request.pkt.payload.size());
             if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
+            if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
             if (header.eom) { transfer.all_submitted=true; submission_order_.pop_front(); }
             if (read_failed) finish(message,CompletionStatus::LocalError,0,static_cast<uint8_t>(SemanticReturnCode::InitiatorError));
@@ -452,9 +472,12 @@ private:
         if (!it->second.is_datagram && !closed_) {
             const ConnectionKey connection{it->second.peer,it->second.local_pdc,it->second.connection_start_psn};
             const auto cleared=transmit_clear_frontiers_.find(connection);
-            if (it->second.local_pdc==UINT16_MAX || !it->second.end_of_message_transmitted || cleared==transmit_clear_frontiers_.end() ||
+            const bool missing_read_data=it->second.is_read && it->second.read_results.bytes()<it->second.length;
+            if (missing_read_data || it->second.local_pdc==UINT16_MAX || !it->second.end_of_message_transmitted || cleared==transmit_clear_frontiers_.end() ||
                 cleared->second-it->second.last_transmitted_psn>=0x80000000u)
-                message_leases_[message]={connection,it->second.last_transmitted_psn,it->second.end_of_message_transmitted,it->second.id};
+                message_leases_[message]={connection,it->second.last_transmitted_psn,it->second.end_of_message_transmitted,it->second.id,missing_read_data,false};
+            if (missing_read_data && it->second.local_pdc!=UINT16_MAX)
+                message_leases_.at(message).connection_close_requested=host_.request_connection_close(it->second.local_pdc);
         }
         const bool finish_read_tail=it->second.is_read && status!=CompletionStatus::Success && status!=CompletionStatus::LocalSuccess;
         pending_.erase(it);
@@ -480,7 +503,7 @@ private:
                 }
             }
         }
-        if (event.local_pdc>=MAX_PDC) {
+        if (event.local_pdc>=MAX_PDC && event.local_pdc<MAX_PDC*2) {
             if (event.kind==Runtime::PdcEventKind::RequestTransmitted || event.kind==Runtime::PdcEventKind::RequestRejected) {
                 const auto found=read_returns_.find(event.message_id);
                 if (found!=read_returns_.end()) {
@@ -526,7 +549,11 @@ private:
                 if (!operation->second.is_datagram)
                     operation->second.awaiting_semantic_responses.insert(event.sequence);
             } else if (auto lease=message_leases_.find(event.message_id);lease!=message_leases_.end()) {
-                lease->second={connection,event.sequence,lease->second.end_of_message_transmitted || event.end_of_message,lease->second.operation};
+                auto& retained=lease->second;
+                retained.connection=connection; retained.last_psn=event.sequence;
+                retained.end_of_message_transmitted|=event.end_of_message;
+                if (retained.requires_connection_retirement && !retained.connection_close_requested)
+                    retained.connection_close_requested=host_.request_connection_close(event.local_pdc);
             }
             fragment_transmitted(event.message_id);
         } else if (event.kind==Runtime::PdcEventKind::TransmitCleared) {
@@ -534,7 +561,7 @@ private:
             if (previous!=transmit_clear_frontiers_.end() && event.sequence-previous->second>=0x80000000u) return;
             transmit_clear_frontiers_[connection]=event.sequence;
             for (auto lease=message_leases_.begin();lease!=message_leases_.end();) {
-                if (lease->second.connection==connection && lease->second.end_of_message_transmitted &&
+                if (lease->second.connection==connection && !lease->second.requires_connection_retirement && lease->second.end_of_message_transmitted &&
                     event.sequence-lease->second.last_psn<0x80000000u)
                     lease=message_leases_.erase(lease);
                 else ++lease;
@@ -640,6 +667,9 @@ private:
         if (addition==ReadCoverage::Addition::Invalid) {
             finish(message,CompletionStatus::LocalError,previous_bytes,0); return;
         }
+        if (addition==ReadCoverage::Addition::Added && !operation.read_requests_awaiting_data.erase(offset)) {
+            finish(message,CompletionStatus::LocalError,previous_bytes,0); return;
+        }
         try {
             if (addition==ReadCoverage::Addition::Added && operation.read_registration) {
                 const auto& destination=*operation.read_result;
@@ -653,6 +683,7 @@ private:
         }
         trace_.record(node_,"read_result_placed",operation.read_results.bytes());
         maybe_complete_read(message);
+        feed_submissions();
     }
     void receive_return_data(const PDC_SES_req& request) {
         const auto& header=request.pkt.bth_header.Semantic_Response_with_Data_Header;
@@ -669,7 +700,7 @@ private:
         host_.wake();
     }
     void respond(const PDC_SES_rsp& response) {
-        if (response.PDCID>=MAX_PDC) { complete_read_return(response); return; }
+        if (response.PDCID>=MAX_PDC && response.PDCID<MAX_PDC*2) { complete_read_return(response); return; }
         if (response.pkt.bth_type==Semantic_Response_with_Data_Header) {
             const auto& header=response.pkt.bth_header.Semantic_Response_with_Data_Header;
             const auto pending=pending_.find(header.read_request_msg_id);
