@@ -93,7 +93,11 @@ def validate(config):
                f"udp_destination_port {udp_destination_port}"]
     pds = mapping(config.get("pds", {}),
                   {"default_mpr", "local_packet_capacity", "advertised_mpr", "mpr_zero_override",
-                   "rud_mapping", "rod_mapping"}, "pds")
+                   "rud_mapping", "rod_mapping", "max_ack_data_size"}, "pds")
+    max_ack_data_size = integer(pds.get("max_ack_data_size", 16), 0, 8192, "pds.max_ack_data_size")
+    if max_ack_data_size % 16:
+        raise ValueError("pds.max_ack_data_size must be a multiple of 16 bytes")
+    records.append(f"max_ack_data_size {max_ack_data_size}")
     default_mpr = integer(pds.get("default_mpr", 8), 0, 255, "pds.default_mpr")
     packet_capacity = integer(pds.get("local_packet_capacity", 8), 1, 32640, "pds.local_packet_capacity")
     zero_override = integer(pds.get("mpr_zero_override", 0), 0, 32640, "pds.mpr_zero_override")

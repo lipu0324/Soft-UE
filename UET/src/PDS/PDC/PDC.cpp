@@ -150,9 +150,10 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
 
 // Allocate packet metadata only after message admission succeeds. The returned
 // RX handle binds the eventual SES response to this accepted packet.
-uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
+uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
 {
     RX_pkt_meta meta = {};
+    meta.is_read=pkt->SESpkt.bth_type==Standard_Header && pkt->SESpkt.bth_header.Standard_Header.opcode==2;
     meta.wire_entropy=pkt->wire_entropy;
     meta.congestion_marked=pkt->network_ecn==3;
     meta.arrival_time_ns=pkt->receive_time_ns;
@@ -176,9 +177,25 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt)
     rx_pkt_map.insert({handle, meta});
     if (runtime_ && runtime_->congestion_control) {
         congestion_engaged_=true;
-        runtime_->congestion_control->received(congestionConnection(),*pkt);
+        runtime_->congestion_control->received(congestionConnection(),*pkt,duplicate);
     }
     return handle;
+}
+
+bool PDC::reissueReceivedRead(PDStoNET_pkt* packet) {
+    if (!packet || !uncached_read_responses_.count(packet->PDS_header.RUOD_req_header.psn) ||
+        packet->SESpkt.bth_type!=Standard_Header || packet->SESpkt.bth_header.Standard_Header.opcode!=2) return false;
+    const auto sequence=packet->PDS_header.RUOD_req_header.psn;
+    const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+        [sequence](const auto& entry) { return entry.second.psn==sequence; });
+    if (processing) sendNack(packet->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr,packet);
+    else if (admitSemanticRequest(*packet)) {
+        // Re-read through SES/MR authority. It is the same received PSN and
+        // must not increment NSCC's cumulative received-byte counter again.
+        const auto handle=processRxReq(packet,true);
+        fwdReq2SES(handle,rx_pkt_map.at(handle),&packet->SESpkt);
+    }
+    return true;
 }
 
 void PDC::releaseCongestionState() {
@@ -281,6 +298,19 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     // §3.5.12.5: deliver the explicit semantic result before inferring defaults.
     // This preserves a guaranteed error when the same ACK advances CACK.
     const auto explicit_request=tx_pkt_buffer.find(explicit_sequence);
+    if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && requiresReadReissue(explicit_sequence) &&
+        acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA && packet.SESpkt.bth_type==Semantic_Response_with_Data_Header) {
+        const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
+        const auto& result=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+        if (!result.version && result.opcode==2 && result.return_code==1 && result.job_id==request.job_id &&
+            result.read_request_msg_id==request.msg_id && !result.message_offset &&
+            result.modified_length==request.request_length && result.payload_length==request.request_length &&
+            packet.SESpkt.payload.size()==request.request_length) {
+            auto response=packet.SESpkt;
+            if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);
+            semantic_completed_tx_.insert(explicit_sequence);
+        }
+    }
     if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && explicit_request->second.PDS_type==RUOD_req_header &&
         acknowledgment.next_hdr==UET_HDR_RESPONSE && packet.SESpkt.bth_type==Semantic_Response_Header) {
         const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
@@ -288,6 +318,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         auto& semantic=response.bth_header.Semantic_Response_Header;
         const bool query_default=semantic.opcode==0 && semantic.job_id==0 && !semantic.modified_length;
         if (semantic.version==0 && semantic.opcode<=1 && semantic.message_id==request.msg_id &&
+            (!requiresReadReissue(explicit_sequence) || semantic.return_code!=1) &&
             (semantic.job_id==request.job_id || query_default)) {
             // Table 3-69 deliberately omits JobID/generation from an ACK
             // Request's DEFAULT. Recover them from this exact PDC/PSN, never
@@ -301,7 +332,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     }
     for (const auto& cached:tx_pkt_buffer) {
         if (cached.second.PDS_type!=RUOD_req_header || cached.second.SESpkt.bth_type!=Standard_Header ||
-            semantic_completed_tx_.count(cached.first)) continue;
+            semantic_completed_tx_.count(cached.first) || requiresReadReissue(cached.first)) continue;
         const uint32_t advance=acknowledgment.cack_psn-cached.first;
         // §3.5.13: equality is insufficient. SACK bits never enter this test.
         if (!advance || advance>=0x80000000u) continue;
@@ -330,6 +361,7 @@ void PDC::decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt
     };
     for (const auto sequence:completed_rx_psns_) include(sequence);
     for (const auto& response:tx_ack_buffer) include(response.first);
+    for (const auto sequence:uncached_read_responses_) include(sequence);
     // sendAck precedes insertion of a newly generated guaranteed response.
     // A bare ACK may instead be a control/Clear update; never advertise an
     // in-progress SES request merely because it is in the receipt bitmap.
@@ -528,6 +560,11 @@ void PDC::clearReceivedPacketsThrough(uint32_t clear_through)
             entry=tx_ack_buffer.erase(entry);
         } else ++entry;
     }
+    for (auto sequence=uncached_read_responses_.begin();sequence!=uncached_read_responses_.end();) {
+        if (clear_through-*sequence<0x80000000u) {
+            completed_rx_psns_.insert(*sequence); sequence=uncached_read_responses_.erase(sequence);
+        } else ++sequence;
+    }
     for (auto sequence=received_rx_psns_.begin();sequence!=received_rx_psns_.end();) {
         if (clear_through-*sequence<0x80000000u) sequence=received_rx_psns_.erase(sequence);
         else ++sequence;
@@ -559,7 +596,7 @@ void PDC::reTx(uint32_t psn){
     if (found == tx_pkt_buffer.end()) return;
     PDStoNET_pkt p = found->second;
     if (runtime_ && runtime_->standard_wire && p.PDS_type==RUOD_req_header &&
-        tx_pkt_map.at(psn).delivery_confirmed) {
+        tx_pkt_map.at(psn).delivery_confirmed && !requiresReadReissue(psn)) {
         // Data receipt has already clocked NSCC. Re-sending that data would
         // charge another attempt that duplicate suppression can never count
         // as new bytes. Ask for the retained SES response (§3.5.16.2).
@@ -596,7 +633,7 @@ void PDC::reTx(uint32_t psn){
         }
     }
     else return;
-    if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header) {
+    if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header && !tx_pkt_map.at(psn).delivery_confirmed) {
         auto& metadata=tx_pkt_map.at(psn);
         metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
         metadata.congestion_inflight=true;
@@ -800,6 +837,7 @@ void PDC::freePDC()
     rx_pkt_map.clear();
     tx_pkt_buffer.clear();
     tx_ack_buffer.clear();
+    uncached_read_responses_.clear();
 
     
     while (!tx_pkt_q.empty()) tx_pkt_q.pop();
@@ -1081,6 +1119,9 @@ void PDC::rxCtrlAckReq(PDStoNET_pkt* packet)
     if (processing) {
         sendNack(0,requested_sequence,UET_RCVD_SES_PROCG,0,nullptr,packet); return;
     }
+    if (uncached_read_responses_.count(requested_sequence)) {
+        sendNack(0,requested_sequence,UET_ACK_WITH_DATA,rx_cur_psn+1,nullptr,packet); return;
+    }
     const auto since_cumulative=requested_sequence-cack_psn;
     if (received_rx_psns_.count(requested_sequence) || !since_cumulative || since_cumulative>=0x80000000u) {
         SEStoPDS_pkt response{}; response.bth_type=Semantic_Response_Header;
@@ -1351,6 +1392,12 @@ void PDC::rxNack(PDStoNET_pkt* packet)
     if (peer_sequence_window_ && negative_ack.nack_psn-peer_sequence_window_->cumulative_ack()>=0x80000000u) return;
     const bool ordered=mode==ROD;
     auto& named_metadata=tx_pkt_map.at(negative_ack.nack_psn);
+    if (negative_ack.nack_code==UET_ACK_WITH_DATA && requiresReadReissue(negative_ack.nack_psn)) {
+        // The query response says the original READ must be issued again. It
+        // does not report a fresh data loss or a GoBackN Expected_PSN range.
+        scheduleNegativeAcknowledgmentRetry(negative_ack.nack_psn,runtime_?runtime_->nack_retransmission_delays_ns[0]:0);
+        return;
+    }
     const bool semantic_query=named_metadata.delivery_confirmed && negative_ack.nack_code==UET_RCVD_SES_PROCG;
     if (named_metadata.delivery_confirmed && policy->action==UET::PDS::NegativeAcknowledgmentAction::Retransmit &&
         !semantic_query && negative_ack.nack_code!=UET_PKT_NOT_RCVD && negative_ack.nack_code!=UET_ACK_WITH_DATA)
@@ -1550,12 +1597,19 @@ void PDC::sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SE
     queueAcknowledgment(psn,p);
     LOG_DEBUG(__FUNCTION__, formatLogMessage("ACK包已加入发送队列"));
 
-    if (gtd_del)
+    const bool read_data=next_hdr==UET_HDR_RESPONSE_DATA && std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+        [psn](const auto& entry) { return entry.second.psn==psn && entry.second.is_read; });
+    if (gtd_del && read_data)
+    {
+        uncached_read_responses_.insert(psn);
+    }
+    else if (gtd_del)
     { 
         LOG_INFO(__FUNCTION__, formatLogMessage("保证交付模式,保存到ACK缓冲区"));
         // Receive-side guaranteed responses have their own cache. Mixing
         // their PSNs into TX metadata aliases the two directional windows.
         tx_ack_buffer.insert(std::make_pair(psn, p)); 
+        uncached_read_responses_.erase(psn);
     }
 
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] tx_ack包发送,psn : " << psn << "cack_psn :" << cack_psn << std::endl;
@@ -1738,7 +1792,8 @@ void PDC::txRsp(SES_PDC_rsp *rsp){
         LOG_DEBUG(__FUNCTION__, formatLogMessage("响应不包含SES层数据"));
         sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
     }
-    else sendAck(PDS_next_hdr::UET_HDR_RESPONSE,0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
+    else sendAck(rsp->pkt.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
+        0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
     rx_pkt_map.erase(rsp->rx_pkt_handle);//Delete metadata //删除元数据
 
     //FUNCTION_LOG_EXIT();

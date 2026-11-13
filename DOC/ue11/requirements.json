@@ -129,7 +129,8 @@
         "retry_timing_test",
         "udp_encapsulation_test",
         "network_defaults_test",
-        "pds_invalid_type_test"
+        "pds_invalid_type_test",
+        "read_ack_data_test"
       ],
       "profiles": [
         "AI_BASE",
@@ -454,13 +455,16 @@
       "id": "SES-READ",
       "reference": "Table 3-1",
       "summary": "多包 READ 与数据响应",
-      "status": "missing",
-      "tests": [],
+      "status": "partial",
+      "tests": [
+        "read_ack_data_test"
+      ],
       "profiles": [
         "AI_FULL",
         "HPC",
         "UNIFIED_LOCAL"
-      ]
+      ],
+      "evidence_note": "Native single-MTU RUD/ROD READ up to configured Max_ACK_Data_Size (default 16 B); registered local result authority, data ACK, zero length, original-request reissue and no target result-data cache. Multi-packet/return-direction READ, optimized headers, provider mapping and RODL remain open; see READ-ACK-DATA.md."
     },
     {
       "id": "SES-TAG",

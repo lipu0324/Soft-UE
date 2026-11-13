@@ -46,6 +46,7 @@ int main() {
         CHECK(completion.remote_code==0x1c);
         CHECK(target.memory().read(1,1,region.key,0,16)==before);
         Operation unsupported; unsupported.type=OperationType::Read; unsupported.peer=2;
+        unsupported.read_length=source.capabilities().max_read_length+1;
         source.submit(unsupported);
         CHECK(source.poll_completion(completion)); CHECK(completion.status==CompletionStatus::Unsupported);
         CHECK(!source.capabilities().ai_base); CHECK(source.capabilities().atomic);
@@ -80,7 +81,7 @@ int main() {
             auto& h=request.pkt.bth_header.Standard_Header;
             h.opcode=1; h.som=1; h.eom=1; h.dc=1; h.rel=variant!=0;
             h.hd=variant==1; h.ri_generation=variant==2;
-            if (variant==1) h.opcode=2; // READ remains unsupported on this native interface.
+            if (variant==1) h.opcode=2; // READ cannot carry SEND/WRITE header data or payload.
             h.msg_id=60000+variant; h.job_id=1; h.PIDonFEP=1; h.resource_index=1;
             if (variant==0) h.PIDonFEP=99; // Absolute PID is valid only when configured.
             h.initiator=1; h.match_bits=region.key; h.request_length=1;

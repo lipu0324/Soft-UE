@@ -118,6 +118,13 @@ public:
             throw std::logic_error("configure PDC mapping before opening connections");
         services_.pdc_mapping=configured;
     }
+    void configure_read_ack_data(uint32_t maximum_bytes) {
+        if (maximum_bytes>8192 || maximum_bytes%16)
+            throw std::invalid_argument("Max_ACK_Data_Size must be 0..8192 in 16-byte units");
+        if (stopped_ || manager_.getPDSStatus().open_cnt)
+            throw std::logic_error("configure READ responses before opening connections");
+        services_.max_ack_data_size=maximum_bytes;
+    }
     void configure_trimming(const NetworkLayer::TrimmingOptions& options) {
         options.validate();
         if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)

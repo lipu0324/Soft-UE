@@ -82,6 +82,9 @@ struct Services {
     uint32_t mpr_zero_override=0; // §3.5.11.13: zero means ignore received MPR=0.
     PDS::PsnRangeConfiguration psn_ranges;
     PDS::PdcMappingConfiguration pdc_mapping;
+    // UE 1.1 Table 3-35: fabric-wide READ return-data threshold, in bytes.
+    // The current SES adapter supports the ACK-data branch (one Payload MTU).
+    uint32_t max_ack_data_size=16;
     uint16_t next_probe_opaque=0; // Host-scoped identifier persists across PDC reuse.
     bool enable_automatic_window_probes=true; // May be disabled for isolated admission experiments.
     bool actual_transmit_notifications=false; // Set by a port with a first-bit departure boundary.

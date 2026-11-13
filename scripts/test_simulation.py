@@ -62,6 +62,7 @@ def main():
                         "advertised_mpr": [-1, 256, True, 1.5],
                         "mpr_zero_override": [-1, 32641, True, 1.5]}.items():
         invalid.extend(dict(base, pds={key: value}) for value in values)
+    invalid.extend(dict(base, pds={"max_ack_data_size": value}) for value in [-1, 1, 15, 17, 8193, True, 1.5])
     invalid.append(dict(base, pds={"advertised_mpr": 0}))
     for mode in ["rud", "rod"]:
         for field in ["include_job_id", "include_source_pid", "include_target_pid", "include_resource_index"]:

@@ -337,6 +337,7 @@ struct TX_pkt_meta
  */
 struct RX_pkt_meta
 {
+    bool is_read=false; // Distinguishes re-executable READ results from cached fetching-atomic results.
     uint16_t wire_entropy=0;
     bool congestion_marked=false;
     UET::Runtime::Time arrival_time_ns=0;
@@ -662,6 +663,16 @@ protected:
     // guaranteed response blocks CACK until the peer explicitly clears it.
     std::set<uint32_t> received_rx_psns_;
     std::set<uint32_t> completed_rx_psns_;
+    // §3.5.17: retain only the required-delivery PSN, never READ result bytes.
+    std::set<uint32_t> uncached_read_responses_;
+    bool reissueReceivedRead(PDStoNET_pkt* packet);
+    bool requiresReadReissue(uint32_t sequence) const {
+        const auto request=tx_pkt_buffer.find(sequence);
+        if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
+            request->second.PDS_type!=RUOD_req_header || request->second.SESpkt.bth_type!=Standard_Header) return false;
+        const auto& header=request->second.SESpkt.bth_header.Standard_Header;
+        return header.opcode==2 && header.request_length<=runtime_->max_ack_data_size;
+    }
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();
     UET::Runtime::Services* runtime_ = nullptr;
@@ -718,7 +729,7 @@ public:
      * @param pkt Received network packet Received network packet
      * @return Processing result handle Processing result handle
      */
-    uint16_t processRxReq(PDStoNET_pkt *pkt);
+    uint16_t processRxReq(PDStoNET_pkt *pkt,bool duplicate=false);
 
     /**
      * @brief Update sending PSN tracker Update sending PSN tracker Update sending PSN tracker

@@ -114,3 +114,5 @@ RUDI 与 RODL 不能直接套用这三种路径；它们仍在后续实施范围
 - `addressing_test`：相对/绝对 PID、generation、禁用资源、索引隔离和跨 JobID 权限。
 
 这些测试说明对应行为有证据，不能替代整份 Profile 的规范验收。
+
+READ 的 ACK 数据路径、内存授权与重读恢复参见 [READ-ACK-DATA.md](READ-ACK-DATA.md)。

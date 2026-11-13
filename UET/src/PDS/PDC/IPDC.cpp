@@ -46,6 +46,7 @@ bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
     ordered_recovery_.acknowledged();
     received_rx_psns_.clear();
     completed_rx_psns_.clear();
+    uncached_read_responses_.clear();
     resetAcknowledgmentOrdering();
     //FUNCTION_LOG_ENTRY();
 
@@ -314,6 +315,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
 
     chkRxError(pkt);
     observeCongestionDuplicate(*pkt);
+    if (!trim && error_chk==ACK_ERROR && reissueReceivedRead(pkt)) return;
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,

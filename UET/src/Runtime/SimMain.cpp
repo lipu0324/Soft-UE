@@ -42,6 +42,7 @@ int main(int argc,char** argv) {
         UET::PDS::PsnRangeConfiguration psn_ranges;
         UET::PDS::PdcMappingConfiguration pdc_mapping;
         uint32_t mpr_zero_override=0;
+        uint32_t max_ack_data_size=16;
         std::vector<uint32_t> nodes,switches,jobs;
         std::vector<Link> links; std::vector<Flow> flows; std::vector<LinkEvent> link_events;
         while (std::getline(input,line)) {
@@ -55,6 +56,11 @@ int main(int argc,char** argv) {
             else if (key=="payload_mtu") row>>payload_mtu;
             else if (key=="rto") row>>retransmission_timeout_ns;
             else if (key=="max_packet_retries") row>>maximum_packet_retries;
+            else if (key=="max_ack_data_size") {
+                row>>max_ack_data_size;
+                if (!row || max_ack_data_size>8192 || max_ack_data_size%16)
+                    throw std::invalid_argument("invalid Max_ACK_Data_Size");
+            }
             else if (key=="pdc_mapping") {
                 for (auto* fields:{&pdc_mapping.rud,&pdc_mapping.rod}) {
                     std::array<uint32_t,4> selected{};
@@ -170,6 +176,7 @@ int main(int argc,char** argv) {
             hosts.at(node)->configure_retry_limit(maximum_packet_retries);
             hosts.at(node)->configure_psn_ranges(psn_ranges,mpr_zero_override);
             hosts.at(node)->configure_pdc_mapping(pdc_mapping);
+            hosts.at(node)->configure_read_ack_data(max_ack_data_size);
             if (negative_acknowledgment_delays)
                 hosts.at(node)->configure_negative_acknowledgment_delays(*negative_acknowledgment_delays);
             if (enable_nscc) hosts.at(node)->enable_nscc(congestion);

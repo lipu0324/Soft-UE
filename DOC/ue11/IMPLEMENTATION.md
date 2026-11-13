@@ -47,7 +47,7 @@ resource NACKs when full; see [receive admission](RECEIVE-ADMISSION.md).
   legacy-wire regression.
 - A new asynchronous SES entry point supports NO_OP, SEND into a posted receive
   region, fragmented WRITE, WRITE with immediate completion data, single-packet
-  DATAGRAM_SEND, SEND/DGRAM CQ header data, receiver-side deferrable-as-SEND, and non-fetching 8/16/32/64-bit integer atomics.
+  DATAGRAM_SEND, bounded ACK-data READ, SEND/DGRAM CQ header data, receiver-side deferrable-as-SEND, and non-fetching 8/16/32/64-bit integer atomics.
   It uses the existing PDS/PDC implementation, not a replacement transport.
 - Registered memory supports sparse simulation storage or locally registered application buffers, is scoped by JobID and optionally PIDonFEP/resource index, and checks
   key, access rights and overflow-safe bounds before remote writes. Revocation is
@@ -291,7 +291,8 @@ results are simulation parameters, not calibrated hardware performance.
 | M2 | ROD go-back-N, RUD selective recovery/window/duplicate tests, UUD local completion, normal/lossy close, signed PSN offsets and independent reference parser/CRC comparisons. Connection reuse, SYN safety, stale-packet rejection, resource recovery, UE 1.1 Close CP ACK and a shared reference process path are covered. Per-packet SACK, strict DEFAULT inference, response queries and peer MP_RANGE are covered. Probe opaque correlation, mandatory ROD Probe bitmap, paced peer-window recovery and EV/CE/RETX feedback are covered; the full control/error/wrap matrix remains open. |
 | M3 | Native NO_OP/SEND/WRITE/WRITE immediate/DATAGRAM_SEND and integer non-fetching atomics. Relative/absolute selection, retirement, first-error handling, bounded ROD unexpected messages and generation recovery are covered. The experimental FI_MSG/WRITE/integer-atomic/DGRAM provider includes recoverable-error retries. Remaining MR key classes, API flags and acceptance remain open. |
 | M4 | NSCC gates actual data/retries; ACK_CC byte counters, independent TC queues, dequeue ECN, plaintext trimming and link generations are covered. Control entropy is shared with the appropriate CCC and ACK/NACK reflects the triggering packet. MAC timing, broader workloads, experiment configuration/export and AI Base acceptance remain open. |
-| M5–M8 | Not implemented; remain subsequent gated milestones. |
+| M5 | Single-MTU ACK-data READ up to the configured threshold is implemented; reverse-direction/multi-packet READ and the other AI Full/HPC requirements remain open. |
+| M6–M8 | Not implemented; remain subsequent gated milestones. |
 
 Network access was restored on 2026-11-12. CMake/CTest, libfabric 2.0.0 and the
 pinned reference's `libuet_fabric.so`/`uet` application now build successfully.
@@ -392,3 +393,5 @@ Known specification/reference differences requiring explicit review:
 New standard codec/runtime/storage code is independently implemented. This
 increment does not copy the reference implementation's cryptographic keys,
 algorithms or test-vector files into Soft-UE.
+
+See [ACK-data READ](READ-ACK-DATA.md) for the current READ limit, registered result buffers and re-execution after a lost data ACK.

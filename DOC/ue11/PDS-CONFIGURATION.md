@@ -12,8 +12,8 @@
 | `UET_Data_Protect` | 0无保护、1CRC、2TSS；3保留 | 0/1由CRC开关选择；2属于M6，未实现。 |
 | `Limit_PSN_Range` | 可选安全功能，Boolean | 尚未实现达到起点+2³¹时的关闭策略，不能以普通32位回绕测试替代。 |
 | `Default_MPR` | 编码1～255；0按1处理 | `PsnRangeConfiguration::default_mpr`，与本地包缓存上限分开；每单位128 PSN。 |
-| `Max_ACK_Data_Size` | 0～8KiB，16B粒度 | M5 READ/fetch数据响应与分片选择尚未实现。 |
-| `Trimmable_ACK_Size` | 0～10KiB，16B粒度；trim ACK可选 | 当前没有READ数据ACK；不把普通请求trim验收作为该项证据。 |
+| `Max_ACK_Data_Size` | 0～8KiB，16B粒度 | 原生 `configure_read_ack_data` 与 YAML `pds.max_ack_data_size`；ACK-data READ 已实现，反向多包 READ/fetch 仍待补齐。 |
+| `Trimmable_ACK_Size` | 0～10KiB，16B粒度；trim ACK可选 | 当前READ数据ACK走不可trim类别；默认10KiB高于支持的最大ACK。独立阈值配置及trim ACK恢复尚未实现。 |
 | `ACK_On_ECN` | Boolean | 固定逐包ACK策略会确认每个新请求并反射CE；独立配置入口尚未提供。 |
 | `Enb_ACK_Per_Pkt` | coalescing启用时必需 | 当前选择逐包ACK，不启用coalescing。 |
 | `ACK_Gen_Trigger` | coalescing条件项，0～32KiB、256B粒度 | 未选择coalescing，未提供该配置。 |

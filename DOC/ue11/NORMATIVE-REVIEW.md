@@ -1043,4 +1043,4 @@ CBFC每个方向独立握手，不能用一个全链路ready布尔值替代32个
 729个自动提取候选已逐条分类并拆分上述义务。该数字不是MUST总数，也不代表729项
 功能已实现或验收。M0仍需补充候选未覆盖的表格字段、状态图、算法步骤和条件集合，
 并把每个最终义务映射到实现、Profile适用性、正反边界测试及证据。
-`requirements.json`的51个开发任务保持独立粒度，`inventory_complete`继续为false。
+`requirements.json`的53个开发任务保持独立粒度，`inventory_complete`继续为false。
