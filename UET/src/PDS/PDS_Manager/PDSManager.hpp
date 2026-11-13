@@ -356,6 +356,14 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
+        // Optimized wire decoding is available to parsers/oracles before its
+        // PSN-based SES association is enabled. Do not reinterpret that union
+        // as Standard_Header, allocate a PDC, or acknowledge an unsupported
+        // semantic request/response. Native capability discovery stays false.
+        if (!received_packet.trimmed && (received_packet.SESpkt.bth_type==Optimized_Header ||
+            received_packet.SESpkt.bth_type==Small_Message_RMA_Header ||
+            received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header)) { ++event_cnt; return; }
+
         if (received_packet.PDS_type==RUDI_header) {
             const auto& transport=received_packet.PDS_header.RUDI_header;
             if (transport.type==RUDI_RESP) {

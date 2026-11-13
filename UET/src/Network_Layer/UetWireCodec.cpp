@@ -61,6 +61,74 @@ size_t negotiation_payload_size(uint32_t payload_prefix) {
     if (!length) throw std::invalid_argument("zero-length negotiation payload");
     return length*4;
 }
+// The same operation extension follows STD, SMALL and MEDIUM headers.
+// Keep extension byte order independent of each request's abbreviated fields.
+void put_request_extensions(Bytes& encoded_bytes,const SEStoPDS_pkt& semantic,uint8_t opcode) {
+    if (opcode==0x10 || opcode==0x11) {
+        const bool synchronized_atomic=opcode==0x11;
+        if (semantic.eth_type!=(synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
+            throw std::invalid_argument("missing synchronized operation extensions");
+        const auto& synchronization=synchronized_atomic?
+            semantic.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+            semantic.eth_header.Synchronized_Operation_Extension_Header;
+        // Figure3-24 and Table3-20 define the extension in each request format.
+        // Group counts/ordering are SES obligations, not codec state.
+        put(encoded_bytes,synchronization.sync_group,2); put(encoded_bytes,synchronization.sync_count,2);
+        if (synchronized_atomic) {
+            const auto& atomic=semantic.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
+            if (atomic.rsvd) throw std::invalid_argument("reserved synchronized atomic extension bits");
+            put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
+            put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
+        }
+    } else if (opcode==6 || opcode==10) {
+        // §3.4.3.4/Figure3-21: this 24-byte extension follows EVERY
+        // rendezvous SEND/TSEND fragment, independently of SOM/EOM.
+        // Its read address remains data for later checked READ admission;
+        // the codec must never resolve it as a local process address.
+        if (semantic.eth_type!=Rendezvous_Extension_Header)
+            throw std::invalid_argument("missing rendezvous extension");
+        const auto& rendezvous=semantic.eth_header.Rendezvous_Extension_Header;
+        put(encoded_bytes,rendezvous.eager_length,4);
+        put(encoded_bytes,(uint32_t{rendezvous.read_ri_generation}<<24)|
+            (uint32_t{rendezvous.read_PIDonFEP}<<12)|rendezvous.read_resource_index,4);
+        put(encoded_bytes,rendezvous.read_offset,8); put(encoded_bytes,rendezvous.read_mem_key,8);
+    } else if (opcode==3 || opcode==4) {
+        const auto& atomic=semantic.eth_header.Atomic_Operation_Extension_Header;
+        if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
+        put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
+        put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
+    }
+}
+void get_request_extensions(Reader& reader,SEStoPDS_pkt& semantic,uint8_t opcode) {
+    if (opcode==0x10 || opcode==0x11) {
+        const bool synchronized_atomic=opcode==0x11;
+        semantic.eth_type=synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header;
+        auto& synchronization=synchronized_atomic?
+            semantic.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
+            semantic.eth_header.Synchronized_Operation_Extension_Header;
+        synchronization.sync_group=reader.take(2); synchronization.sync_count=reader.take(2);
+        if (synchronized_atomic) {
+            auto& atomic=semantic.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
+            atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
+            atomic.semantic_contol=reader.take(1); reader.take(1); // Reserved after integrity validation.
+        }
+    } else if (opcode==6 || opcode==10) {
+        semantic.eth_type=Rendezvous_Extension_Header;
+        auto& rendezvous=semantic.eth_header.Rendezvous_Extension_Header;
+        rendezvous.eager_length=reader.take(4);
+        const auto read_address=reader.take(4);
+        rendezvous.read_ri_generation=read_address>>24;
+        rendezvous.read_PIDonFEP=(read_address>>12)&0xfff;
+        rendezvous.read_resource_index=read_address&0xfff;
+        rendezvous.read_offset=reader.take(8); rendezvous.read_mem_key=reader.take(8);
+    } else if (opcode==3 || opcode==4) {
+        semantic.eth_type=Atomic_Operation_Extension_Header;
+        auto& atomic=semantic.eth_header.Atomic_Operation_Extension_Header;
+        atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
+        atomic.semantic_contol=reader.take(1);
+        reader.take(1); // Reserved octet, ignored after integrity validation.
+    }
+}
 void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr next) {
     if (next==UET_HDR_CP_ACK) {
         const auto& acknowledgement=packet.control_ack;
@@ -76,7 +144,31 @@ void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr
         if (!packet.SESpkt.payload.empty()) throw std::invalid_argument("payload without SES header");
         return;
     }
-    if (next == UET_HDR_REQUEST_STD) {
+    if (next==UET_HDR_REQUEST_SMALL || next==UET_HDR_REQUEST_MEDIUM) {
+        const bool medium=next==UET_HDR_REQUEST_MEDIUM;
+        if (packet.SESpkt.bth_type!=(medium?Small_Message_RMA_Header:Optimized_Header))
+            throw std::invalid_argument("optimized request header type mismatch");
+        const auto put_common=[&](const auto& header) {
+            if (header.version || header.opcode>0x3f || header.dc>1 || header.ie>1 || header.rel>1 || header.hd>1 ||
+                header.som>1 || header.eom>1 || (!medium && header.hd) || header.request_length>0x3fff ||
+                header.job_id>0xffffff || header.PIDonFEP>0xfff || header.resource_index>0xfff)
+                throw std::invalid_argument("invalid optimized request field");
+            put(encoded_bytes,header.opcode,1);
+            put(encoded_bytes,(header.dc<<5)|(header.ie<<4)|(header.rel<<3)|(header.hd<<2)|(header.eom<<1)|header.som,1);
+            put(encoded_bytes,header.request_length,2);
+            put(encoded_bytes,(uint32_t{header.ri_generation}<<24)|header.job_id,4);
+            put(encoded_bytes,header.PIDonFEP,2); put(encoded_bytes,header.resource_index,2); put(encoded_bytes,header.buffer_offset,8);
+        };
+        uint8_t opcode;
+        if (medium) {
+            const auto& header=packet.SESpkt.bth_header.Small_Message_RMA_Header;
+            put_common(header); put(encoded_bytes,header.initiator,4); put(encoded_bytes,header.match_bits,8); opcode=header.opcode;
+        } else {
+            const auto& header=packet.SESpkt.bth_header.Optimized_Header;
+            put_common(header); opcode=header.opcode;
+        }
+        put_request_extensions(encoded_bytes,packet.SESpkt,opcode);
+    } else if (next == UET_HDR_REQUEST_STD) {
         if (packet.SESpkt.bth_type != Standard_Header) throw std::invalid_argument("SES header type mismatch");
         const auto& header = packet.SESpkt.bth_header.Standard_Header;
         if (header.version != 0) throw std::invalid_argument("unsupported SES version");
@@ -88,46 +180,20 @@ void put_semantic(Bytes& encoded_bytes, const PDStoNET_pkt& packet, PDS_next_hdr
         if (header.som) put(encoded_bytes,header.diff.som_true.header_data,8);
         else put(encoded_bytes,(uint64_t{header.diff.som_false.payload_length}<<32)|header.diff.som_false.message_offset,8);
         put(encoded_bytes,header.request_length,4);
-        if (header.opcode==0x10 || header.opcode==0x11) {
-            const bool synchronized_atomic=header.opcode==0x11;
-            if (packet.SESpkt.eth_type!=(synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
-                throw std::invalid_argument("missing synchronized operation extensions");
-            const auto& synchronization=synchronized_atomic?
-                packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
-                packet.SESpkt.eth_header.Synchronized_Operation_Extension_Header;
-            // Figure3-24 and Table3-20 apply to every standard fragment.
-            // Group counts/ordering are SES obligations, not codec state.
-            put(encoded_bytes,synchronization.sync_group,2); put(encoded_bytes,synchronization.sync_count,2);
-            if (synchronized_atomic) {
-                const auto& atomic=packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
-                if (atomic.rsvd) throw std::invalid_argument("reserved synchronized atomic extension bits");
-                put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
-                put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
-            }
-        } else if (header.opcode==6 || header.opcode==10) {
-            // §3.4.3.4/Figure3-21: this 24-byte extension follows EVERY
-            // rendezvous SEND/TSEND fragment, independently of SOM/EOM.
-            // Its read address remains data for later checked READ admission;
-            // the codec must never resolve it as a local process address.
-            if (packet.SESpkt.eth_type!=Rendezvous_Extension_Header)
-                throw std::invalid_argument("missing rendezvous extension");
-            const auto& rendezvous=packet.SESpkt.eth_header.Rendezvous_Extension_Header;
-            put(encoded_bytes,rendezvous.eager_length,4);
-            put(encoded_bytes,(uint32_t{rendezvous.read_ri_generation}<<24)|
-                (uint32_t{rendezvous.read_PIDonFEP}<<12)|rendezvous.read_resource_index,4);
-            put(encoded_bytes,rendezvous.read_offset,8); put(encoded_bytes,rendezvous.read_mem_key,8);
-        } else if (header.opcode==3 || header.opcode==4) {
-            const auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
-            if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
-            put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
-            put(encoded_bytes,atomic.semantic_contol,1); put(encoded_bytes,0,1);
-        }
+        put_request_extensions(encoded_bytes,packet.SESpkt,header.opcode);
     } else if (next == UET_HDR_RESPONSE) {
         if (packet.SESpkt.bth_type != Semantic_Response_Header) throw std::invalid_argument("SES header type mismatch");
         const auto& header = packet.SESpkt.bth_header.Semantic_Response_Header;
         if (header.version != 0) throw std::invalid_argument("unsupported SES version");
         put(encoded_bytes,(header.list<<6)|header.opcode,1); put(encoded_bytes,header.return_code,1); put(encoded_bytes,header.message_id,2);
         put(encoded_bytes,(uint32_t{header.ri_generation}<<24)|header.job_id,4); put(encoded_bytes,header.modified_length,4);
+    } else if (next==UET_HDR_RESPONSE_DATA_SMALL) {
+        if (packet.SESpkt.bth_type!=Optimized_Response_with_Data_Header) throw std::invalid_argument("optimized response type mismatch");
+        const auto& header=packet.SESpkt.bth_header.Optimized_Response_with_Data_Header;
+        if (header.version || (header.opcode!=2 && header.payload_length)) throw std::invalid_argument("invalid optimized response field");
+        put(encoded_bytes,(header.list<<6)|header.opcode,1); put(encoded_bytes,header.return_code,1);
+        put(encoded_bytes,header.opcode==2?header.payload_length:0,2); put(encoded_bytes,header.job_id,4);
+        put(encoded_bytes,header.original_request_psn,4);
     } else if (next == UET_HDR_RESPONSE_DATA) {
         if (packet.SESpkt.bth_type != Semantic_Response_with_Data_Header) throw std::invalid_argument("SES header type mismatch");
         const auto& header = packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
@@ -153,7 +219,27 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
         if (!reader.rest().empty()) throw std::invalid_argument("unexpected UET payload");
         return;
     }
-    if (next == UET_HDR_REQUEST_STD) {
+    if (next==UET_HDR_REQUEST_SMALL || next==UET_HDR_REQUEST_MEDIUM) {
+        const bool medium=next==UET_HDR_REQUEST_MEDIUM;
+        packet.SESpkt.bth_type=medium?Small_Message_RMA_Header:Optimized_Header;
+        const auto get_common=[&](auto& header) {
+            const auto opcode=reader.take(1),flags=reader.take(1);
+            if (flags&0xc0) throw std::invalid_argument("unsupported optimized request version");
+            header.opcode=opcode&0x3f; header.version=0; header.dc=(flags>>5)&1; header.ie=(flags>>4)&1;
+            header.rel=(flags>>3)&1; header.hd=medium?((flags>>2)&1):0; header.eom=(flags>>1)&1; header.som=flags&1;
+            header.request_length=reader.take(2)&0x3fff;
+            const auto job=reader.take(4); header.ri_generation=job>>24; header.job_id=job&0xffffff;
+            header.PIDonFEP=reader.take(2)&0xfff; header.resource_index=reader.take(2)&0xfff; header.buffer_offset=reader.take(8);
+        };
+        uint8_t opcode;
+        if (medium) {
+            auto& header=packet.SESpkt.bth_header.Small_Message_RMA_Header;
+            get_common(header); header.initiator=reader.take(4); header.match_bits=reader.take(8); opcode=header.opcode;
+        } else {
+            auto& header=packet.SESpkt.bth_header.Optimized_Header; get_common(header); opcode=header.opcode;
+        }
+        get_request_extensions(reader,packet.SESpkt,opcode);
+    } else if (next == UET_HDR_REQUEST_STD) {
         packet.SESpkt.bth_type = Standard_Header;
         auto& header = packet.SESpkt.bth_header.Standard_Header;
         const auto opcode=reader.take(1), flags=reader.take(1);
@@ -173,34 +259,7 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
             header.diff.som_false.message_offset=data&0xffffffff;
         }
         header.request_length=reader.take(4);
-        if (header.opcode==0x10 || header.opcode==0x11) {
-            const bool synchronized_atomic=header.opcode==0x11;
-            packet.SESpkt.eth_type=synchronized_atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header;
-            auto& synchronization=synchronized_atomic?
-                packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
-                packet.SESpkt.eth_header.Synchronized_Operation_Extension_Header;
-            synchronization.sync_group=reader.take(2); synchronization.sync_count=reader.take(2);
-            if (synchronized_atomic) {
-                auto& atomic=packet.SESpkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic;
-                atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
-                atomic.semantic_contol=reader.take(1); reader.take(1); // Reserved after integrity validation.
-            }
-        } else if (header.opcode==6 || header.opcode==10) {
-            packet.SESpkt.eth_type=Rendezvous_Extension_Header;
-            auto& rendezvous=packet.SESpkt.eth_header.Rendezvous_Extension_Header;
-            rendezvous.eager_length=reader.take(4);
-            const auto read_address=reader.take(4);
-            rendezvous.read_ri_generation=read_address>>24;
-            rendezvous.read_PIDonFEP=(read_address>>12)&0xfff;
-            rendezvous.read_resource_index=read_address&0xfff;
-            rendezvous.read_offset=reader.take(8); rendezvous.read_mem_key=reader.take(8);
-        } else if (header.opcode==3 || header.opcode==4) {
-            packet.SESpkt.eth_type=Atomic_Operation_Extension_Header;
-            auto& atomic=packet.SESpkt.eth_header.Atomic_Operation_Extension_Header;
-            atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);
-            atomic.semantic_contol=reader.take(1);
-            reader.take(1); // Reserved octet, ignored after integrity validation.
-        }
+        get_request_extensions(reader,packet.SESpkt,header.opcode);
     } else if (next == UET_HDR_RESPONSE) {
         packet.SESpkt.bth_type=Semantic_Response_Header;
         auto& header=packet.SESpkt.bth_header.Semantic_Response_Header;
@@ -209,6 +268,14 @@ void get_semantic(Reader& reader, PDStoNET_pkt& packet, PDS_next_hdr next) {
         header.list=op>>6; header.opcode=op&0x3f; header.return_code=code; header.message_id=reader.take(2);
         const auto job=reader.take(4); header.ri_generation=job>>24; header.job_id=job&0xffffff;
         header.modified_length=reader.take(4);
+    } else if (next==UET_HDR_RESPONSE_DATA_SMALL) {
+        packet.SESpkt.bth_type=Optimized_Response_with_Data_Header;
+        auto& header=packet.SESpkt.bth_header.Optimized_Response_with_Data_Header;
+        const auto opcode=reader.take(1),code=reader.take(1);
+        if (code&0xc0) throw std::invalid_argument("unsupported optimized response version");
+        header.list=opcode>>6; header.opcode=opcode&0x3f; header.version=0; header.return_code=code&0x3f;
+        const auto length=reader.take(2); header.payload_length=header.opcode==2?(length&0x3fff):0;
+        header.job_id=reader.take(4)&0xffffff; header.original_request_psn=reader.take(4);
     } else if (next == UET_HDR_RESPONSE_DATA) {
         packet.SESpkt.bth_type=Semantic_Response_with_Data_Header;
         auto& header=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;

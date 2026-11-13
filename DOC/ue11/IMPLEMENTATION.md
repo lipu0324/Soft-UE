@@ -22,6 +22,10 @@ idempotent-safe memory and no target PDC/message state or target CQ. Independent
 transactions bound the capability; full HPC acceptance remains open.
 See [RUDI boundaries](RUDI.md).
 
+Scale-out optimized SMALL/MEDIUM/data-response wire layouts have independent
+20/32/12-byte vectors. Native ingress is fenced until no-MID PSN association and
+optimized MR-index authority are connected; see [optimized headers](OPTIMIZED-HEADERS.md).
+
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
 

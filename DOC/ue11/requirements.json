@@ -92,13 +92,17 @@
       "summary": "标准请求与语义响应编码",
       "status": "partial",
       "tests": [
-        "uet_wire_test"
+        "uet_wire_test",
+        "optimized_header_test",
+        "optimized_admission_test",
+        "reference_wire_comparison"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
-      ]
+      ],
+      "evidence_note": "Standard format plus scale-out optimized wire foundation: Figures3-15/16/Table3-18 are explicitly encoded as20/32/12 bytes, with14-bit request length replacing MID and MEDIUM sharing its address/header-data slot.120 carrier/IP/CRC/operation-extension golden vectors plus reserved/version/truncation and width boundaries pass. Six admission cases fence unimplemented native optimized transactions before PDC allocation or SES access. Existing pinned-parser comparisons cover the other48 formats; pinned util/uet_util.c explicitly rejects all three optimized next-header types, so no optimized reference-parsing or native capability claim. Native PSN association, optimized MR-index scope and transactions remain open. See OPTIMIZED-HEADERS.md."
     },
     {
       "id": "PDS-MAPPING",

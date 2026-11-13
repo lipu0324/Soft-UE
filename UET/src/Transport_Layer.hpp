@@ -397,46 +397,31 @@ struct SES_Standard_Header
     uint32_t    request_length  : 32;       //Length of the payload to be transferred (in bytes). 0 is a legal transfer size (0 byte write/read).
 }PACKED;
 
+// §3.4.3.2 / Figures3-15/16: local fields, never a serialized C++ ABI.
+// Both optimized requests replace MID with a14-bit request_length. Their
+// responses are correlated using the original PDS packet identity instead.
 struct SES_Optimized_Header
 {
-    uint8_t     rsvd            : 2;        //The operation being performed for this packet.
-    uint8_t     opcode          : 6;        //Semantic protocol version – set to 0 in the initial version.
-    uint8_t     version         : 2;        //Defer the semantic response for this until the packet has been made globally observable
-    uint8_t     ie              : 1;        //Indicates this packet encountered an error at the initiator. Initiator Error prevents the packet from being written at the target.
-    uint8_t     rel             : 1;        //This packet uses relative addressing.
-    uint8_t     hd              : 1;        //Header data was provided for this message.
-    uint8_t     eom             : 1;        //Indicates the last packet of the message. ses.eom MUST be set on the last packet of a message.
-    uint8_t     som             : 1;        //Indicates this is the first packet of a message. Impacts the interpretation of header data.
-    uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
-    uint8_t     ri_generation   : 8;        //Resource Index Generation
-    uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4;
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
-    uint8_t     rsvd0           : 4;
-    uint16_t    resource_index  : 12;       //Resource Index field.
-    uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
+    uint8_t opcode,version,dc,ie,rel,hd,eom,som; // hd is reserved for SMALL.
+    uint16_t request_length;
+    uint8_t ri_generation;
+    uint32_t job_id;
+    uint16_t PIDonFEP,resource_index;
+    uint64_t buffer_offset;
 }PACKED;
 
 struct SES_Small_Message_RMA_Header
 {
-    uint8_t     rsvd            : 2;        //The operation being performed for this packet.
-    uint8_t     opcode          : 6;        //Semantic protocol version – set to 0 in the initial version.
-    uint8_t     version         : 2;        //Defer the semantic response for this until the packet has been made globally observable
-    uint8_t     ie              : 1;        //Indicates this packet encountered an error at the initiator. Initiator Error prevents the packet from being written at the target.
-    uint8_t     rel             : 1;        //This packet uses relative addressing.
-    uint8_t     hd              : 1;        //Header data was provided for this message.
-    uint8_t     eom             : 1;        //Indicates the last packet of the message. ses.eom MUST be set on the last packet of a message.
-    uint8_t     som             : 1;        //Indicates this is the first packet of a message. Impacts the interpretation of header data.
-    uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
-    uint8_t     ri_generation   : 8;        //Resource Index Generation
-    uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4;
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
-    uint8_t     rsvd0           : 4;
-    uint16_t    resource_index  : 12;       //Resource Index field.
-    uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
-    uint32_t    initiator       : 32;       //Initiator ID used as part of matching criteria.
-    uint64_t    match_bits      : 64;       //Used for tagged matching or as a memory key, depending on the opcode being used.
+    uint8_t opcode,version,dc,ie,rel,hd,eom,som;
+    uint16_t request_length;
+    uint8_t ri_generation;
+    uint32_t job_id;
+    uint16_t PIDonFEP,resource_index;
+    // Figure3-16 shares one64-bit slot. Its interpretation depends on the
+    // operation; MEDIUM is32 bytes, not SMALL plus a second header-data word.
+    union { uint64_t buffer_offset; uint64_t header_data; };
+    uint32_t initiator;
+    uint64_t match_bits;
 }PACKED;
 
 struct SES_Rendezvous_Extension_Header
