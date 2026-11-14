@@ -155,6 +155,13 @@ WRITE（STD 保持一个8分片消息），共48场景、216个源操作，另�
 新增 `tfc_bidirectional_test` 的96个场景覆盖 STD/SMALL/MEDIUM、RUD/ROD、NSCC开关、
 ACK-data READ 与反向数据 READ、fetch-add/CAS，以及首次结果丢失后修改远端内存。
 短 READ 按规范允许重新读取新内容；反向 PDS 数据及原子结果必须保持已缓存内容。
-每个操作后排队一个 NO_OP，以验证双向数据与新消息信用共同进展；新夹具尚待编译。
+每个操作后排队一个 NO_OP，以验证双向数据与新消息信用共同进展。固定源版本
+`444e206a004c745e24ab8f46ae58b570529465e0` 的该项 CTest 通过：普通构建0.17秒、
+ASan/UBSan/leak 构建1.94秒；日志为 `/tmp/softue-tfc-bidirectional-{normal,asan}-tests.log`。
+
+`tfc_receive_pressure_test` 新增4个三 Host 场景：RUD/ROD、NSCC开关，目的池只够
+一个 CCC；第二个发送方必须收到 NO_CCC 且不改变内存，第一 CCC 完成真实65毫秒
+SYN保护的 Close 后，第二发送方通过原 PDS 重试成功，预算始终不超过预留上限。
+这项新夹具尚待固定版本编译。
 完整资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。
