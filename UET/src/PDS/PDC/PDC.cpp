@@ -223,12 +223,14 @@ void PDC::releaseCongestionState() {
         runtime_->congestion_control->closed(congestionConnection());
     congestion_engaged_=false;
     congestion_connection_.reset();
+    data_traffic_class_bound_=false;
     close_network_trigger_.reset();
     admission_deferred_retries_.clear();
 }
 
 void PDC::bindCongestionContext(pdc_mode delivery_mode) {
     mode=delivery_mode;
+    data_traffic_class_bound_=true;
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->opened(congestionConnection());
 }

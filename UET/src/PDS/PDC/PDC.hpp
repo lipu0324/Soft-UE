@@ -471,7 +471,7 @@ public:
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
     void configureDataTrafficClass(uint8_t traffic_class) {
-        if (traffic_class>=8 || congestion_connection_)
+        if (traffic_class>=8 || data_traffic_class_bound_ || congestion_connection_)
             throw std::logic_error("configure PDC data traffic class before binding CMS");
         data_traffic_class_=traffic_class;
     }
@@ -548,6 +548,7 @@ protected:
     mutable bool congestion_engaged_=false;
     mutable std::optional<UET::CMS::Connection> congestion_connection_;
     uint8_t data_traffic_class_=0;
+    bool data_traffic_class_bound_=false; // Applies even when CMS is disabled.
     enum class RetryCause { Timeout, NegativeAcknowledgment };
     std::map<uint32_t,RetryCause> admission_deferred_retries_;
     void retryPacket(uint32_t sequence,RetryCause cause);
