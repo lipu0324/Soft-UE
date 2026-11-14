@@ -566,10 +566,10 @@ protected:
         congestion_engaged_=true;
         return *congestion_connection_;
     }
-    bool congestionReady() const {
+    bool congestionReady(bool retransmission=false) const {
         if (!runtime_ || !runtime_->congestion_control) return true;
         congestion_engaged_=true;
-        return runtime_->congestion_control->can_send(congestionConnection());
+        return runtime_->congestion_control->can_send_attempt(congestionConnection(),retransmission);
     }
     std::optional<uint32_t> nextAdmittedRetry() const {
         std::optional<uint32_t> selected;
@@ -586,7 +586,7 @@ protected:
             // testing CMS admission, or dropped packets can deadlock a full
             // window with every RTO already suspended (§3.6.13.5).
             const bool needs_loss_accounting=data && !query && runtime_ && runtime_->congestion_control && metadata->second.congestion_inflight;
-            if (!data || query || needs_loss_accounting || (peerWindowAllows(sequence) && congestionReady())) {
+            if (!data || query || needs_loss_accounting || (peerWindowAllows(sequence) && congestionReady(true))) {
                 if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
             }
         }

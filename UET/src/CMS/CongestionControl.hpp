@@ -26,6 +26,16 @@ public:
     virtual void opened(const Connection&) {}
     virtual bool can_send(const Connection& connection)=0;
     virtual uint32_t transmitted(const Connection& connection,PDStoNET_pkt& packet)=0;
+    // §3.6.15: TFC charges only a new packet, while NSCC accounts every
+    // transmission attempt. PDS supplies retry ownership from its TX cache;
+    // a received flag must never grant the free-retransmission exception.
+    // Existing policies retain their behavior through these default adapters.
+    virtual bool can_send_attempt(const Connection& connection,bool retransmission) {
+        return can_send(connection);
+    }
+    virtual uint32_t transmitted_attempt(const Connection& connection,PDStoNET_pkt& packet,bool retransmission) {
+        return transmitted(connection,packet);
+    }
     // Select the forward control path without charging data admission/bytes.
     virtual void decorate_control(const Connection& connection,PDStoNET_pkt& packet)=0;
     virtual void acknowledged(const Connection& connection,const PDStoNET_pkt& packet,

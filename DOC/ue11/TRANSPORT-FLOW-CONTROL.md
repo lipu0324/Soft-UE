@@ -69,4 +69,15 @@ ACK_CC 的 `CC_CREDIT=1` 使用独立 `credit_units` 字段。实际 PDF 第464�
 它的位置与 NSCC 的 `received_byte_units` 不同。NSCC 的 service_time、窗口罚值
 和字节遥测不能被写入或读作信用。NIC 的 service_time stamping 也不改信用 ACK。
 `credit_header_test` 使用手写黄金字节验证40个格式/封装组合，并覆盖截断、保留位
-和24位范围。此线格式增量尚待编译验证；不代表真实信用发送/接收已经启用。
+和24位范围。固定源版本 `cf4cdacd60c1d08eceae58f553be8087d0047057` 的9项
+信用线格式、NSCC、trimming 和 PDS 非法/保留字段回归全部通过：普通构建0.42秒，
+ASan/UBSan/leak 构建4.32秒。日志为 `/tmp/softue-tfc-wire-{normal,asan}-tests.log`。
+不代表真实信用发送/接收已经启用。
+
+PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传入本地发送
+路径是否拥有已缓存 PSN 的重传。新包和重传在入网络队列时只记账一次；端口
+`WouldBlock` 的重试仍使用该队列项，不能再次扣费。旧 NSCC 策略通过默认适配继续
+对每次数据发送记账，收到的 wire 标志不会控制本地免费的重传权限。
+`credit_admission_test` 是8个原 PDS 事务的隔离验证：RUD/ROD、首包丢失和三次 NIC
+背压组合。目的没有 TFC，信用由测试显式注入，以验证桥接边界；它不是信用线端
+互通或完整 TFC 实现。该桥接增量尚待固定版本编译验证。
