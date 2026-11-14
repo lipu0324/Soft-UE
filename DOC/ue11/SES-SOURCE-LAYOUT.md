@@ -23,3 +23,16 @@ SES → PDS → CMS/TSS → 网络；MR、完成语义、恢复与定时器策�
 查实现中的 `submit`、`feed_submissions`、`receive`、`respond`、`context_event` 和 `close`。
 消息/执行身份的区别见[接收句柄](RECEIVE-HANDLES.md)，跨对象所有权见
 [Endpoint 生命周期](ENDPOINT-LIFETIME.md)。这次源码整理不增加 Profile 能力声明。
+
+## 固定版本验证
+
+`f649bdc09a3f701aef0e9022831a0bffad14fd23` 在干净、冻结源码上完成全部155项测试：
+普通构建155/155，134.80秒；ASan/UBSan并启用泄漏检查155/155，740.49秒。
+两种完整构建都启用 libfabric provider 与固定版本独立参考。测试按 `-j1` 顺序执行，
+运行时没有编译任务。报告为 `/tmp/softue-runtime-source-f649-full-report.json`，
+完整日志为 `/tmp/softue-runtime-source-f649-{normal,asan}-tests.log`。
+
+Make 的 `ENABLE_RDMA=0` 原生 Endpoint 入口在 `d44128d4b0a1285218bc3d19800adbfc66218cd2`
+构建并通过；`f649bdc` 仅修正两处测试中的 RX 无效值断言。此前 `d44128d` 的完整
+普通回归153/155，失败原因是句柄扩展后测试仍比较 `UINT16_MAX`；现改用命名常量
+`kInvalidReceivePacketHandle`。不把这次固定版本结果推广为后续功能变更的验证。

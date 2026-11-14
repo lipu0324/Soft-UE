@@ -54,3 +54,10 @@ tagged 接收的私有 MR 允许通过已选 posting 执行原子读写，仍带
 
 原生初步普通回归13/13通过；最终提交的消毒器、公开 API 与完整回归结果仍需另行记录。
 独立参考尚未声明支持这些操作，本文不宣告 tagged atomic 参考互操作、完整 M5 或 HPC 完成。
+
+合并集成版本 `5c30b3376768bef76c1175ef1e40e192637ce841` 已完成全部166项回归：
+普通166/166，139.75秒；ASan/UBSan及泄漏检查166/166，751.49秒。
+完整构建同时启用公开 provider 和固定独立参考，源码保持干净冻结，两个完整测试集
+按 `-j1` 顺序运行，期间无编译。报告 `/tmp/softue-optimized-sync-full-report.json`，
+日志 `/tmp/softue-optimized-sync-full-{normal,asan}-tests.log`。参考互操作结果只覆盖
+其原有共同支持的操作，不扩展到 tagged atomic 或优化头。

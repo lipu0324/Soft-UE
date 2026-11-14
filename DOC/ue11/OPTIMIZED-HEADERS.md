@@ -136,7 +136,8 @@ DATA_SMALL 及其线上确认没有这个 token（确认 MID0）；PDC 用确切
 
 整数非取回原子扩展的四项定向普通检查通过（1.58s），见 `/tmp/softue-optimized-atomic-tests.log`；
 800组独立算术/拒绝场景与扩为144组的故障矩阵均通过。该次检查期间另有构建，只作功能证据；
-新增原子路径的 sanitizer 及 STD 原子集成检查尚在执行。
+新增原子路径与 STD 原子/fetching 集成的6项 ASan/UBSan/泄漏检查全部通过（33.46s），
+日志 `/tmp/softue-optimized-atomic-asan-tests.log`。测试时其他工作树仍在编译，只作功能证据。
 
 固定5b4e049的 `util/uet_util.c` 在解析next_hdr时，把REQ_SMALL、REQ_MEDIUM和
 RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来扩大对照范围。
@@ -144,7 +145,9 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 参考解析或事务互通证据，也不构成任何Profile验收声明。
 
 优化 fetching 的首轮四项普通回归通过（5.52s），包括1664个新场景及标准头 fetching 回归，
-见 `/tmp/softue-optimized-fetch-tests.log`。并发与 sanitizer 证据待其执行完成后补记；
+见 `/tmp/softue-optimized-fetch-tests.log`。1664组取回加40组并发的普通两项通过（4.25s），见 `/tmp/softue-optimized-fetch-concurrent-tests.log`；
+8项 ASan/UBSan/泄漏检查全部通过（37.45s），见 `/tmp/softue-optimized-fetch-asan-tests.log`，
+包含优化 WRITE/非取回原子/权限/畸形与标准 fetching 回归；
 期间存在其他构建，因此上述耗时只记录测试运行，不作为性能结果。
 
 优化 READ 初轮4项普通检查通过（1.57s），见 `/tmp/softue-optimized-read-tests2.log`；
@@ -153,5 +156,16 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 
 随后独立负向 probe 在 STD/MEDIUM 通过后，精确复现 SMALL 的 `format=1 code=2`：
 `/tmp/softue-optimized-read-generation-before-tests2.log`。修复后的4项普通回归通过（0.68s），见 `/tmp/softue-optimized-read-final-normal-tests.log`，
-包含112事务、72并发、63权限/注册身份/代次和既有优化权限用例。修复后的 sanitizer 回归仍在执行，
-完成后另行记录。这些定向检查期间其他工作树仍在构建，耗时不代表网络性能。
+包含112事务、72并发、63权限/注册身份/代次和既有优化权限用例。修复后的6项 ASan/UBSan/泄漏回归全部通过（5.93s），日志
+`/tmp/softue-optimized-read-final-asan-tests.log`，包含共享 Clear 与 STD READ ACK-data 路径。这些定向检查期间其他工作树仍在构建，耗时不代表网络性能。
+
+整合到 `ee249ccda89271fac96ff7e0426e7427a30e00a0` 后，GitHub Actions176
+（run43541570125）的 simulation OFF、simulation ON（sanitizer）与 reference-wire
+三项工作全部成功。参考工作仍只证明其共同支持的 STD/其他既有格式，不能改写为
+优化格式参考互通通过。后续 Endpoint 生命周期改动有独立证据。
+
+另有固定、干净的 `b8c5646afe3b1f50a41c0c6eaa07c3e13c82ba4c` 版本完成132/132
+普通（126.50s）与132/132 ASan/UBSan/泄漏（623.32s）完整本地回归，启用 provider 与参考实现。
+日志 `/tmp/softue-optimized-clean-normal-tests.log`、`/tmp/softue-optimized-clean-asan-tests.log`，
+报告 `/tmp/softue-optimized-clean-full-report.json`。该版本只含首批优化 WRITE/NOOP/SEND，
+不能把这些完整结果改标为后续原子、READ 或 Endpoint 生命周期代码的本地完整结果。

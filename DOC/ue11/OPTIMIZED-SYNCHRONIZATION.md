@@ -54,3 +54,11 @@ rendezvous 缺口与同步屏障使用。
 `/tmp/softue-optimized-sync-identity-{normal,asan}-tests.log`。当时共享辅助函数
 仍使用旧名称；后续命名整理及整个166项集成版本需要新的完整验证。
 不能据此宣告全部 M5 或 HPC 完成。
+
+`5c30b3376768bef76c1175ef1e40e192637ce841` 的完整集成验证已完成：普通166/166，
+139.75秒；ASan/UBSan及泄漏检查166/166，751.49秒。包括辅助函数命名整理、
+原生/公开 tagged atomics 和前述176个优化同步组场景。公开 provider、独立参考均
+启用，源码冻结且运行完整测试时没有编译任务。报告与日志同
+`/tmp/softue-optimized-sync-full-report.json`、
+`/tmp/softue-optimized-sync-full-{normal,asan}-tests.log`。
+组完成后的额外成员/合法复用分类、完整最大组及其他适用条款仍需继续复核。

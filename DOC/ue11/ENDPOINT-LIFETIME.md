@@ -5,6 +5,12 @@
 应用 operation ID 属于该对象的 CQ；16位线 MID（Message Identifier，消息标识；或优化请求的本地提交 cookie）则必须
 在它所属的传输生命周期内保持唯一，不能因为 C++ 对象被替换而重新分配。
 
+当前实现由 Host 保留源 MID/本地 cookie、目标 READ 响应 token、关闭接收消息的终止状态，
+以及自动私有 MR key 和本地 RX 执行句柄的分配历史。关闭路径保留真实已放置字节，
+终止仍持有的 RX handle，并让原 PDS 继续负责重传、Clear 与 Close。
+详细身份关系见[接收句柄](RECEIVE-HANDLES.md)。以下按修复阶段记录证据；最新定向验证在文末，
+完整管理重启代次与其他适用要求仍待验收，M1 和四种 Profile 均未声明完成。
+
 ## 可复现的问题
 
 先提交 RUD WRITE，在 Host 运行之前关闭源 Endpoint，然后在同一 Host 创建新的 Endpoint。
@@ -126,6 +132,12 @@ RUD/ROD。token 隔离场景只接管源语义回调，以便目标关闭错误�
 另一个独立同步原子关闭 probe 已复现未完成 action 的 RX handle 丢失，正在另行修复；
 不把上述 READ 结果推广为全部目标端关闭路径通过。
 
+固定、干净的 `fbbe071c763be9252d52a15222a9d535b17e4b86` 已完成140/140普通
+（137.52s）与140/140 ASan/UBSan/泄漏（709.98s）完整本地回归，启用 provider 与参考实现，
+停止全部编译后按普通→sanitizer顺序执行。报告 `/tmp/softue-ownership-clean-full-report.json`，
+日志 `/tmp/softue-ownership-clean-normal-tests.log`、`/tmp/softue-ownership-clean-asan-tests.log`。
+该版本含优化 READ/原子与源端身份退休，尚不含后续关闭分片收尾及目标端替换改动。
+
 ## 等待同步组的目标关闭
 
 独立 PDS 源先发送完成型原子操作、故意不发送其余组成员，复现了关闭后没有语义
@@ -146,6 +158,15 @@ Cancelled CQ，保留已写字节和 header data；不对已消费的 RX handle 
 六项普通定向回归通过（0.29s），包括原有目标替换、源端收尾及同步组事务/生命周期，
 日志 `/tmp/softue-target-actions-final-normal-tests2.log`。这不是全部 M1 的验收结果；
 接收端续包替换与没有活跃 SES 的排队工作仍待独立检查。
+
+同一源码提交 `9b41d7f` 的六项 ASan/UBSan/泄漏定向回归全部通过（3.03s），
+日志 `/tmp/softue-target-actions-final-asan-tests2.log`。普通与 sanitizer 构建均冻结
+Endpoint 头文件后运行；本次仅为定向功能结果，不替代完整 Profile 回归。
+
+GitHub Actions 对 `fc4fd85bd9d8fe4291eafa7ba53f209b6b85d399` 的 run186
+（ID43553700539）三项作业均已成功：simulation OFF、simulation ON（sanitizer）
+及 reference-wire。该提交包含源端分片收尾和目标 READ 替换，但不包含随后
+`9b41d7f` 的同步目标关闭改动；不能把这次 CI 结果标记为后续源码的完整验证。
 
 ## 旧接收消息与 SES 空档
 
@@ -175,6 +196,10 @@ Host 现在在没有 SES 时也处理旧请求的终止响应；新可靠请求�
 `/tmp/softue-receive-lifetime-normal-tests.log`，包含上述三项及源/目标替换、关闭收尾、
 同步目标关闭、READ 提前接受。部分放置接收的取消 CQ、未匹配 SEND 的最终句柄、
 失效 PDC 的队列与其他跨对象组合仍需后续验收，不宣告 M1 完成。
+
+同一源码 `5b497b1` 的九项 ASan/UBSan/泄漏回归全部通过（3.55s），日志
+`/tmp/softue-receive-lifetime-asan-tests.log`。构建目录启用 libfabric 与参考实现，
+本轮仅运行上述九项定向用例；不把配置启用写成完整 provider/参考互通验收。
 
 ## 关闭已放置前缀与未匹配 SEND
 
@@ -236,6 +261,29 @@ Job 重建、注销、最后一个合法 key 和耗尽后不回绕；普通和 A
 日志 `/tmp/softue-receive-close-final-asan-tests.log`；不把它标记为本节自动 key 改动的
 sanitizer 事务验证。
 
+CI run196（`303c3d5e4fc1fc67cfbd214df0c374c500a64924`）普通 simulation 为131/133，
+失败的是 rendezvous_boundary_test 的空事件断言及 native_read_test 的生产者峰值断言；
+reference-wire 作业成功。固定 `e81265a` 的本地两项普通 probe 也复现相同失败，见
+`/tmp/softue-empty-bind-wake-before-tests.log`。原因是绑定 request handler 时无条件
+唤醒了空 Host，给同步本地验证失败留下了事件，并提前消耗首批生产者状态。
+现在只在 PDS-to-SES 请求队列非空时唤醒。两项修复后的独立可执行程序均通过，见
+`/tmp/softue-empty-bind-wake-rendezvous-after-tests.log`、
+`/tmp/softue-empty-bind-wake-read-after-tests.log`；完整修复版结果仍需后续核对。
+旧 `e81265a` 的 sanitizer 全量构建在确认此回归后主动中断，不把它记录为全量通过。
+
 接收执行身份的后续负向 probe 又复现了同 PSN READ 重执行和失效 PDC 上行队列的
 两个问题。新的 Host 本地 RX 标识与交付前归属检查见
 [接收句柄](RECEIVE-HANDLES.md)；其中的宽本地类型不改变 UE 报文。
+
+固定源码 `8f4bccb156c1c124f5885aadc95c8db36c36c52b` 的29项普通（83.15s）与
+29项 ASan/UBSan/泄漏（420.22s）定向回归全部通过。两套构建和宽 Clear 用例重建
+完成、停止全部编译后，依次执行普通和 sanitizer；报告
+`/tmp/softue-receive-handles-lifetime-report.json`，日志
+`/tmp/softue-receive-handles-lifetime-normal-tests.log`、
+`/tmp/softue-receive-handles-lifetime-asan-tests.log`。这仍是29项定向集合。
+
+更早的修复版 `8a715cf5e5ca147587357612076211cee0eb3a82` 已通过 GitHub Actions
+run198（ID43559703125）全部三项作业：simulation OFF、simulation ON（sanitizer）、
+reference-wire。它已包含条件唤醒与私有 MR key 修复，尚不含上述宽 RX 身份改动。
+旧 `e81265a` 的完整本地普通回归为150/152（119.16s），两项失败与 CI196 相同，
+见 `/tmp/softue-private-keys-full-report.json`；不能把其余通过结果或后续修复追写成旧版全绿。

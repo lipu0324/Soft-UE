@@ -62,3 +62,9 @@ SES 响应就可能消费第二次执行的 RX 状态。
 
 已有 Clear/reexecuted-READ 竞态用例也改用命名句柄类型，注入大于32位的执行标识，
 确认有效 Clear 在第二次执行期间仍会等待真实响应并正常回收。
+
+固定、干净的 `8f4bccb156c1c124f5885aadc95c8db36c36c52b` 已完成29/29普通
+（83.15s）和29/29 ASan/UBSan/泄漏（420.22s），报告
+`/tmp/softue-receive-handles-lifetime-report.json`。先完成两套构建及宽 Clear 重建，
+停止编译，再顺序执行两套 CTest。集合还覆盖66000次实际原子操作、消息号回绕、
+完整原生 READ 故障矩阵和独立黄金报文；仍不替代整个本地完整套件。

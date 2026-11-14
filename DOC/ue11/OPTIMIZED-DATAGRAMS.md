@@ -35,5 +35,13 @@ SMALL UUD 和数据响应作为 UUD 请求仍被拒绝。
 MEDIUM `Unsupported` 与 STD 超长包消耗 posting，日志
 `/tmp/softue-medium-datagram-before-tests.log` 和
 `/tmp/softue-unreliable-admission-before-tests.log`。
-当前新增实现及回归尚待固定版本编译验证，不构成完整 M5/Profile 声明，也不宣告
-独立参考支持优化 datagram。
+固定实现 `79dad6b59c05fbeadc1905f7b0231b2331f6ff35` 的5项原生/线格式回归全部通过：
+普通构建0.16秒，ASan/UBSan/leak 构建3.04秒。停止所有编译后，三个公共 provider 回归
+（datagram processes、directed receive、local registration）顺序执行，普通构建0.19秒、
+ASan/UBSan/leak 构建1.00秒，均通过。日志位于
+`/tmp/softue-medium-datagram-{initial-normal,asan}-tests.log` 和
+`/tmp/softue-medium-datagram-provider-{normal,asan}-tests.log`。
+这是8项有边界的回归证据；配置的168项并未完整重跑。较早的完整166项证据仍只对应
+`5c30b3376768bef76c1175ef1e40e192637ce841`，不能更名为168项通过。
+主线 `da4374240901728101262ce25cde8713e1523878` 的 CI 208（三个作业）全部通过，
+该 CI 也在此数据报增量之前。不构成完整 M5/Profile 声明，也不宣告独立参考支持优化 datagram。
