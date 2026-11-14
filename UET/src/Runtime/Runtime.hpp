@@ -113,6 +113,10 @@ struct Services {
     std::weak_ptr<int> active_semantic_endpoint;
     uint16_t semantic_message_cursor=0;
     RetiredSemanticMessages retired_semantic_messages;
+    // Target READ return tokens are a separate namespace from source MIDs.
+    // They may survive SES replacement in the reverse PDC transmit queue.
+    uint16_t semantic_response_cursor=0;
+    RetiredSemanticMessages retired_semantic_responses;
 
 };
 

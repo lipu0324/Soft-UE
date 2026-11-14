@@ -554,6 +554,18 @@ public:
                 retired.retain(message,{std::get<0>(lease.connection),{},std::get<1>(lease.connection),std::get<2>(lease.connection),
                     lease.last_psn,lease.end_of_message_transmitted,false,lease.requires_connection_retirement,lease.connection_close_requested});
             retired.request_read_retirement([this](uint16_t local_pdc) { return host_.request_connection_close(local_pdc); });
+            for (const auto& [token,returned]:read_returns_) {
+                const auto& original=returned.original;
+                host_.services().retired_semantic_responses.retain(token,{original.source_fep,
+                    static_cast<uint32_t>(original.pkt.bth_header.Standard_Header.job_id),original.PDCID,
+                    original.connection_start_psn,returned.sequence.value_or(0),returned.sequence.has_value()});
+                // The copied reverse data remains PDS-owned, but its forward
+                // READ RX handle must not lose its SES owner. Terminate that
+                // accepted request before destroying the native message map.
+                const auto incoming=incoming_.find(receive_message_key(original));
+                if (incoming!=incoming_.end()) reject_message(original,incoming->second,SemanticReturnCode::Undeliverable);
+                else reply(original,SemanticReturnCode::Undeliverable,0);
+            }
         }
         closed_=true; lifetime_.reset();
         host_.set_receive_admission({},{});
@@ -803,7 +815,6 @@ private:
     // PDS payload storage and response tokens bounded (§3.5.20.2.2).
     size_t read_response_limit_;
     size_t read_result_window_;
-    uint16_t next_read_response_=0;
     struct ReadReservation {
         MessageKey message; bool processed=false;
         std::function<void()> data_confirmed; // Local rendezvous ownership only; empty for ordinary READ.
@@ -2630,7 +2641,7 @@ private:
             if (reserved!=read_packet_reservations_.end())
                 return reserved->second.message==key?Runtime::SemanticAdmission::ExistingMessage:Runtime::SemanticAdmission::Rejected;
         }
-        if (read && read_packet_reservations_.size()>=read_response_limit_) {
+        if (read && read_packet_reservations_.size()+host_.services().retired_semantic_responses.size()>=read_response_limit_) {
             trace_.record(node_,"read_packet_admission_blocked",request.orig_psn);
             return Runtime::SemanticAdmission::Rejected;
         }
@@ -3019,8 +3030,9 @@ private:
             }
             uint16_t token=0;
             for (size_t attempt=0;attempt<UINT16_MAX;++attempt) {
-                if (++next_read_response_==0) ++next_read_response_;
-                if (!read_returns_.count(next_read_response_)) { token=next_read_response_; break; }
+                auto& cursor=host_.services().semantic_response_cursor;
+                if (++cursor==0) ++cursor;
+                if (!read_returns_.count(cursor) && !host_.services().retired_semantic_responses.contains(cursor)) { token=cursor; break; }
             }
             if (!token) throw std::logic_error("READ response token budget exhausted");
             result.response_message_id=token;

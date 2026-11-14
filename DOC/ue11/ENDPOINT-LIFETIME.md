@@ -86,3 +86,42 @@ Endpoint 替换、RUDI、同步组、rendezvous 与流式 payload 生命周期�
 `/tmp/softue-close-tail-fault-normal-tests.log`、`/tmp/softue-close-tail-fault-asan-tests.log`。
 检查真实重传、零次额外 reader 调用、没有重复放置、后续消息成功及租约/目标槽正常回收。
 这仍是定向功能证据；构建负载下的耗时不作为网络或实现性能结果。
+
+## 目标 READ 的接收句柄与响应 token
+
+两个独立负向用例复现了目标替换的问题：
+
+- `/tmp/softue-target-replacement-before-read-tests.log`：已接受的 READ 仍在等待反向确认，
+  关闭目标 Endpoint 后 `read_returns_` 被清空，原 READ 的 PDS RX handle 再也得不到语义终态。
+- `/tmp/softue-target-replacement-before-token-tests.log`：把反向窗口限制为1，旧 token2 尚在
+  PDS 队列中时替换 Endpoint，新 READ 又分到 token2。旧请求随后发出的本地 TX 事件与旧 ACK
+  错误地回收新 READ 的返回状态，尽管新数据还没有被确认。
+
+目标关闭现在先为仍持有 RX handle 的 READ 排队 Undeliverable 终态响应，再销毁原生状态。
+这是一项明确的本地关闭策略；它不撤回已经发出的字节，也不直接修改 PDS 的确认前沿。
+已复制的返回数据仍由原 PDS 发送队列与重传缓存持有，不能包含旧 Endpoint 的存储指针。
+
+响应 token 使用独立的 Host 游标与退休表，与源 MID/local cookie 是不同的命名空间。
+Host 只用 target PDC 范围的事件绑定与回收它们；Source PDC 的相同数字不能退休一个
+响应 token。原 PDC/连接代次、FEP/Job、EOM PSN、真实 Clear/Close 仍是回收依据。
+旧响应占用的 READ packet credit 计入 Host 的接收预算，不能用反复替换对象绕过上限。
+
+`target_endpoint_replacement_test` 通过真实 READ/反向 PDS 路径覆盖 STD/SMALL/MEDIUM、
+RUD/ROD。token 隔离场景只接管源语义回调，以便目标关闭错误不会提前关闭共享 PDC；
+实际报文、PSN、返回数据与 ACK 仍走原内核。它检查新 READ 的状态在实际新数据确认前
+保持存在，随后解除 NIC 背压，检查正常回收。
+
+首轮5项普通回归全部通过（0.57s），日志 `/tmp/softue-target-lifetime-normal-tests.log`，
+包括源端替换、关闭分片收尾、优化 READ 事务及并发。对应5项 ASan/UBSan/泄漏回归也通过（5.52s），见 `/tmp/softue-target-lifetime-asan-tests.log`。
+随后扩为20个目标替换场景，加入强制 token 回绕、退休响应占用 READ credit、65534个
+旧 token 保留时选择唯一空闲 token5；再用独立角色测试核对 Job0、source/target 相同数字、
+错误 FEP/代次、未发送响应与32位 PSN 回绕。两项普通（0.15s）与 sanitizer（0.88s）均通过，
+见 `/tmp/softue-target-lifetime-boundary-normal-tests.log`、`/tmp/softue-target-lifetime-boundary-asan-tests.log`。
+未完成接收消息的跨对象续包、延迟 SYNC action、私有 MR key 的管理代次及没有活跃 SES 时
+的排队事件仍需进一步验收，因此不宣告完整 M1。
+
+目标 READ 关闭策略还通过5项普通（0.48s）和5项 ASan/UBSan/泄漏（4.83s）集成检查，
+覆盖 rendezvous 生命周期/源作用域、同步组生命周期、READ ACK-data 与提前接受，日志
+`/tmp/softue-target-lifetime-integration-normal-tests.log`、`/tmp/softue-target-lifetime-integration-asan-tests.log`。
+另一个独立同步原子关闭 probe 已复现未完成 action 的 RX handle 丢失，正在另行修复；
+不把上述 READ 结果推广为全部目标端关闭路径通过。
