@@ -627,6 +627,7 @@ struct NackPayload {
  */
 struct PDC_SES_req
 {
+    SES_BTH_header_type request_wire_format=Standard_Header; // Before the local SES field projection.
     uint16_t PDCID;          /**< SPDC identifier */
     uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
@@ -648,6 +649,8 @@ struct PDC_SES_req
  */
 struct PDC_SES_rsp
 {
+    SES_BTH_header_type original_request_format=Standard_Header;
+    uint16_t local_submission_id=0; // Trusted PDS TX handle; never a received or encoded MID.
     uint8_t delivery_mode=ROD;
     uint32_t rudi_packet_id=0,rudi_request_offset=0;
     uint16_t rudi_message_id=0; // Trusted initiator association, including local timeout upcalls.

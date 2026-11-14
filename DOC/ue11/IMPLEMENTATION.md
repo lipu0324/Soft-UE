@@ -23,8 +23,10 @@ transactions bound the capability; full HPC acceptance remains open.
 See [RUDI boundaries](RUDI.md).
 
 Scale-out optimized SMALL/MEDIUM/data-response wire layouts have independent
-20/32/12-byte vectors. Native ingress is fenced until no-MID PSN association and
-optimized MR-index authority are connected; see [optimized headers](OPTIMIZED-HEADERS.md).
+20/32/12-byte vectors. Explicit native SMALL WRITE/NOOP and MEDIUM WRITE/NOOP/
+SEND/tagged use local submission metadata and target PSN identities, with checked
+optimized MR-index resolution. READ/atomic/Sync optimized transactions and optimized
+data responses remain open; see [optimized headers](OPTIMIZED-HEADERS.md).
 
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).
@@ -91,7 +93,8 @@ endpoint. Network atomics support signed/unsigned integer types and min, max,
   CRC32C, RUD/ROD/UUD request headers, ACK, NACK, CP, standard SES requests and
   semantic responses. Encoding a header does not establish its complete protocol
   implementation. ACK_CC, NSCC feedback and plaintext trimming are also encoded;
-  optimized/local headers, security and IPv6 extension headers remain unsupported.
+  Unified Local headers, security and IPv6 extension headers remain unsupported.
+  Scale-out optimized wire layouts and selected native transactions are described above.
 - A deterministic store-and-forward fabric models directed links, serialization,
   propagation/FEC delay, eight independent traffic-class queues with byte deficit
   round-robin scheduling, tail/random loss, dequeue ECN, plaintext trimming,
@@ -182,7 +185,7 @@ independent SEND/tagged/RMA index spaces, generation and disabled-resource check
 Absolute PID selection still uses checked zero-based buffer offsets; it does not
 turn a received number into a host pointer. MRs can authorize one JobID or any
 valid JobID, and can bind a specific resource index (including index zero).
-Remaining memory-key classes, optimized transaction formats and full Profile acceptance
+Remaining memory-key classes, optimized operations beyond the selected subset and full Profile acceptance
 remain open. A streamed native WRITE of 4 GiB−1 has been transmitted and checked
 end to end; this does not establish all large-message operations or Profile conformance.
 

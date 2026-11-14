@@ -1,5 +1,6 @@
 #pragma once
 #include "../Transport_Layer.hpp"
+#include "../SES/SemanticRequestFields.hpp"
 
 namespace UET::PDS {
 // A metadata-only reservation request, not a delivered SES packet. There is
@@ -10,6 +11,10 @@ inline PDC_SES_req semantic_admission_request(const PDStoNET_pkt& packet,uint16_
     request.PDCID=local_pdc; request.rx_pkt_handle=UINT16_MAX;
     request.pkt.bth_type=packet.SESpkt.bth_type;
     request.pkt.bth_header=packet.SESpkt.bth_header;
+    request.request_wire_format=packet.SESpkt.bth_type;
+    if (const auto fields=UET::SES::semantic_request_fields(packet.SESpkt);fields && !fields->has_message_id) {
+        request.pkt.bth_type=Standard_Header; request.pkt.bth_header.Standard_Header=fields->header;
+    }
     // Group admission needs the synchronized extension before a PSN is
     // accepted. Copy only fixed metadata, never the unadmitted payload.
     request.pkt.eth_type=packet.SESpkt.eth_type;

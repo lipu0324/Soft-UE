@@ -95,14 +95,18 @@
         "uet_wire_test",
         "optimized_header_test",
         "optimized_admission_test",
-        "reference_wire_comparison"
+        "reference_wire_comparison",
+        "optimized_transaction_test",
+        "optimized_fault_test",
+        "optimized_safety_test",
+        "optimized_malformed_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Standard format plus scale-out optimized wire foundation: Figures3-15/16/Table3-18 are explicitly encoded as20/32/12 bytes, with14-bit request length replacing MID and MEDIUM sharing its address/header-data slot.120 carrier/IP/CRC/operation-extension golden vectors plus reserved/version/truncation and width boundaries pass. Six admission cases fence unimplemented native optimized transactions before PDC allocation or SES access. Existing pinned-parser comparisons cover the other48 formats; pinned util/uet_util.c explicitly rejects all three optimized next-header types, so no optimized reference-parsing or native capability claim. Native PSN association, optimized MR-index scope and transactions remain open. See OPTIMIZED-HEADERS.md."
+      "evidence_note": "STD plus scale-out SMALL20/MEDIUM32/dataSmall12 explicit wire layouts have120 golden carrier/IP/CRC/operation vectors. Native SMALL WRITE/NOOP and MEDIUM WRITE/NOOP/SEND/tagged now use PSN-based target identity and trusted local source submission metadata, wire response MID0, checked optimized MR index resolution, real PDS retries/default/Clear. Focused88 transaction+96 fault+62 authority/boundary+28 malformed/reader scenarios cover selected RUD/ROD and NSCC combinations; six admission/fence cases retain unsupported dataSmall boundary. Native optimized READ/atomic/Sync, data responses, provider selection and full Profile acceptance remain open. Pinned parser explicitly rejects all three optimized formats; no optimized reference interoperability claim. See OPTIMIZED-HEADERS.md."
     },
     {
       "id": "PDS-MAPPING",
@@ -757,7 +761,7 @@
         "HPC",
         "UNIFIED_LOCAL"
       ],
-      "evidence_note": "Native address selection and scope checks pass; optimized/local formats and all key classes remain open. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
+      "evidence_note": "Native address selection and scope checks pass; selected SMALL optimized index scope is checked; Unified Local formats and remaining key classes remain open. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
     },
     {
       "id": "SES-RETIREMENT",
@@ -840,14 +844,15 @@
         "memory_key_test",
         "memory_registry_test",
         "addressing_test",
-        "libfabric_provider_processes"
+        "libfabric_provider_processes",
+        "optimized_safety_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Native non-optimized application keys cover full 48-bit range, zero Job/PID/key/index and distinct relative Job/PID/index scopes. Absolute selection ignores Job for lookup and rejects ambiguous equal RKEYs, including differing idempotent metadata. SEND/UUD postings pin live registration identity, preventing cross-Job reselection and stale-key rebinding. Duplicate binding, permission fallback and stale/foreign revocation are rejected. Provider declares six RKEY bytes and preserves 64-bit idempotent metadata with optimized fallback. Optimized headers and provider application-assigned key mode remain open."
+      "evidence_note": "Native non-optimized application keys cover full 48-bit range, zero Job/PID/key/index and distinct relative Job/PID/index scopes. Absolute selection ignores Job for lookup and rejects ambiguous equal RKEYs, including differing idempotent metadata. SEND/UUD postings pin live registration identity, preventing cross-Job reselection and stale-key rebinding. Duplicate binding, permission fallback and stale/foreign revocation are rejected. Provider declares six RKEY bytes and preserves 64-bit idempotent metadata with optimized fallback. Native application OPTIMIZED keys are accepted with matching12bit RI, implicit SMALL index resolution, Job/PID scope, metadata and absolute ambiguity checks. Automatic optimized key allocation, remaining optimized operations and provider application-assigned key mode remain open."
     },
     {
       "id": "SES-DEFER-FALLBACK",
