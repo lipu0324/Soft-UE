@@ -671,10 +671,13 @@
       "summary": "TFC 信用与重传规则",
       "status": "partial",
       "tests": [
-        "tfc_credit_test"
+        "tfc_credit_test",
+        "credit_header_test",
+        "credit_admission_test",
+        "tfc_destination_credit_test"
       ],
       "profiles": [],
-      "evidence_note": "Pure source credit/cell law added, with immutable configuration, signed byte balance, free locally owned retransmissions, independent24bit cumulative grant decoding and atomic overflow rejection. Literal specification examples and576configuration properties pass on frozen64c796abaf156ad1dfbd73cc5b218843eb2bfbe8:1/1 normal0.01s and ASan/UBSan/leaks0.03s. Confirmed PDF505 pseudocode>>8 contradicts wire units256bytes and RCCC<<8; explicit unit interpretation is recorded. No PDS/NIC gating, destination allocation, credit CP/ACK/timer/sharedCCC/quiesce integration or Endpoint capability yet. See TRANSPORT-FLOW-CONTROL.md; no complete TFC/M5/Profile claim."
+      "evidence_note": "Pure source/destination credit accounting, literal credit wire formats and trusted PDS retry admission bridge are scoped-tested. cf4cdac wire/NSCC/PDS9/9 normal0.42s ASan4.32s;6455adb originalPDS admission/NSCC/trimming4/4 normal0.38s ASan4.29s;49cf654 source/destination2/2 normal0.08s ASan0.25s. Destination model reserves initial credit plus maximum MTU cell cost, holds local leases and grants only observed demand within capacity. No enabled TFC adapter, host-wide destination pool, credit timer, sharedCCC/quiesce integration or Endpoint capability yet. Unit and header evidence does not establish full TFC/M5/Profile. Spec credit units conflict documented in TRANSPORT-FLOW-CONTROL.md."
     },
     {
       "id": "NET-CSIG",

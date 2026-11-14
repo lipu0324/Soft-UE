@@ -80,7 +80,9 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 对每次数据发送记账，收到的 wire 标志不会控制本地免费的重传权限。
 `credit_admission_test` 是8个原 PDS 事务的隔离验证：RUD/ROD、首包丢失和三次 NIC
 背压组合。目的没有 TFC，信用由测试显式注入，以验证桥接边界；它不是信用线端
-互通或完整 TFC 实现。该桥接增量尚待固定版本编译验证。
+互通或完整 TFC 实现。固定源版本 `6455adb4388fc9ebb9e152d4fa68f6aa949886f1`
+的4项桥接/NSCC/trimming 回归通过：普通构建0.38秒，ASan/UBSan/leak 构建4.29秒。
+日志为 `/tmp/softue-tfc-admission-{normal,asan}-tests.log`；均为虚拟时间场景。
 
 ## 目的缓冲计算单元
 
@@ -96,4 +98,6 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 256字节粒度分配；CCC 总预留低于24位信用计数的半空间。这个上限是当前仿真的
 资源策略，不是规范规定的最大配置。调用者仍负责原 PDS 的去重、CCC 身份与生命周期。
 `tfc_destination_credit_test` 包含独立数值例子、缓冲占满/延迟释放、target 回绕、
-越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验；尚待编译验证。
+越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验。固定源版本 `49cf6545be20f09d3aaecd1d1833ceada072932b`
+的源/目的两个数值单元 CTest 通过：普通构建0.08秒，ASan/UBSan/leak 构建0.25秒。
+日志为 `/tmp/softue-tfc-destination-{normal,asan}-tests.log`。
