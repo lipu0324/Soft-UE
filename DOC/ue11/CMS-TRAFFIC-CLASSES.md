@@ -78,3 +78,10 @@ LASTHOP 裁剪通知，原 PDS NACK/重传恢复后检查两个目标区域的�
   不包含这里的多 TC 增量。当前整合版准备179项完整回归，尚无该范围通过声明。
 
 非零 RUDI/UUD、完整队列/管理配置及 Profile 审核仍开放，四种 Profile 均未宣布完成。
+
+完整固定67ae310普通回归为178/179，135.06秒；`pds_simulation_test` 在 legacy
+原始提交TC1时失败。新DSCP配置检查误套到 LegacySup1 入口，修正仅将标准IP
+配置限制用于Uet11，legacy继续保留0～7的本地PDC类身份，类8仍在分配前拒绝。
+legacy回归增加TC0/1/7各两次确定性轨迹比较。原失败报告
+`/tmp/softue-multi-tc-67-full-failure-report.json` 保留；67的Sanitizer完整构建成功，
+因发现普通生产回归未启动全量Sanitizer测试。修正版本需要重新完整验证。

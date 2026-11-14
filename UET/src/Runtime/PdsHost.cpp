@@ -266,7 +266,9 @@ auto PdsHost::set_context_event_handler(std::function<void(const PdcEvent&)> cal
 
 auto PdsHost::submit(const SES_PDS_req& request) -> bool {
     if (stopped_ || request.src_fep != node_ || request.source_pid>0xfff) return false;
-    if (!supports_data_traffic_class(request.tc)) return false;
+    // DSCP configuration belongs to the standard IP adapter. The explicit
+    // LegacySup1 path retains its existing local PDC traffic-class identity.
+    if (request.tc>=8 || (format_==WireFormat::Uet11 && !supports_data_traffic_class(request.tc))) return false;
     if (!manager_.pushSESRequest(request)) return false;
     trace_.record(node_, "ses_submit", request.tx_pkt_handle);
     wake();
