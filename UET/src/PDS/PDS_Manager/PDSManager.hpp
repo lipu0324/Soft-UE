@@ -367,9 +367,13 @@ public:
         // no caller may cast an optimized union as STD.
         const bool optimized_request=received_packet.SESpkt.bth_type==Optimized_Header ||
             received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
+        // Table3-21 also permits MEDIUM DATAGRAM_SEND. It retains UUD's
+        // stateless transport path; SMALL and optimized data responses do not.
+        const bool medium_datagram=received_packet.PDS_type==UUD_req_header &&
+            received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
         if (!received_packet.trimmed && ((received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header &&
             received_packet.PDS_type!=RUOD_ack_header && received_packet.PDS_type!=RUOD_req_header) ||
-            (optimized_request && received_packet.PDS_type!=RUOD_req_header))) { ++event_cnt; return; }
+            (optimized_request && received_packet.PDS_type!=RUOD_req_header && !medium_datagram))) { ++event_cnt; return; }
 
         if (received_packet.PDS_type==RUDI_header) {
             const auto& transport=received_packet.PDS_header.RUDI_header;
@@ -429,6 +433,13 @@ public:
             datagram.source_fep=received_packet.src_fep;
             datagram.next_hdr=received_packet.PDS_header.UUD_req_header.next_hdr;
             datagram.pkt=std::move(received_packet.SESpkt);
+            datagram.request_wire_format=datagram.pkt.bth_type;
+            if (const auto fields=UET::SES::semantic_request_fields(datagram.pkt);fields && !fields->has_message_id) {
+                // Reuse the checked SES field view without casting the
+                // optimized union or inventing a wire message ID/PSN.
+                datagram.pkt.bth_type=Standard_Header;
+                datagram.pkt.bth_header.Standard_Header=fields->header;
+            }
             PDCtoSES_req.push(datagram);
             return;
         }
