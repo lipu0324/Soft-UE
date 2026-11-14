@@ -163,3 +163,9 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 （run43541570125）的 simulation OFF、simulation ON（sanitizer）与 reference-wire
 三项工作全部成功。参考工作仍只证明其共同支持的 STD/其他既有格式，不能改写为
 优化格式参考互通通过。后续 Endpoint 生命周期改动有独立证据。
+
+另有固定、干净的 `b8c5646afe3b1f50a41c0c6eaa07c3e13c82ba4c` 版本完成132/132
+普通（126.50s）与132/132 ASan/UBSan/泄漏（623.32s）完整本地回归，启用 provider 与参考实现。
+日志 `/tmp/softue-optimized-clean-normal-tests.log`、`/tmp/softue-optimized-clean-asan-tests.log`，
+报告 `/tmp/softue-optimized-clean-full-report.json`。该版本只含首批优化 WRITE/NOOP/SEND，
+不能把这些完整结果改标为后续原子、READ 或 Endpoint 生命周期代码的本地完整结果。
