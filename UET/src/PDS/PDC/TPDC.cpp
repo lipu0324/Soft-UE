@@ -345,6 +345,7 @@ void T_PDC::reqClose()
 {
     if (req_closing || state!=ESTABLISHED) return;
     req_closing=true;
+    updateCreditActivity();
     sendCloseReq(); // Schedule once; ordinary PDS timers own its retransmits.
 }
 
@@ -353,6 +354,7 @@ void T_PDC::beginClose()
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] begin close" << std::endl;
     closing = true;        // Set closing flag
     state = ACK_WAIT;      // Wait for ACK state
+    updateCreditActivity();
 }
 
 void T_PDC::close()

@@ -240,7 +240,7 @@ void PDC::updateCreditActivity() const {
         return !item.second.delivery_confirmed && cached!=tx_pkt_buffer.end() && cached->second.PDS_type==RUOD_req_header;
     });
     runtime_->congestion_control->update_activity(congestionConnection(),DPDCID && !SYN,
-        !tx_req_q.empty(),pending_data,close_req || closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT,
+        !tx_req_q.empty(),pending_data,creditQuiescing(),
         runtime_->rto_ns);
 }
 

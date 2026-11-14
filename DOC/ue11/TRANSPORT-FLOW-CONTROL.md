@@ -132,5 +132,9 @@ Host 完成有效 SES upcall 后释放这块 transport buffer。SES 可能保留
 `tfc_context_test` 检查共享/最后 QUIESCE、新 CCC_ID、256 ID 耗尽与恢复、目的共享池
 和关闭回收。`tfc_integration_test` 的48个原 SES/PDS 事务覆盖 STD/MEDIUM、RUD/ROD、
 NSCC 开关、IPv4 UDP/IPv6 native、首包丢失、只有信用字段丢失而数据已经确认的恢复。
-这些接入代码及新测试尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
+初始接入版本 `d670a2e71f9ff28a52501438c8e13b2ccb91588d` 的两个构建都在编译阶段
+发现公共 PDC 读取了发起端专有 close_req，未运行新测试。修正后使用两类 PDC 的
+关闭状态查询，并在 QUIESCE/关闭转换时立即通知 CMS。新增原生双 Job 事务，在旧
+PDC 仍受65毫秒 SYN 关闭保护时，检查新 RUD PDC 取得不同 CCC_ID。
+修正后的接入代码尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。

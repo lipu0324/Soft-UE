@@ -470,6 +470,9 @@ public:
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    virtual bool creditQuiescing() const {
+        return closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT;
+    }
     // Keep posted-demand accounting at the queue ownership boundary, before
     // admission can block. Returning READ data uses this same queue and CCC.
     void enqueueRequest(PDS_PDC_req request) {

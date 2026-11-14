@@ -249,6 +249,7 @@ void I_PDC::closeReq(){
 
     close_req = true;
     state = QUIESCE;
+    updateCreditActivity(); // Retire a last-member CCC before another PDC can bind.
 
     // Record state change
     std::stringstream state_info;
@@ -555,6 +556,7 @@ void I_PDC::beginClose(){
 
     closing = true;
     state = ACK_WAIT;
+    updateCreditActivity();
     armCloseSafetyWake();
 
     // Record state change

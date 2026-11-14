@@ -18,6 +18,7 @@ public:
         : lower_(lower),loop_(loop),network_(network),fault_(fault),nscc_(nscc) {}
     size_t data_packets=0,retransmissions=0,credit_requests=0,credit_packets=0,lost=0;
     std::set<uint16_t> data_paths;
+    std::map<uint16_t,uint8_t> context_identifiers;
     SendResult try_send(const Frame& frame) override {
         const auto decoded=UetWireCodec::decode(frame.bytes.data(),frame.bytes.size(),network_.crc,253);
         const auto& packet=decoded.packet;
@@ -27,6 +28,7 @@ public:
             ++data_packets;
             retransmissions+=packet.PDS_header.RUOD_req_header.flags.retx;
             data_paths.insert(decoded.network.entropy);
+            context_identifiers[packet.PDS_header.RUOD_req_header.spdcid]=packet.credit_request.ccc_id;
             if (fault_==Fault::FirstData) { fault_=Fault::None; return discard(frame); }
         }
         if (packet.PDS_type==RUOD_cp_header) {
@@ -144,6 +146,58 @@ void transaction(bool ordered,bool nscc,Fault fault,RequestHeaderFormat format,b
     CHECK(target_host.tfc()->destination_context_count()==0);
     CHECK(loop.pending()==0);
 }
+
+void real_last_member_quiesce() {
+    EventLoop loop;
+    Trace trace(loop);
+    Fabric fabric(loop,trace,37);
+    CreditFaultPort forward(fabric.add_host(1),loop,{},Fault::None,false);
+    auto& reverse=fabric.add_host(2);
+    fabric.add_link(1,2,{});
+    fabric.add_link(2,1,{});
+    PdsHost source_host(1,loop,trace,forward),target_host(2,loop,trace,reverse);
+    TfcEngineConfig flow;
+    flow.outgoing.payload_mtu_bytes=flow.incoming.payload_mtu_bytes=64;
+    flow.receive_context_bytes=1024;
+    flow.receive_pool_bytes=4096;
+    source_host.enable_tfc(flow);
+    target_host.enable_tfc(flow);
+    Endpoint source(1,source_host,loop,trace,64),target(2,target_host,loop,trace,64);
+    for (uint32_t job=1; job<=2; ++job) {
+        source.memory().add_job(job);
+        target.memory().add_job(job);
+        const auto region=target.memory().register_region(job,1,64,7);
+        if (job==2) {
+            CHECK(forward.context_identifiers.size()==1);
+            // This call synchronously enters the original I_PDC QUIESCE.
+            // Its 65 ms SYN close guard keeps the old CCC alive while a new
+            // Job creates another RUD PDC on the same peer and data TC.
+            CHECK(source_host.request_connection_close(forward.context_identifiers.begin()->first));
+        }
+        Operation write;
+        write.type=OperationType::Write;
+        write.peer=2;
+        write.job=job;
+        write.delivery_mode=RUD;
+        write.remote_key=region.key;
+        write.payload.assign(64,static_cast<uint8_t>(job));
+        source.submit(write);
+        loop.run_until(job*kMillisecond);
+        Completion completion{};
+        CHECK(source.poll_completion(completion) && completion.status==CompletionStatus::Success);
+        CHECK(target.memory().read(job,1,region.key,0,64)==write.payload);
+    }
+    CHECK(forward.context_identifiers.size()==2);
+    auto first=forward.context_identifiers.begin();
+    auto second=std::next(first);
+    CHECK(first->second!=second->second);
+    source.close();
+    target.close();
+    source_host.close();
+    target_host.close();
+    CHECK(source_host.tfc()->source_connection_count()==0 && target_host.tfc()->reserved_receive_bytes()==0);
+    CHECK(loop.pending()==0);
+}
 }
 
 int main() {
@@ -154,7 +208,8 @@ int main() {
                     for (const auto format : {RequestHeaderFormat::Standard,RequestHeaderFormat::Medium})
                         for (const bool ipv6_native : {false,true})
                             transaction(ordered,nscc,fault,format,ipv6_native);
-        std::cout << "48 original SES/PDS TFC wire/credit-loss/data-loss/NSCC cases passed\n";
+        real_last_member_quiesce();
+        std::cout << "48 original SES/PDS TFC wire/loss/NSCC cases plus real last-member QUIESCE passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
