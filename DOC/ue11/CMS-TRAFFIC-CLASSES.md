@@ -85,4 +85,14 @@ data/NO_TRIM/trimmed DSCP 分类与交换机配置。不能据此宣告完整多
 其他类持有时，仍然可能出现正常的本地资源背压；不承诺无限副本或零等待。
 
 回归现使用1024字节 TC0 与512字节 TC3，并继续检查目标完整字节和唯一完成。
-这些调度修正尚待固定版本范围编译；原负向证据不会被更名为通过。
+固定源 `b1c24bc28e82edb9f91f4630ba49131324f9818f` 的13项范围回归已通过：
+普通1.22秒、ASan/UBSan/leak 12.34秒；日志为
+`/tmp/softue-native-tc-fair-{normal,asan}-tests.log`。原负向证据不会被更名为通过，
+这也不是配置的178项完整回归。
+
+后续新增4个同 Endpoint 错误清理/复用场景：TC0的大 WRITE 被有效格式的错误 key
+拒绝，TC3继续成功；等待 MSG_ERROR 尾清理后，在同一 Endpoint 再次提交两个类的
+合法 WRITE。检查每个 TC 的副本数、producer 消息数和全局计数均归零，防止计数
+下溢或遗留预约影响后续操作。这项增量尚待固定版本编译。只读诊断接口
+`queued_fragments_for_traffic_class` / `producer_messages_for_traffic_class` 对非法索引
+抛出 out_of_range，不把错误类号用于数组访问。

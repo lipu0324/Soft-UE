@@ -189,6 +189,67 @@ void rejected_configuration_and_posting() {
     check_throws<std::logic_error>([&] { host.configure_data_traffic_class(4,4); });
     source.close(); host.close(); CHECK(loop.pending()==0);
 }
+
+void error_cleanup_and_reuse(pdc_mode mode,bool nscc) {
+    EventLoop loop;
+    Trace trace(loop);
+    Fabric fabric(loop,trace,61);
+    auto& forward=fabric.add_host(1);
+    auto& reverse=fabric.add_host(2);
+    fabric.add_link(1,2,{}); fabric.add_link(2,1,{});
+    PdsHost source_host(1,loop,trace,forward),target_host(2,loop,trace,reverse);
+    source_host.configure_data_traffic_class(3,3);
+    enable_policies(source_host,nscc,true); enable_policies(target_host,nscc,true);
+    Endpoint source(1,source_host,loop,trace,64),target(2,target_host,loop,trace,64);
+    source.memory().add_job(1); target.memory().add_job(1);
+    const auto region=target.memory().register_region(1,1,1536,7);
+    Operation write;
+    write.type=OperationType::Write; write.peer=2; write.delivery_mode=mode;
+    write.remote_key=region.key+1; // Valid key format, deliberately no registration.
+    write.payload.assign(1024,0xee);
+    const auto denied=source.submit(write);
+    write.remote_key=region.key; write.traffic_class=3; write.remote_offset=1024;
+    write.payload.assign(512,0x33);
+    const auto other=source.submit(write);
+    loop.run_until(20*kMillisecond);
+    Completion completion{};
+    size_t denied_completions=0,other_completions=0;
+    while (source.poll_completion(completion)) {
+        if (completion.operation==denied) { CHECK(completion.status==CompletionStatus::RemoteError); ++denied_completions; }
+        else { CHECK(completion.operation==other && completion.status==CompletionStatus::Success); ++other_completions; }
+    }
+    CHECK(denied_completions==1 && other_completions==1);
+    CHECK(target.memory().read(1,1,region.key,0,1024)==std::vector<uint8_t>(1024,0));
+    CHECK(target.memory().read(1,1,region.key,1024,512)==std::vector<uint8_t>(512,0x33));
+    const auto producer_empty=[&] {
+        CHECK(!source.pending() && !source.queued_fragments());
+        for (uint8_t traffic_class=0; traffic_class<8; ++traffic_class) {
+            CHECK(!source.queued_fragments_for_traffic_class(traffic_class));
+            CHECK(!source.producer_messages_for_traffic_class(traffic_class));
+        }
+    };
+    producer_empty();
+    // Reuse the same Endpoint and both TCs after the rejected message and its
+    // MSG_ERROR tail. Counter underflow or stale reservations must not prevent
+    // either new operation from producing data.
+    write.traffic_class=0; write.remote_offset=0; write.payload.assign(128,0x22);
+    const auto again_zero=source.submit(write);
+    write.traffic_class=3; write.remote_offset=512; write.payload.assign(128,0x44);
+    const auto again_three=source.submit(write);
+    loop.run_until(40*kMillisecond);
+    std::set<uint64_t> completed;
+    while (source.poll_completion(completion)) {
+        CHECK(completion.status==CompletionStatus::Success && completion.length==128);
+        CHECK(completed.insert(completion.operation).second);
+    }
+    CHECK(completed.size()==2 && completed.count(again_zero) && completed.count(again_three));
+    CHECK(target.memory().read(1,1,region.key,0,128)==std::vector<uint8_t>(128,0x22));
+    CHECK(target.memory().read(1,1,region.key,512,128)==std::vector<uint8_t>(128,0x44));
+    producer_empty();
+    check_throws<std::out_of_range>([&] { source.queued_fragments_for_traffic_class(8); });
+    source.close(); target.close(); source_host.close(); target_host.close();
+    CHECK(loop.pending()==0);
+}
 }
 
 int main() {
@@ -197,9 +258,10 @@ int main() {
             for (const bool tfc : {false,true}) for (const bool loss : {false,true})
                 independent_flows(mode,nscc,tfc,loss);
             reverse_read_handoff(mode,nscc);
+            error_cleanup_and_reuse(mode,nscc);
         }
         rejected_configuration_and_posting();
-        std::cout << "16 independent-TC NIC flows,4 reverse READ handoffs and configuration boundaries passed\n";
+        std::cout << "16 independent-TC NIC flows,4 reverse READs,4 error/reuse ledgers and configuration bounds passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

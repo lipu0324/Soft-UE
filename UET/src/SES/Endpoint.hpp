@@ -10,6 +10,7 @@
 #include "../PDS/DefaultSemanticResponse.hpp"
 #include "../Runtime/PdsHost.hpp"
 #include <deque>
+#include <array>
 #include <tuple>
 #include <optional>
 
@@ -192,6 +193,8 @@ public:
     bool transport_pending(uint64_t operation) const;
     uint64_t unexpected_bytes() const;
     size_t queued_fragments() const;
+    size_t queued_fragments_for_traffic_class(uint8_t traffic_class) const;
+    size_t producer_messages_for_traffic_class(uint8_t traffic_class) const;
     size_t receive_intervals() const;
     size_t retained_read_packets() const;
     size_t pending_read_returns() const;

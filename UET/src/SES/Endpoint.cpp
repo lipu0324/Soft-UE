@@ -407,6 +407,14 @@ auto Endpoint::unexpected_bytes() const -> uint64_t { return unexpected_bytes_; 
 
 auto Endpoint::queued_fragments() const -> size_t { return queued_fragments_; }
 
+auto Endpoint::queued_fragments_for_traffic_class(uint8_t traffic_class) const -> size_t {
+    return queued_fragments_by_traffic_class_.at(traffic_class);
+}
+
+auto Endpoint::producer_messages_for_traffic_class(uint8_t traffic_class) const -> size_t {
+    return producer_messages_by_traffic_class_.at(traffic_class);
+}
+
 auto Endpoint::receive_intervals() const -> size_t {
     size_t count=0;
     for (const auto& message:incoming_) count+=message.second.segments.size()+message.second.read_requests.intervals();
