@@ -40,6 +40,7 @@
 #include "../NegativeAcknowledgment.hpp"
 #include "../OrderedRecovery.hpp"
 #include "../../SES/SemanticRequestFields.hpp"
+#include "../../SES/SemanticDataFields.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
@@ -679,8 +680,10 @@ protected:
     bool requiresReadReissue(uint32_t sequence) const {
         const auto request=tx_pkt_buffer.find(sequence);
         if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
-            request->second.PDS_type!=RUOD_req_header || request->second.SESpkt.bth_type!=Standard_Header) return false;
-        const auto& header=request->second.SESpkt.bth_header.Standard_Header;
+            request->second.PDS_type!=RUOD_req_header) return false;
+        const auto fields=UET::SES::semantic_request_fields(request->second.SESpkt);
+        if (!fields) return false;
+        const auto& header=fields->header;
         // §3.4.5.2 Figure 3-32: a large ACK threshold selects data ACKs for
         // every fragment of a multi-packet READ, even when total>threshold.
         return header.opcode==2 && (header.request_length<=read_ack_data_limit_ ||

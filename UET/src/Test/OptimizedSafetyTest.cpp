@@ -87,7 +87,7 @@ static void source_rejections() {
         case 0: operation.remote_key=1; break;
         case 1: operation.type=OperationType::Send; break;
         case 2: operation.header_format=RequestHeaderFormat::Medium; operation.immediate_data=42; break;
-        case 3: operation.type=OperationType::Read; break;
+        case 3: operation.type=OperationType::Read; operation.read_length=129; break;
         case 4: operation.type=OperationType::Atomic;
             operation.atomic_datatype=static_cast<IntegerAtomicDatatype>(99); break;
         case 5: operation.type=OperationType::FetchingAtomic; operation.atomic_datatype=static_cast<IntegerAtomicDatatype>(99); break;
@@ -108,7 +108,8 @@ static void legacy_capabilities() {
     CHECK(!source.capabilities().optimized_small_write && !source.capabilities().optimized_medium_write &&
         !source.capabilities().optimized_medium_send && !source.capabilities().optimized_small_atomic &&
         !source.capabilities().optimized_medium_atomic && !source.capabilities().optimized_small_fetching_atomic &&
-        !source.capabilities().optimized_medium_fetching_atomic && !source.capabilities().rudi_write && !source.capabilities().rudi_read);
+        !source.capabilities().optimized_medium_fetching_atomic && !source.capabilities().optimized_small_read &&
+        !source.capabilities().optimized_medium_read && !source.capabilities().rudi_write && !source.capabilities().rudi_read);
     Operation operation; operation.type=OperationType::Write; operation.peer=2;
     operation.remote_key=MemoryKeyFormat::Optimized|MemoryKeyFormat::IdempotentSafe|1;
     operation.header_format=RequestHeaderFormat::Small;

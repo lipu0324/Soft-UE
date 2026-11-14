@@ -10,7 +10,11 @@ inline SEStoPDS_pkt default_semantic_response(const SEStoPDS_pkt& original_reque
     response.bth_type=Semantic_Response_Header;
     auto& semantic=response.bth_header.Semantic_Response_Header;
     semantic.opcode=0; semantic.return_code=1;
-    if (original_request.bth_type==Semantic_Response_with_Data_Header) {
+    if (original_request.bth_type==Optimized_Response_with_Data_Header) {
+        const auto& request=original_request.bth_header.Optimized_Response_with_Data_Header;
+        semantic.message_id=0; semantic.job_id=request.job_id;
+        semantic.modified_length=request.payload_length;
+    } else if (original_request.bth_type==Semantic_Response_with_Data_Header) {
         // §3.5.20.2.2: the ACK for return data echoes the target's response
         // message ID, not the original initiator READ message ID.
         const auto& request=original_request.bth_header.Semantic_Response_with_Data_Header;

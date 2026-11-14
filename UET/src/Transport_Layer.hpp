@@ -640,6 +640,9 @@ struct PDC_SES_req
     uint32_t connection_start_psn = 0; /**< Local context generation, not an SES wire field. */
     uint32_t rudi_packet_id=0; /**< RUDI response correlation; never a PDC PSN. */
     bool rudi_retransmission=false,rudi_congestion_marked=false;
+    // DATA_SMALL return packets carry a READ's forward PSN separately from
+    // orig_psn, which identifies this packet in the reverse sequence space.
+    std::optional<uint32_t> original_read_psn;
 };
 /**
  * @struct PDC_SES_rsp
