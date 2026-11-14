@@ -140,21 +140,8 @@ inline uint32_t getRxpsn(uint32_t psn, uint16_t pdc_off) {
     return psn + offset;
 }
 
-/**
- * @brief Generate receive handle based on PSN and source PDCID
- * @param psn Packet sequence number
- * @param spdcid Source PDCID
- * @return Generated 16-bit handle
- * @details Generate handle using simple concatenation:
- *          - Low 8 bits: Low 8 bits of source PDCID
- *          - High 8 bits: Low 8 bits of PSN
- *          This method may have conflicts, may need more complex algorithm in actual use
- */
-inline uint16_t setRXhandle(uint32_t psn,uint16_t spdcid){
-    uint16_t handle = (spdcid & 0xFF) | ((psn & 0xFF) << 8); // Simple concatenation method
-    return handle;
-}
-
+// Receive execution identities come from ReceiveHandleAllocator. Deriving
+// them from PSN/PDCID aliases legitimate reexecutions of the same READ.
 
 // Utility function to determine PDC type
 inline pdc_type getPDCType(int pdc_id)

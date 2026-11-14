@@ -523,7 +523,17 @@ public:
             return false;
         }
 
-        return pds_process_info->pds_instance->PDCtoSES_req.pop(req);
+        auto& manager=*pds_process_info->pds_instance;
+        while (manager.PDCtoSES_req.pop(req)) {
+            if (!runtime_ || req.delivery_mode==UUD || req.delivery_mode==RUDI) return true;
+            // The PDC may have closed since enqueuing this upcall. Validate
+            // its execution while still below SES; a replacement Endpoint
+            // must not reserve memory for an already retired RX handle.
+            const bool live=req.PDCID<MAX_PDC?manager.IPDC_Processmanager.ownsReceiveExecution(req):
+                manager.TPDC_Processmanager.ownsReceiveExecution(req);
+            if (live) return true;
+        }
+        return false;
     }
 
     /**

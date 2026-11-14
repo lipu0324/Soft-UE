@@ -35,7 +35,7 @@ template<class Receiver> void clear_waits_for_semantics(pdc_mode mode,uint32_t f
     };
     clear(first);
     CHECK(receiver.rx_clear_psn==uint32_t(first-1) && cleared.empty() && receiver.rx_pkt_map.size()==2);
-    const auto respond=[&](uint16_t handle,bool guaranteed,bool no_response=false) {
+    const auto respond=[&](ReceivePacketHandle handle,bool guaranteed,bool no_response=false) {
         SES_PDC_rsp result{}; result.rx_pkt_handle=handle; result.gtd_del=guaranteed; result.rep_len=12;
         result.pkt.bth_type=Semantic_Response_Header;
         auto& semantic=result.pkt.bth_header.Semantic_Response_Header;
@@ -58,6 +58,7 @@ template<class Receiver> void clear_waits_for_semantics(pdc_mode mode,uint32_t f
 void clear_during_reissued_read(pdc_mode mode,uint32_t first) {
     EventLoop loop; size_t cleared=0;
     Services services{loop,loop,[] {}};
+    services.receive_handle_allocator=ReceiveHandleAllocator(uint64_t{1}<<32);
     services.pdc_event=[&](const PdcEvent& event) { cleared+=event.kind==PdcEventKind::ReceiveCleared; };
     ReadReplayReceiver receiver(&services); CHECK(receiver.initPDC(MAX_PDC));
     receiver.state=ESTABLISHED; receiver.mode=mode; receiver.src_fep=2; receiver.dst_fep=1; receiver.DPDCID=1;
@@ -69,9 +70,10 @@ void clear_during_reissued_read(pdc_mode mode,uint32_t first) {
     request.SESpkt.bth_type=Standard_Header; auto& header=request.SESpkt.bth_header.Standard_Header;
     header.opcode=2; header.som=header.eom=header.dc=header.rel=1; header.job_id=1;
     header.msg_id=9; header.request_length=1; header.PIDonFEP=header.resource_index=1;
-    const auto original=receiver.processRxReq(&request); auto metadata=receiver.rx_pkt_map.at(original);
+    const auto original=receiver.processRxReq(&request); CHECK(original>UINT32_MAX);
+    auto metadata=receiver.rx_pkt_map.at(original);
     receiver.updateRxPsnTracker(&metadata);
-    const auto respond=[&](uint16_t handle) {
+    const auto respond=[&](ReceivePacketHandle handle) {
         SES_PDC_rsp response{}; response.rx_pkt_handle=handle; response.gtd_del=true; response.rep_len=21;
         response.pkt.bth_type=Semantic_Response_with_Data_Header;
         auto& data=response.pkt.bth_header.Semantic_Response_with_Data_Header;
@@ -84,6 +86,7 @@ void clear_during_reissued_read(pdc_mode mode,uint32_t first) {
     // for the first ACK can race with that second legitimate SES invocation.
     transport.flags.retx=1; CHECK(receiver.reissueReceivedRead(&request) && receiver.rx_req_pkt_q.size()==1);
     const auto duplicate=receiver.rx_req_pkt_q.front(); receiver.rx_req_pkt_q.pop();
+    CHECK(duplicate.rx_pkt_handle>original);
     PDStoNET_pkt control{}; control.PDS_type=RUOD_cp_header;
     control.PDS_header.RUOD_cp_header.ctl_type=Clear_cmd; control.PDS_header.RUOD_cp_header.payload=first;
     receiver.rxCtrlClearCmd(&control);

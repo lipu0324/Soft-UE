@@ -627,6 +627,12 @@ public:
         return true;
     }
 
+    bool ownsReceiveExecution(const PDC_SES_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(request.PDCID);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance &&
+            found->second->ipdc_instance->ownsReceiveExecution(request);
+    }
     bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
         std::lock_guard<std::mutex> lock(manager_mutex);
         const auto found=ipdc_processes.find(notification.identity.local_pdc);

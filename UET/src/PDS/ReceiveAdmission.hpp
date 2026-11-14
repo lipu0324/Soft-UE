@@ -8,7 +8,7 @@ namespace UET::PDS {
 inline PDC_SES_req semantic_admission_request(const PDStoNET_pkt& packet,uint16_t local_pdc,
                                              uint32_t peer,pdc_mode mode,uint32_t start_psn) {
     PDC_SES_req request{};
-    request.PDCID=local_pdc; request.rx_pkt_handle=UINT16_MAX;
+    request.PDCID=local_pdc; request.rx_pkt_handle=UET::Runtime::kInvalidReceivePacketHandle;
     request.pkt.bth_type=packet.SESpkt.bth_type;
     request.pkt.bth_header=packet.SESpkt.bth_header;
     request.request_wire_format=packet.SESpkt.bth_type;

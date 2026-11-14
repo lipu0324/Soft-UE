@@ -235,3 +235,7 @@ Job 重建、注销、最后一个合法 key 和耗尽后不回绕；普通和 A
 前一源码 `aa9312b` 的七项 ASan/UBSan/泄漏定向回归全部通过（4.93s），
 日志 `/tmp/softue-receive-close-final-asan-tests.log`；不把它标记为本节自动 key 改动的
 sanitizer 事务验证。
+
+接收执行身份的后续负向 probe 又复现了同 PSN READ 重执行和失效 PDC 上行队列的
+两个问题。新的 Host 本地 RX 标识与交付前归属检查见
+[接收句柄](RECEIVE-HANDLES.md)；其中的宽本地类型不改变 UE 报文。

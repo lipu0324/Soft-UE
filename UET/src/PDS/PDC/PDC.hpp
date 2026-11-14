@@ -368,7 +368,7 @@ class PDC
 public:
     // Queues and mapping tables
     std::map<uint32_t, TX_pkt_meta> tx_pkt_map;       /**< Store metadata of sent packets */
-    std::map<uint16_t, RX_pkt_meta> rx_pkt_map;       /**< Store metadata of received packets */
+    std::map<UET::Runtime::ReceivePacketHandle, RX_pkt_meta> rx_pkt_map; /**< One entry per accepted SES execution. */
     std::map<uint32_t, PDStoNET_pkt> tx_pkt_buffer;   /**< Store unacknowledged request packets */
     std::map<uint32_t, PDStoNET_pkt> tx_ack_buffer;   /**< Store guaranteed delivery ACK packets */
     const unsigned int tx_ack_buffer_capa = 10;                /**< ACK buffer capacity */
@@ -703,17 +703,17 @@ protected:
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();
     UET::Runtime::Services* runtime_ = nullptr;
+    UET::Runtime::ReceiveHandleAllocator local_receive_handle_allocator_; // Legacy adapter without a Host; persists across free/init.
 public:
 
-    /**
-     * @brief Set receive handle Set receive handle Set receive handle
-     * @param psn Packet sequence number Packet sequence number
-     * @param spdcid Source PDC ID Source PDC ID
-     * @return Generated receive handle Generated receive handle
-     */
-    uint16_t setRXhandle(uint32_t psn, uint16_t spdcid)
-    {
-        return (psn & 0xFFFF) | ((spdcid & 0xFF) << 16);
+    UET::Runtime::ReceiveHandleAllocator& receiveHandleAllocator() {
+        return runtime_?runtime_->receive_handle_allocator:local_receive_handle_allocator_;
+    }
+    bool ownsReceiveExecution(const PDC_SES_req& request) const {
+        if (state.load()==CLOSED || request.PDCID!=SPDCID || request.source_fep!=dst_fep ||
+            request.delivery_mode!=mode || request.connection_start_psn!=start_psn) return false;
+        const auto found=rx_pkt_map.find(request.rx_pkt_handle);
+        return found!=rx_pkt_map.end() && found->second.psn==request.orig_psn;
     }
     /**
      * @brief Get current PSN value Get current PSN value Get current PSN value
@@ -756,7 +756,7 @@ public:
      * @param pkt Received network packet Received network packet
      * @return Processing result handle Processing result handle
      */
-    uint16_t processRxReq(PDStoNET_pkt *pkt,bool duplicate=false);
+    UET::Runtime::ReceivePacketHandle processRxReq(PDStoNET_pkt *pkt,bool duplicate=false);
 
     /**
      * @brief Update sending PSN tracker Update sending PSN tracker Update sending PSN tracker
@@ -815,7 +815,7 @@ public:
      * @param meta Packet metadata Packet metadata
      * @param pkt Packet data Packet data
      */
-    void fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt);
+    void fwdReq2SES(UET::Runtime::ReceivePacketHandle handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt);
 
     /**
      * @brief Forward response to SES layer Forward response to SES layer Forward response to SES layer

@@ -97,6 +97,9 @@ if(BUILD_TESTING)
   softue_test(receive_close_boundary_test ReceiveCloseBoundaryTest.cpp)
   softue_test(private_memory_key_replacement_test PrivateMemoryKeyReplacementTest.cpp)
   softue_test(memory_key_allocator_test MemoryKeyAllocatorTest.cpp Threads::Threads)
+  softue_test(receive_handle_lifetime_test ReceiveHandleLifetimeTest.cpp)
+  softue_test(receive_handle_boundary_test ReceiveHandleBoundaryTest.cpp)
+  softue_test(stale_semantic_queue_test StaleSemanticQueueTest.cpp)
   softue_test(realtime_late_progress_test RealtimeLateProgressTest.cpp)
   softue_test(retry_timing_test RetryTimingTest.cpp)
   softue_test(retry_limit_test RetryLimitTest.cpp)
@@ -395,4 +398,21 @@ if(BUILD_TESTING)
       --reference $<TARGET_FILE:reference_interop_target> --peer $<TARGET_FILE:reference_interop_peer>)
     set_tests_properties(reference_process_interop PROPERTIES TIMEOUT 40)
   endif()
+  # Build independent lifecycle fixtures together so CMake can schedule their
+  # dependencies in parallel. The label selects the same semantic ownership
+  # regressions in CTest; it does not imply complete M1/Profile acceptance.
+  set(SOFTUE_LIFETIME_REGRESSION_TESTS
+    retired_semantic_messages_test semantic_response_lease_test
+    endpoint_replacement_test endpoint_close_tail_test endpoint_close_tail_fault_test
+    target_endpoint_replacement_test synchronized_target_close_test
+    synchronized_target_close_boundary_test receive_endpoint_replacement_test
+    retired_semantic_receives_test inactive_semantic_adapter_test receive_close_boundary_test
+    private_memory_key_replacement_test memory_key_allocator_test
+    receive_handle_lifetime_test receive_handle_boundary_test stale_semantic_queue_test
+    clear_processing_safety_test native_read_test message_retirement_test
+    rendezvous_boundary_test rendezvous_lifecycle_test
+    deferrable_restart_test deferrable_boundary_test realtime_late_progress_test
+    uet_wire_test optimized_header_test rudi_header_test synchronized_header_test)
+  add_custom_target(softue_lifetime_regressions DEPENDS ${SOFTUE_LIFETIME_REGRESSION_TESTS})
+  set_tests_properties(${SOFTUE_LIFETIME_REGRESSION_TESTS} PROPERTIES LABELS ses_lifetime)
 endif()
