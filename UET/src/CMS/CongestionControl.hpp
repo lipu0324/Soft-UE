@@ -11,7 +11,8 @@ struct Connection {
     uint16_t local_pdc=0;
     uint32_t starting_psn=0;
     bool ordered=false;
-    auto identity() const { return std::make_tuple(peer,local_pdc,starting_psn,ordered); }
+    uint8_t traffic_class=0; // Local outgoing data TC, not the reverse ACK/control TC.
+    auto identity() const { return std::make_tuple(peer,local_pdc,starting_psn,ordered,traffic_class); }
     bool operator<(const Connection& other) const { return identity()<other.identity(); }
 };
 

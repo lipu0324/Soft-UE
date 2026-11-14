@@ -480,14 +480,15 @@
         "packet_trimming_test",
         "mac_timing_test",
         "simulation_scenarios",
-        "nscc_lifecycle_test"
+        "nscc_lifecycle_test",
+        "cms_traffic_class_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md."
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md. Unvalidated follow-up: CMS Connection and NSCC/TFC group keys now include outgoing data TC, with direct-CMS window/credit isolation tests. Host/PDC/NIC/DSCP TC propagation remains open, TFC Host stillTC0; no end-to-end multi-TC claim. See CMS-TRAFFIC-CLASSES.md."
     },
     {
       "id": "NET-BASE",
@@ -678,10 +679,11 @@
         "tfc_context_test",
         "tfc_integration_test",
         "tfc_bidirectional_test",
-        "tfc_receive_pressure_test"
+        "tfc_receive_pressure_test",
+        "cms_traffic_class_test"
       ],
       "profiles": [],
-      "evidence_note": "Source/destination arithmetic and wire/admission components are scoped-tested. Experimental TfcEngine now connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD CCC_ID lifetime, Credit ACK or Credit CP alongside NSCC, and injected RTO credit-loss recovery. bc98650 11/11 normal0.78s ASan7.75s includes48wire/recovery scenarios216operations plusrealQUIESCE;444e206 bidirectional96scenarios normal0.17s ASan1.94s;0a72fae three-Host pool-refusal/refill4scenarios normal0.02s ASan0.12s. Latest private-RUD group-key clarification and integrated full176 build/tests pending. Host adapter is TC0/shared-Payload-MTU only, cell/overhead configured out of band, no native capability/Profile claim. Both specification unit-shift and READY credit-timer contradictions remain recorded review items. No complete TFC/M5/Profile claim. See TRANSPORT-FLOW-CONTROL.md."
+      "evidence_note": "Source/destination arithmetic and wire/admission components are scoped-tested. Experimental TfcEngine now connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD CCC_ID lifetime, Credit ACK or Credit CP alongside NSCC, and injected RTO credit-loss recovery. bc98650 11/11 normal0.78s ASan7.75s includes48wire/recovery scenarios216operations plusrealQUIESCE;444e206 bidirectional96scenarios normal0.17s ASan1.94s;0a72fae three-Host pool-refusal/refill4scenarios normal0.02s ASan0.12s. Latest private-RUD group-key clarification and integrated full176 build/tests pending. Host adapter is TC0/shared-Payload-MTU only, cell/overhead configured out of band, no native capability/Profile claim. Both specification unit-shift and READY credit-timer contradictions remain recorded review items. No complete TFC/M5/Profile claim. See TRANSPORT-FLOW-CONTROL.md. Unvalidated follow-up: CMS Connection and NSCC/TFC group keys now include outgoing data TC, with direct-CMS window/credit isolation tests. Host/PDC/NIC/DSCP TC propagation remains open, TFC Host stillTC0; no end-to-end multi-TC claim. See CMS-TRAFFIC-CLASSES.md."
     },
     {
       "id": "NET-CSIG",
