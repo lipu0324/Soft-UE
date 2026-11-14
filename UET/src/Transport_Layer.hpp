@@ -568,6 +568,10 @@ struct PDStoNET_pkt
         uint32_t expected_psn=0;
     } control_ack; // §3.5.16.4.1: local representation, never memcpy'd to wire.
     struct {
+        uint8_t ccc_id=0;
+        uint32_t credit_target_units=0; // 24 bits, one unit = 256 bytes.
+    } credit_request; // §§3.5.10.6/3.6.9.1: RUD_CC_REQ / ROD_CC_REQ extension.
+    struct {
         uint8_t type=0,mpr=0;
         int16_t sack_psn_offset=0;
         uint64_t sack_bitmap=0;
@@ -575,6 +579,7 @@ struct PDStoNET_pkt
         bool restore_window=false;
         uint8_t receiver_window_penalty=0;
         uint32_t received_byte_units=0;
+        uint32_t credit_units=0; // CC_CREDIT only; distinct from NSCC telemetry.
         uint16_t out_of_order_count=0xffff;
     } congestion_ack; // §3.5.10.8 / §3.6.9.2, encoded explicitly by UetWireCodec.
     uint16_t wire_entropy=0;

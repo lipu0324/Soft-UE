@@ -56,3 +56,44 @@ TFC 支持；不能把这个单元当作完整 TFC 或 M5 的验收。
 固定源版本 `64c796abaf156ad1dfbd73cc5b218843eb2bfbe8` 的该项 CTest 已通过：
 普通 Debug 构建0.01秒，ASan/UBSan/leak 构建0.03秒。日志为
 `/tmp/softue-tfc-credit-{normal,asan}-tests.log`。仅验证数值单元，不扩大为接入证明。
+
+## 信用线格式接入
+
+编解码器新增 RUD_CC_REQ / ROD_CC_REQ 的4字节 `req_cc_state`，其中 CCC_ID 为8位、
+累计 credit target 为24位。类型13/14仍保留独立身份；尚未启用 TFC 的 PDS 仍拒绝
+这些请求，不会把它们悄悄转换成普通 RUD/ROD。信用控制包已有32位 payload 外壳，
+Credit 使用高24位与低8位保留，Credit Request 使用 CCC_ID 与24位 target。
+
+ACK_CC 的 `CC_CREDIT=1` 使用独立 `credit_units` 字段。实际 PDF 第464页图3-129
+规定信用位于8字节 CC_STATE 的最前24位，随后24位保留，再跟16位 ooo_count；
+它的位置与 NSCC 的 `received_byte_units` 不同。NSCC 的 service_time、窗口罚值
+和字节遥测不能被写入或读作信用。NIC 的 service_time stamping 也不改信用 ACK。
+`credit_header_test` 使用手写黄金字节验证40个格式/封装组合，并覆盖截断、保留位
+和24位范围。固定源版本 `cf4cdacd60c1d08eceae58f553be8087d0047057` 的9项
+信用线格式、NSCC、trimming 和 PDS 非法/保留字段回归全部通过：普通构建0.42秒，
+ASan/UBSan/leak 构建4.32秒。日志为 `/tmp/softue-tfc-wire-{normal,asan}-tests.log`。
+不代表真实信用发送/接收已经启用。
+
+PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传入本地发送
+路径是否拥有已缓存 PSN 的重传。新包和重传在入网络队列时只记账一次；端口
+`WouldBlock` 的重试仍使用该队列项，不能再次扣费。旧 NSCC 策略通过默认适配继续
+对每次数据发送记账，收到的 wire 标志不会控制本地免费的重传权限。
+`credit_admission_test` 是8个原 PDS 事务的隔离验证：RUD/ROD、首包丢失和三次 NIC
+背压组合。目的没有 TFC，信用由测试显式注入，以验证桥接边界；它不是信用线端
+互通或完整 TFC 实现。该桥接增量尚待固定版本编译验证。
+
+## 目的缓冲计算单元
+
+`TfcDestinationCredit` 管理一个 CCC 的独占 transport buffer 预算，尚未接入 PDS。
+创建者必须先从主机总池预留这块容量；单元不能凭空承诺其他 CCC 的缓冲。
+初始信用之外，始终保留一个最大 packet cell 成本，覆盖正信用允许的 MTU 超出。
+例如4096字节 payload、512字节 cell、256字节 overhead 的最大成本为4608字节；
+初始256字节时，该 CCC 的最低保留容量为4864字节。
+
+新包取得不可复用的本地 buffer lease，交给下一层后才能释放。累计请求、已授予信用、
+正负承诺余额和实际占用分别记账；重排释放和重复释放不会重复返还。目的 eager grant
+策略只满足已观察到的累计需求，且不借出仍占用的 storage 或 MTU 保留量。信用以
+256字节粒度分配；CCC 总预留低于24位信用计数的半空间。这个上限是当前仿真的
+资源策略，不是规范规定的最大配置。调用者仍负责原 PDS 的去重、CCC 身份与生命周期。
+`tfc_destination_credit_test` 包含独立数值例子、缓冲占满/延迟释放、target 回绕、
+越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验；尚待编译验证。

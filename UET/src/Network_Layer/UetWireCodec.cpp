@@ -294,11 +294,20 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
     // and flags[6:0]. Pack fields explicitly; C++ bitfield layout is not wire ABI.
     if (packet.PDS_type == RUOD_req_header) {
         const auto& header=packet.PDS_header.RUOD_req_header;
-        if (header.type!=RUD_REQ && header.type!=ROD_REQ) throw std::invalid_argument("unsupported request type");
+        const bool credit_request=header.type==RUD_CC_REQ || header.type==ROD_CC_REQ;
+        if (header.type!=RUD_REQ && header.type!=ROD_REQ && !credit_request)
+            throw std::invalid_argument("unsupported request type");
+        if (credit_request && packet.credit_request.credit_target_units>0xffffff)
+            throw std::invalid_argument("credit target exceeds 24 bits");
         next=header.next_hdr;
         put(encoded_bytes,(uint16_t{header.type}<<11)|(next_wire(next)<<7)|(header.flags.retx<<4)|(header.flags.ar<<3)|(header.flags.syn<<2),2);
         put(encoded_bytes,header.clear_psn_off,2); put(encoded_bytes,header.psn,4); put(encoded_bytes,header.spdcid,2);
         put(encoded_bytes,header.flags.syn ? ((header.pdc_info&1)<<12)|header.psn_off : header.dpdcid,2);
+        if (credit_request) {
+            // Figure 3-127: CCC identity precedes the cumulative demand.
+            put(encoded_bytes,packet.credit_request.ccc_id,1);
+            put(encoded_bytes,packet.credit_request.credit_target_units,3);
+        }
     } else if (packet.PDS_type == RUDI_header) {
         const auto& header=packet.PDS_header.RUDI_header;
         if ((header.type!=RUDI_REQ && header.type!=RUDI_RESP) || header.flags.retx>1 || header.flags.m>1 ||
@@ -315,13 +324,23 @@ Bytes encode_pds(const PDStoNET_pkt& packet) {
         put(encoded_bytes,static_cast<uint16_t>(header.ack_psn_off),2); put(encoded_bytes,header.cack_psn,4); put(encoded_bytes,header.spdcid,2); put(encoded_bytes,header.dpdcid,2);
         if (header.type==ACK_CC) {
             const auto& congestion=packet.congestion_ack;
-            if (congestion.type!=0 || congestion.receiver_window_penalty>127 || congestion.received_byte_units>0xffffff)
+            if (congestion.type>1 || (congestion.type==0 &&
+                (congestion.receiver_window_penalty>127 || congestion.received_byte_units>0xffffff)) ||
+                (congestion.type==1 && congestion.credit_units>0xffffff))
                 throw std::invalid_argument("unsupported ACK_CC state");
             put(encoded_bytes,congestion.type<<4,1); put(encoded_bytes,congestion.mpr,1);
             put(encoded_bytes,static_cast<uint16_t>(congestion.sack_psn_offset),2); put(encoded_bytes,congestion.sack_bitmap,8);
-            put(encoded_bytes,congestion.service_time,2);
-            put(encoded_bytes,(congestion.restore_window?0x80:0)|congestion.receiver_window_penalty,1);
-            put(encoded_bytes,congestion.received_byte_units,3); put(encoded_bytes,congestion.out_of_order_count,2);
+            if (congestion.type==0) {
+                put(encoded_bytes,congestion.service_time,2);
+                put(encoded_bytes,(congestion.restore_window?0x80:0)|congestion.receiver_window_penalty,1);
+                put(encoded_bytes,congestion.received_byte_units,3);
+            } else {
+                // Figure 3-129: credit is the FIRST 24 bits of CC_STATE,
+                // followed by 24 reserved bits. It is not the NSCC byte slot.
+                put(encoded_bytes,congestion.credit_units,3);
+                put(encoded_bytes,0,3);
+            }
+            put(encoded_bytes,congestion.out_of_order_count,2);
         }
     } else if (packet.PDS_type == nack_header) {
         const auto& header=packet.PDS_header.nack_header;
@@ -362,7 +381,7 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
     if (type==11 && ((prologue>>7)&0xf)>=10)
         throw PdsDecodeError(PdsDecodeError::Reason::UnknownControlType,(prologue>>7)&0xf);
     PDS_next_hdr next=type==11 ? UET_HDR_NONE : next_host((prologue>>7)&0xf);
-    if (type==2 || type==3) {
+    if (type==2 || type==3 || type==13 || type==14) {
         // RUD/ROD share a 12-byte header. During SYN the final two bytes
         // carry PDC info and start-PSN offset instead of destination PDCID.
         // §3.5.10: extract meaningful fields and ignore reserved receive bits.
@@ -373,6 +392,10 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
         const auto destination=reader.take(2);
         if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
         else header.dpdcid=destination;
+        if (type==13 || type==14) {
+            packet.credit_request.ccc_id=reader.take(1);
+            packet.credit_request.credit_target_units=reader.take(3);
+        }
     } else if (type==4 || type==5) {
         packet.PDS_type=RUDI_header; auto& header=packet.PDS_header.RUDI_header;
         header.type=type==4?RUDI_REQ:RUDI_RESP; header.next_hdr=next;
@@ -395,6 +418,9 @@ PDStoNET_pkt decode_pds(const uint8_t* bytes, size_t size) {
                 congestion.service_time=state>>48; congestion.restore_window=(state>>47)&1;
                 congestion.receiver_window_penalty=(state>>40)&0x7f;
                 congestion.received_byte_units=(state>>16)&0xffffff; congestion.out_of_order_count=state&0xffff;
+            } else if (congestion.type==1) {
+                congestion.credit_units=state>>40;
+                congestion.out_of_order_count=state&0xffff;
             }
         }
     } else if (type==10) {

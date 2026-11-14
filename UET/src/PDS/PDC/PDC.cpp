@@ -701,7 +701,9 @@ void PDC::reTx(uint32_t psn){
     else return;
     if (runtime_ && runtime_->congestion_control && p.PDS_type==RUOD_req_header && !tx_pkt_map.at(psn).delivery_confirmed) {
         auto& metadata=tx_pkt_map.at(psn);
-        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
+        // This path owns an existing cached PSN; it is a retry even if a
+        // caller forgot to set the diagnostic/wire retransmission flag.
+        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted_attempt(congestionConnection(),p,true);
         metadata.congestion_inflight=true;
         metadata.congestion_debit_waiting_for_retry=false;
     }
@@ -757,7 +759,7 @@ void PDC::retryPacket(uint32_t psn,RetryCause cause){
     }
     const bool data=tx_pkt_buffer.at(psn).PDS_type==RUOD_req_header;
     const bool semantic_query=data && runtime_ && runtime_->standard_wire && tx_pkt_map.at(psn).delivery_confirmed;
-    if (data && !semantic_query && (!peerWindowAllows(psn) || !congestionReady())) {
+    if (data && !semantic_query && (!peerWindowAllows(psn) || !congestionReady(true))) {
         stopPacketTimer(psn); admission_deferred_retries_.emplace(psn,cause); return;
     }
     TX_pkt_meta meta = tx_pkt_map.at(psn);
@@ -1603,7 +1605,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     if (runtime_ && runtime_->congestion_control) {
         congestion_engaged_=true;
         auto& metadata=tx_pkt_map[psn];
-        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted(congestionConnection(),p);
+        metadata.congestion_nominal_bytes=runtime_->congestion_control->transmitted_attempt(congestionConnection(),p,false);
         metadata.congestion_inflight=true;
         metadata.last_transmit_time=runtime_->clock.now();
     }
