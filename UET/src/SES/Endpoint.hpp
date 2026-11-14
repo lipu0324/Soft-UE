@@ -543,13 +543,13 @@ public:
         if (!host_.closed()) {
             auto& retired=host_.services().retired_semantic_messages;
             std::set<std::tuple<uint16_t,uint32_t,uint16_t,uint32_t>> answered_handles;
-            const auto terminate_receive=[this,&answered_handles](const PDC_SES_req& request,bool unexecuted_atomic=false) {
+            const auto terminate_receive=[this,&answered_handles](const PDC_SES_req& request,bool unplaced_payload=false) {
                 const auto identity=std::make_tuple(request.PDCID,request.connection_start_psn,request.rx_pkt_handle,request.orig_psn);
                 if (!answered_handles.insert(identity).second) return;
                 const auto incoming=incoming_.find(receive_message_key(request));
                 if (incoming==incoming_.end()) { reply(request,SemanticReturnCode::Undeliverable,0); return; }
                 auto& message=incoming->second;
-                if (unexecuted_atomic) message.received=0; // Operand assembly did not modify target memory.
+                if (unplaced_payload) message.received=0; // Buffered operands/unexpected data did not modify application memory.
                 if (!message.first_error) {
                     message.first_error=SemanticReturnCode::Undeliverable;
                     message.error_generation=request.pkt.bth_header.Standard_Header.ri_generation;
@@ -599,10 +599,24 @@ public:
                         static_cast<uint8_t>(SemanticReturnCode::Undeliverable),true,action.immediate});
                 }
             }
-            for (const auto& [identity,message]:incoming_) {
+            for (auto& [identity,message]:incoming_) {
+                if (message.unexpected) message.received=0;
+                if (!message.completed) {
+                    if (!message.first_error) message.first_error=SemanticReturnCode::Undeliverable;
+                    message.target_error=CompletionStatus::Cancelled;
+                    // A matched SEND or WRITE notification may already have
+                    // placed a prefix without receiving EOM. Closing its
+                    // owner reports that actual placed length exactly once.
+                    report_receive_error(message);
+                }
                 // An incomplete operand has no SynchronizedTargetAction yet.
                 // Each fragment still owns a real, unanswered PDS RX handle.
                 for (const auto& request:message.synchronization_responses) terminate_receive(request,true);
+                // An unexpected complete SEND holds its EOM until a receive
+                // buffer is posted. Rendezvous transactions instead own and
+                // terminate their deferred response in fail_rendezvous_target.
+                if (message.deferred_response && !message.rendezvous_target)
+                    terminate_receive(*message.deferred_response,bool(message.unexpected));
             }
         }
         closed_=true; lifetime_.reset();

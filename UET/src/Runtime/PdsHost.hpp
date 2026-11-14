@@ -3,6 +3,7 @@
 #include "PacketPort.hpp"
 #include "../Network_Layer/PdsPacketCodec.hpp"
 #include "../Network_Layer/UetWireCodec.hpp"
+#include "../PDS/DefaultSemanticResponse.hpp"
 #include "../CMS/NsccEngine.hpp"
 #include "../SES/SemanticReturnCode.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
