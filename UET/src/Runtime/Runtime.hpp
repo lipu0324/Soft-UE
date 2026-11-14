@@ -1,6 +1,7 @@
 #pragma once
 #include "PdcEvents.hpp"
 #include "RetiredSemanticMessages.hpp"
+#include "RetiredSemanticReceives.hpp"
 #include "RetryTiming.hpp"
 #include "../PDS/ReceiveDiagnostics.hpp"
 #include "../PDS/PsnRangeConfiguration.hpp"
@@ -117,6 +118,7 @@ struct Services {
     // They may survive SES replacement in the reverse PDC transmit queue.
     uint16_t semantic_response_cursor=0;
     RetiredSemanticMessages retired_semantic_responses;
+    RetiredSemanticReceives retired_semantic_receives;
 
 };
 

@@ -437,4 +437,5 @@ in the Host, with Clear/Close-based reclamation and exclusive live SES binding.
 This protects late queued PDS upcalls across object replacement; incomplete source messages drain existing MSG_ERROR tails without more application
 reads. Target READ replacement now retires response tokens separately and terminates held RX handles.
 Target synchronization close also terminates held atomic handles and cancels pending WRITE notifications without progressing the barrier.
-Receiver continuation ownership and inactive-SES queues remain open work. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).
+Host-owned receive tombstones reject continuations belonging to closed SES until EOM Clear/Close, with aggregate receive credits.
+Accepted upcalls drain during an SES gap; new reliable requests wait for a live adapter. Receive-close boundaries and stale-PDC queues still need further checks. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).

@@ -621,6 +621,11 @@ public:
         while (!deferred_targets_.empty()) fail_deferred_target(deferred_targets_.begin()->first,CompletionStatus::Cancelled,0);
         while (!rendezvous_targets_.empty()) fail_rendezvous_target(rendezvous_targets_.begin()->first,CompletionStatus::Cancelled,0,0);
         while (!rendezvous_receive_errors_.empty()) complete_deferred_rendezvous_error(rendezvous_receive_errors_.begin()->first);
+        if (!host_.closed()) for (const auto& [key,message]:incoming_)
+            host_.services().retired_semantic_receives.retain(key,{static_cast<uint32_t>(message.received),
+                message.end_of_message_psn,message.end_seen,message.error_response_generated,
+                static_cast<uint8_t>(message.first_error.value_or(SemanticReturnCode::Undeliverable)),
+                message.error_generation,message.response_list});
         incoming_.clear(); rendezvous_order_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
         posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
         read_returns_.clear(); read_packet_reservations_.clear();
@@ -765,8 +770,7 @@ private:
     uint32_t target_restart_initiator_=0; // Configured local Job rank; default node proxy is simulator policy.
     // Peer, local PDC, Job, initiator rank, message identity, PDC incarnation.
     // The identity slot holds either a 16-bit MID or a marked 32-bit PSN.
-    using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint64_t,uint32_t>;
-    static constexpr uint64_t kPacketMessageIdentity=uint64_t{1}<<32;
+    using MessageKey=Runtime::RetiredSemanticReceives::Key;
     // A rejected eager continuation may precede SOM. Preserve only its one
     // receive CQ until header data arrives; the owning Incoming bounds this
     // state and retires it on Clear/Close (§3.4.6.4.1).
@@ -2660,12 +2664,7 @@ private:
         }
     }
     static MessageKey receive_message_key(const PDC_SES_req& request) {
-        const auto& header=request.pkt.bth_header.Standard_Header;
-        const bool no_mid=request.request_wire_format==Optimized_Header || request.request_wire_format==Small_Message_RMA_Header;
-        // Optimized messages contain exactly one packet. Mark its full PSN so
-        // PSN0 cannot alias STD MID0 on a shared RUD/ROD connection.
-        const uint64_t identity=no_mid?kPacketMessageIdentity|request.orig_psn:header.msg_id;
-        return {request.source_fep,request.PDCID,header.job_id,header.initiator,identity,request.connection_start_psn};
+        return Runtime::PdsHost::semantic_receive_identity(request);
     }
     Runtime::SemanticAdmission reserve_receive_message(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD || request.pkt.bth_type!=Standard_Header)
@@ -2684,7 +2683,7 @@ private:
             return Runtime::SemanticAdmission::Rejected;
         }
         const bool existing=incoming_.count(key);
-        if (!existing && incoming_.size()>=receive_message_limit_) {
+        if (!existing && incoming_.size()+host_.services().retired_semantic_receives.size()>=receive_message_limit_) {
             trace_.record(node_,"ses_admission_blocked",request.orig_psn);
             return Runtime::SemanticAdmission::Rejected;
         }

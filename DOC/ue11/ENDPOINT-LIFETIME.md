@@ -146,3 +146,32 @@ Cancelled CQ，保留已写字节和 header data；不对已消费的 RX handle 
 六项普通定向回归通过（0.29s），包括原有目标替换、源端收尾及同步组事务/生命周期，
 日志 `/tmp/softue-target-actions-final-normal-tests2.log`。这不是全部 M1 的验收结果；
 接收端续包替换与没有活跃 SES 的排队工作仍待独立检查。
+
+## 旧接收消息与 SES 空档
+
+`/tmp/softue-receive-replacement-before-tests.log` 复现了一个与 MR 撤销无关的错误：
+域和合法 MR 保持不变，旧消息只放置前4字节便替换目标 Endpoint，其后续片段被新
+Endpoint 当作自己的消息并写入同一 MR。修复按原有 FEP/PDC/Job/initiator/MID/连接
+代次保存 Host 退休记录；优化请求使用标记后的完整 PSN，与 STD MID 分开。
+
+记录只保留已修改长度、首错、generation、response list、EOM 与保证响应事实，不保留
+旧缓冲区、MR 或回调。后续片段由 Host 重复错误、消费真实 RX handle，不进入新 SES。
+只有同连接的 EOM Clear 或 Close 可回收；已确认前缀、反向 TransmitClear、错误 peer/
+PDC/epoch 均不能释放它。活跃 Incoming 与退休记录共同占用消息准入预算。
+`receive_endpoint_replacement_test` 覆盖4个 RUD/ROD、NSCC 场景，包含 EOM Clear 后
+复用相同 MID 的新消息成功；`retired_semantic_receives_test` 独立覆盖 Job0、PSN 回绕、
+错误连接、只有前缀的 Clear、source/target 方向及优化身份分离。
+
+另一负向日志 `/tmp/softue-inactive-ses-original-tests.log` 记录 PDS 已接受请求、但 Host
+尚未交给 SES 就关闭对象时，队列和 RX handle 永久遗留。测试在真实报文入站后单步
+同一个 PDS，准确停在准入与 Host dispatch 之间，不替换协议栈。
+Host 现在在没有 SES 时也处理旧请求的终止响应；新可靠请求先收到无 SES 消息状态的
+资源 NACK，保留未接受的 PSN，待新适配器绑定后按原重传路径准入。
+迟到 READ 数据沿用 §3.4.5.2 的丢弃并确认策略；UUD 不生成响应，RUDI 返回不可交付。
+没有本地消费者的语义结果被丢弃，不积累到后续对象。
+`inactive_semantic_adapter_test` 覆盖8个关闭/队列/新绑定重试场景。
+
+九项普通定向 CTest 全部通过（0.45s），日志
+`/tmp/softue-receive-lifetime-normal-tests.log`，包含上述三项及源/目标替换、关闭收尾、
+同步目标关闭、READ 提前接受。部分放置接收的取消 CQ、未匹配 SEND 的最终句柄、
+失效 PDC 的队列与其他跨对象组合仍需后续验收，不宣告 M1 完成。
