@@ -952,7 +952,7 @@
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic now connect to existing group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Source validation precedes member consumption, index selection and PDS/CMS length include the synchronization extension. An independent baseline producer reproduced Unsupported.48 transaction,32 cross-PDC/revocation,84 fault and12 boundary scenes are added but not yet compiled or validated. See OPTIMIZED-SYNCHRONIZATION.md; no complete M5/Profile claim."
+      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic connect to existing group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Early format validation preserves group slots, index selection and PDS/CMS length include the synchronization extension. Baseline Unsupported and then lost optimized wire-format identity were reproduced independently. The fixed38de3e4 passes17 normal CTests5.02s and17ASan/UBSan/leak CTests50.80s, including176 new transaction/cross-PDC/revocation/fault/boundary scenes and9provider regressions, no compilers during tests. Shared helper renamed deferred_receive_handle afterward; consolidated166full validation remains pending. See OPTIMIZED-SYNCHRONIZATION.md; no complete M5/Profile claim."
     }
   ]
 }

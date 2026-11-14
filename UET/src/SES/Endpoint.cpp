@@ -780,7 +780,7 @@ auto Endpoint::finish_synchronized_receive(const PDC_SES_req& request,Incoming& 
     if (completing && group->state==SynchronizationGroups::State::Collecting && !synchronized_target_actions_.count(group->owner)) {
         SynchronizedTargetAction action;
         action.owner=group->owner; action.member=message.synchronization_member;
-        action.request=rendezvous_response_handle(request); action.selected=selected;
+        action.request=deferred_receive_handle(request); action.selected=selected;
         action.registration=message.synchronization_registration; action.immediate=message.immediate_data;
         action.length=message.total; action.atomic=message.synchronized_atomic;
         if (action.atomic) {
@@ -923,9 +923,10 @@ auto Endpoint::match_rendezvous_target(uint64_t id) -> void {
     if (bind_rendezvous_posting(transaction,receive)) start_rendezvous_read(transaction);
 }
 
-auto Endpoint::rendezvous_response_handle(const PDC_SES_req& request) -> PDC_SES_req {
-    // Keep only the protocol handle/header while waiting for a RUD hole.
-    // Eager bytes have already been placed or intentionally discarded.
+auto Endpoint::deferred_receive_handle(const PDC_SES_req& request) -> PDC_SES_req {
+    // Retain the protocol identity/header while a semantic action waits for
+    // a RUD hole or a synchronization barrier. Payload bytes have already
+    // been placed, saved as bounded operands, or intentionally discarded.
     PDC_SES_req handle{};
     // The local Standard_Header projection does not change wire identity
     // (§3.4.3.2). Optimized requests remain PSN-owned; losing this format
@@ -1069,7 +1070,7 @@ auto Endpoint::receive_rendezvous(const PDC_SES_req& request) -> void {
         transaction->wire_eager_bytes.bytes()==*transaction->sent_eager_length &&
         transaction->eager_bytes.bytes()==std::min(transaction->accepted_eager,*transaction->sent_eager_length);
     message.completed=transaction->eager_completed;
-    if (header.eom && !transaction->eager_completed) message.deferred_response=rendezvous_response_handle(request);
+    if (header.eom && !transaction->eager_completed) message.deferred_response=deferred_receive_handle(request);
     else {
         reply(request,SemanticReturnCode::Ok,transaction->semantic_length,
             !transaction->first_response_generated || transaction->eager_completed || message.response_list);
@@ -3268,7 +3269,7 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
                 // Empty middle packets have no memory effect to defer.
                 if (count || header.som || header.eom) {
                     if (message.synchronization_responses.size()>=10) { reject(SemanticReturnCode::OperationViolation); return; }
-                    message.synchronization_responses.push_back(rendezvous_response_handle(request));
+                    message.synchronization_responses.push_back(deferred_receive_handle(request));
                 }
             }
             else if (tagged_atomic) memory_.atomic_registration_elements(*message.receive_registration,header.job_id,message.pid,

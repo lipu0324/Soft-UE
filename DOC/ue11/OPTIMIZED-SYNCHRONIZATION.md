@@ -43,4 +43,14 @@ payload。这些实际字节参与既有 PDS/CMS 路径。线格式的固定扩�
 
 基线独立探针在 `a363e23ac6e4bb5ec87c77a4f67edcf568c50622` 的协议库上返回
 `Unsupported`，日志 `/tmp/softue-optimized-sync-before-tests.log`。
-当前新增代码及回归尚待编译和固定版本验证；不能据此宣告全部 M5 或 HPC 完成。
+初始 `be5e049` 的4项优化组回归均复现延迟响应句柄丢失原始线格式的问题：
+本地 Standard 投影被误当作 MID0 身份，无法找到原 PSN 消息。共享辅助函数现保留
+线格式、原始 PDC/PSN 与头元数据，并命名为 `deferred_receive_handle`，同时供
+rendezvous 缺口与同步屏障使用。
+
+固定版本 `38de3e414a1f9aee43feb4bc80e33ba9fb8f1da6` 的17项普通回归全部通过，
+5.02秒；17项 ASan/UBSan与泄漏回归全部通过，50.80秒。包括上述176个新场景、
+既有 STD 同步组、扩展黄金样例，以及9项公开 provider 回归。日志为
+`/tmp/softue-optimized-sync-identity-{normal,asan}-tests.log`。当时共享辅助函数
+仍使用旧名称；后续命名整理及整个166项集成版本需要新的完整验证。
+不能据此宣告全部 M5 或 HPC 完成。

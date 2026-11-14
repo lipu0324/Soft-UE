@@ -500,7 +500,7 @@ private:
     void start_rendezvous_read(const std::shared_ptr<RendezvousTargetTransaction>& transaction);
     bool bind_rendezvous_posting(const std::shared_ptr<RendezvousTargetTransaction>& transaction,const Posted& receive);
     void match_rendezvous_target(uint64_t id);
-    static PDC_SES_req rendezvous_response_handle(const PDC_SES_req& request);
+    static PDC_SES_req deferred_receive_handle(const PDC_SES_req& request);
     void receive_rendezvous(const PDC_SES_req& request);
 
     void start_rendezvous_source(Operation operation,uint64_t application_operation_id);
