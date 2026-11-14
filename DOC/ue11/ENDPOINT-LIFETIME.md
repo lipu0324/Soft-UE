@@ -54,5 +54,35 @@ EOM、Clear/Close、READ 与 UUD。替换回归覆盖 STD/SMALL/MEDIUM，旧请�
 `/tmp/softue-ownership-wrap-normal-tests.log`、`/tmp/softue-ownership-wrap-asan-tests.log`。
 上述验证不作为性能测量，也不宣告完整 M1 或任何 Profile 完成。
 
-本轮首先保护源端消息号/本地 cookie。目标 Endpoint 替换的接收状态与响应 token、未完成
-分片在关闭时的 MSG_ERROR 收尾，以及全部跨对象组合仍需独立的负向、回收与故障验收。
+本轮首先保护源端消息号/本地 cookie。目标 Endpoint 替换的接收状态与响应 token，以及全部跨对象组合仍需独立的负向、回收与故障验收。
+未完成分片的源端收尾进展记录于下节。
+
+## 未完成分片的关闭收尾
+
+新增负向 probe 证实：在复制完第一小段后关闭源 Endpoint，原生产者会被清除，目标却
+永远等不到 EOM，源端退休表也没有终止 PSN。日志
+`/tmp/softue-endpoint-close-before-tests.log` 记录目标消息/源租约未退休。该测试把 PDS
+本地包容量与生产者窗口都限制为1，确保真的关闭了一条未完成消息。
+
+关闭路径现在先停止已开始生产者的应用数据读取，将其标为 aborting，再调用已有
+`feed_submissions(drain_abort_tails)` 生成一个无 payload 的 STD MSG_ERROR 末包。
+只为已送入 PDS、尚未结束的可靠消息生成收尾；RUDI 使用原有取消路径。
+收尾只绕过本地 payload 生产者窗口，真实 PDS 窗口、CMS 准入、MAC 首位时间和恢复
+仍保持原来的所有权。不能通过直接推进 Clear 或伪造应用成功来释放状态。
+
+从未送入 PDS 的排队操作既不生成幽灵 MSG_ERROR，也不占用 Host 退休 ID；Host 已停止时
+不再排队收尾。本地 Host 关闭在停止 PDS 后清空退休表，之后关闭 Endpoint 不会重建它。
+
+首个 WRITE probe 修复后通过，见 `/tmp/softue-endpoint-close-after-tests.log`。
+正式回归扩为26场景：WRITE/SEND/tagged/整数原子，RUD/ROD、NSCC 开关、READ 的 ACK/反向
+通道，以及未启动操作与先关闭 Host 的边界。检查恰好一个零字节收尾、应用 reader 不再
+调用、目标只保留已复制的前缀、SEND 错误 CQ、旧 READ 结果不写回已关闭对象，以及消息槽
+可被后续操作复用。6项普通回归全部通过（1.68s），6项 ASan/UBSan/泄漏回归全部通过（13.08s），
+日志 `/tmp/softue-close-tail-normal-tests.log`、`/tmp/softue-close-tail-asan-tests.log`，包含已有
+Endpoint 替换、RUDI、同步组、rendezvous 与流式 payload 生命周期。
+
+`endpoint_close_tail_fault_test` 再加入4组 RUD/ROD 的 MSG_ERROR 丢失与确切错误 ACK 丢失，
+普通（0.02s）和 sanitizer（0.10s）均通过，见
+`/tmp/softue-close-tail-fault-normal-tests.log`、`/tmp/softue-close-tail-fault-asan-tests.log`。
+检查真实重传、零次额外 reader 调用、没有重复放置、后续消息成功及租约/目标槽正常回收。
+这仍是定向功能证据；构建负载下的耗时不作为网络或实现性能结果。

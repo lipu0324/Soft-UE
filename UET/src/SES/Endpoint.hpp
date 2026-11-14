@@ -525,18 +525,36 @@ public:
     size_t leased_message_ids() const { return message_leases_.size(); }
     void close() {
         if (closed_) return;
+        if (!host_.closed()) {
+            // §3.4.6.4.1: a copied prefix still needs an EOM MSG_ERROR. Stop
+            // application reads first, then use the existing producer to
+            // queue one zero-payload tail per started, incomplete message.
+            // RUDI has no target message state and uses its own cancellation.
+            for (auto& [message,source]:sources_) {
+                if (source.started && !source.all_submitted && source.operation.delivery_mode!=RUDI) {
+                    source.source.reset(); source.aborting=true;
+                }
+            }
+            feed_submissions(/*drain_abort_tails=*/true);
+        }
         // Host/PDS work may run after this object's lifetime ends. Transfer
         // its identity leases before clearing callbacks; a replacement SES
         // must neither adopt old upcalls nor reuse their still-live wire MIDs.
-        auto& retired=host_.services().retired_semantic_messages;
-        for (const auto& [message,operation]:pending_) if (!operation.is_rudi)
-            retired.retain(message,{operation.peer,operation.job,operation.local_pdc,operation.connection_start_psn,
-                operation.last_transmitted_psn,operation.end_of_message_transmitted,operation.is_datagram,
-                operation.is_read && operation.read_results.bytes()<operation.length});
-        for (const auto& [message,lease]:message_leases_)
-            retired.retain(message,{std::get<0>(lease.connection),{},std::get<1>(lease.connection),std::get<2>(lease.connection),
-                lease.last_psn,lease.end_of_message_transmitted,false,lease.requires_connection_retirement,lease.connection_close_requested});
-        retired.request_read_retirement([this](uint16_t local_pdc) { return host_.request_connection_close(local_pdc); });
+        if (!host_.closed()) {
+            auto& retired=host_.services().retired_semantic_messages;
+            const auto never_submitted=[this](uint16_t message) {
+                const auto source=sources_.find(message);
+                return source!=sources_.end() && !source->second.started;
+            };
+            for (const auto& [message,operation]:pending_) if (!operation.is_rudi && !never_submitted(message))
+                retired.retain(message,{operation.peer,operation.job,operation.local_pdc,operation.connection_start_psn,
+                    operation.last_transmitted_psn,operation.end_of_message_transmitted,operation.is_datagram,
+                    operation.is_read && operation.read_results.bytes()<operation.length});
+            for (const auto& [message,lease]:message_leases_) if (!never_submitted(message))
+                retired.retain(message,{std::get<0>(lease.connection),{},std::get<1>(lease.connection),std::get<2>(lease.connection),
+                    lease.last_psn,lease.end_of_message_transmitted,false,lease.requires_connection_retirement,lease.connection_close_requested});
+            retired.request_read_retirement([this](uint16_t local_pdc) { return host_.request_connection_close(local_pdc); });
+        }
         closed_=true; lifetime_.reset();
         host_.set_receive_admission({},{});
         host_.set_request_handler({}); host_.set_response_handler({});
@@ -1685,13 +1703,18 @@ private:
     // still owns PSNs, outstanding packets, congestion/recovery and retransmits.
     // FIFO submission keeps all fragments of an ordered message ahead of the
     // next message. At most submission_window_ fragments wait to enter PDS TX.
-    void feed_submissions() {
-        while (!closed_ && queued_fragments_<submission_window_ && !submission_order_.empty()) {
+    void feed_submissions(bool drain_abort_tails=false) {
+        // Close tails bypass only the local payload-producer bound. The
+        // original PDS window, CMS admission and recovery still own sending.
+        while (!closed_ && (drain_abort_tails || queued_fragments_<submission_window_) && !submission_order_.empty()) {
             const auto message=submission_order_.front();
             auto found=sources_.find(message);
             if (found==sources_.end()) { submission_order_.pop_front(); continue; }
             auto& transfer=found->second;
             const auto& operation=transfer.operation;
+            if (drain_abort_tails && (!transfer.started || !transfer.aborting || operation.delivery_mode==RUDI)) {
+                submission_order_.pop_front(); continue; // Never create a phantom message for an unsent operation.
+            }
             std::shared_ptr<DeferredSource> deferred;
             if (transfer.deferrable_token && !transfer.aborting) {
                 const auto transaction=deferred_sources_.find(transfer.deferrable_token);
@@ -1787,7 +1810,7 @@ private:
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+
                 ((operation.synchronization && !transfer.aborting)?4:0)+request.pkt.payload.size());
             const bool end_of_message=header.eom;
-            if (!read_failed && operation.header_format!=RequestHeaderFormat::Standard) {
+            if (!transfer.aborting && !read_failed && operation.header_format!=RequestHeaderFormat::Standard) {
                 const auto standard=header;
                 const bool medium=operation.header_format==RequestHeaderFormat::Medium;
                 const auto fill=[&](auto& optimized_header) {
@@ -1825,7 +1848,10 @@ private:
                 if (!packet_id) { finish(message,CompletionStatus::ResourceExhausted,0,0); return; }
                 pending_.at(message).awaiting_rudi_responses.insert(*packet_id);
                 pending_.at(message).rudi_all_submitted=end_of_message;
-            } else if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
+            } else if (!host_.submit(request)) {
+                if (!drain_abort_tails) throw std::runtime_error("PDS rejected operation fragment");
+                transfer.all_submitted=true; submission_order_.pop_front(); continue; // Host shutdown already stopped PDS.
+            }
             transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;

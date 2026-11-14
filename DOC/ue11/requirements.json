@@ -46,10 +46,12 @@
       "status": "partial",
       "tests": [
         "retired_semantic_messages_test",
-        "endpoint_replacement_test"
+        "endpoint_replacement_test",
+        "endpoint_close_tail_test",
+        "endpoint_close_tail_fault_test"
       ],
       "profiles": [],
-      "evidence_note": "A queued old RUD request could adopt a replacement Endpoint MID and make a delivered new WRITE time out. Host-owned cursor and retired lease tracking isolate source MIDs/local optimized cookies until real Clear/Close or datagram local completion; one active native Endpoint per Host is enforced before callback replacement. Seven normal CTests pass, including prior MID reuse, resource, RUDI and synchronization lifecycles. All seven ASan/UBSan/leak CTests also pass. The expanded14-case replacement fixture passes normal and sanitizer, including forced16bit cursor wrap and fully exhausted retained-ID namespace without PDC allocation. Target replacement/response tokens and incomplete fragmented close tails remain open; no complete M1 claim. See ENDPOINT-LIFETIME.md."
+      "evidence_note": "A queued old RUD request could adopt a replacement Endpoint MID and make a delivered new WRITE time out. Host-owned cursor and retired lease tracking isolate source MIDs/local optimized cookies until real Clear/Close or datagram local completion; one active native Endpoint per Host is enforced before callback replacement. Seven normal CTests pass, including prior MID reuse, resource, RUDI and synchronization lifecycles. All seven ASan/UBSan/leak CTests also pass. The expanded14-case replacement fixture passes normal and sanitizer, including forced16bit cursor wrap and fully exhausted retained-ID namespace without PDC allocation. A separate negative probe reproduced an unterminated copied prefix on close. Existing producer MSG_ERROR tails now drain without more application reads; never-started messages are not retained, and stopped Host cleanup cannot resurrect leases.26 close scenarios and four tail/error-ACK loss scenarios pass normal and sanitizer alongside five prior lifecycle/streaming regressions. Target replacement/response tokens and remaining cross-object combinations remain open; no complete M1 claim. See ENDPOINT-LIFETIME.md."
     },
     {
       "id": "SIM-64",
