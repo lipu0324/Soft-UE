@@ -8,7 +8,7 @@ RDMA_LIBS = $(if $(filter 1,$(ENABLE_RDMA)),-libverbs,)
 CORE := UET/src
 BUILD := build
 PDS_SOURCES := $(CORE)/Test/PDS_fulltest.cpp \
-  $(CORE)/PDS/PDC/PDC.cpp $(CORE)/PDS/PDC/Probe.cpp $(CORE)/PDS/PDC/TransmitTiming.cpp $(CORE)/PDS/PDC/NegativeAcknowledgment.cpp \
+  $(CORE)/PDS/PDC/PDC.cpp $(CORE)/PDS/PDC/Probe.cpp $(CORE)/PDS/PDC/TransmitTiming.cpp $(CORE)/PDS/PDC/OrderedAcknowledgment.cpp $(CORE)/PDS/PDC/NegativeAcknowledgment.cpp \
   $(CORE)/PDS/PDC/IPDC.cpp \
   $(CORE)/PDS/PDC/TPDC.cpp \
   $(CORE)/PDS/PDC/RTOTimer/RTOTimer.cpp \
@@ -120,6 +120,7 @@ clean:
 # Dependency-light simulation build. No libibverbs, RNIC or privileged sockets
 # are required. CMake provides the equivalent out-of-tree CTest build.
 SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
+  $(CORE)/SES/Endpoint.cpp \
   $(CORE)/Network_Layer/PdsQueueTransport.cpp \
   $(CORE)/Network_Layer/PdsPacketCodec.cpp \
   $(CORE)/Network_Layer/UetWireCodec.cpp
