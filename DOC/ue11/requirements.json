@@ -672,12 +672,16 @@
       "status": "partial",
       "tests": [
         "tfc_credit_test",
+        "tfc_destination_credit_test",
         "credit_header_test",
         "credit_admission_test",
-        "tfc_destination_credit_test"
+        "tfc_context_test",
+        "tfc_integration_test",
+        "tfc_bidirectional_test",
+        "tfc_receive_pressure_test"
       ],
       "profiles": [],
-      "evidence_note": "Pure source/destination credit accounting, literal credit wire formats and trusted PDS retry admission bridge are scoped-tested. cf4cdac wire/NSCC/PDS9/9 normal0.42s ASan4.32s;6455adb originalPDS admission/NSCC/trimming4/4 normal0.38s ASan4.29s;49cf654 source/destination2/2 normal0.08s ASan0.25s. Destination model reserves initial credit plus maximum MTU cell cost, holds local leases and grants only observed demand within capacity. No enabled TFC adapter, host-wide destination pool, credit timer, sharedCCC/quiesce integration or Endpoint capability yet. Unit and header evidence does not establish full TFC/M5/Profile. Spec credit units conflict documented in TRANSPORT-FLOW-CONTROL.md."
+      "evidence_note": "Source/destination arithmetic and wire/admission components are scoped-tested. Experimental TfcEngine now connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD CCC_ID lifetime, Credit ACK or Credit CP alongside NSCC, and injected RTO credit-loss recovery. bc98650 11/11 normal0.78s ASan7.75s includes48wire/recovery scenarios216operations plusrealQUIESCE;444e206 bidirectional96scenarios normal0.17s ASan1.94s;0a72fae three-Host pool-refusal/refill4scenarios normal0.02s ASan0.12s. Latest private-RUD group-key clarification and integrated full176 build/tests pending. Host adapter is TC0/shared-Payload-MTU only, cell/overhead configured out of band, no native capability/Profile claim. Both specification unit-shift and READY credit-timer contradictions remain recorded review items. No complete TFC/M5/Profile claim. See TRANSPORT-FLOW-CONTROL.md."
     },
     {
       "id": "NET-CSIG",

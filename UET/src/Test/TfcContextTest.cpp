@@ -67,6 +67,23 @@ void independent_contexts_and_identifier_pressure() {
     CHECK(engine.source_connection_count()==0 && loop.pending()==0);
 }
 
+void explicitly_private_unordered_contexts() {
+    EventLoop loop;
+    auto config=small_config();
+    config.share_unordered_contexts=false;
+    TfcEngine engine(config,loop,loop,[]{},{});
+    const Connection first{2,1,100,false},second{2,2,200,false},ordered{2,3,300,true};
+    for (const auto& connection : {first,second,ordered}) {
+        engine.work_posted(connection,64);
+        CHECK(engine.can_send(connection));
+    }
+    CHECK(engine.source_identifier(first)!=engine.source_identifier(second));
+    CHECK(engine.source_identifier(first)!=engine.source_identifier(ordered));
+    CHECK(engine.source_identifier(second)!=engine.source_identifier(ordered));
+    for (const auto& connection : {first,second,ordered}) engine.closed(connection);
+    CHECK(engine.source_connection_count()==0 && loop.pending()==0);
+}
+
 PDStoNET_pkt request(uint8_t context_id=7,size_t payload_bytes=64) {
     PDStoNET_pkt packet{};
     packet.PDS_type=RUOD_req_header;
@@ -110,6 +127,7 @@ int main() {
     try {
         sharing_and_last_quiesce();
         independent_contexts_and_identifier_pressure();
+        explicitly_private_unordered_contexts();
         destination_pool_and_identity();
         std::cout << "TFC source sharing/quiesce/256-ID pressure and destination pool cases passed\n";
         return 0;

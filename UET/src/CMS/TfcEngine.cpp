@@ -273,7 +273,9 @@ auto TfcEngine::path(const Connection& connection) -> uint16_t {
 auto TfcEngine::source_context(const Connection& connection) -> std::shared_ptr<SourceContext> {
     if (const auto found=sources_.find(connection);found!=sources_.end()) return found->second;
     const bool private_context=connection.ordered || !config_.share_unordered_contexts;
-    const SourceKey key{connection.peer,private_context,private_context ? connection.local_pdc : uint16_t{0},
+    // Keep delivery mode in the group identity even when RUD sharing is
+    // disabled; private RUD and ROD contexts are separate kinds of CCC.
+    const SourceKey key{connection.peer,connection.ordered,private_context ? connection.local_pdc : uint16_t{0},
         private_context ? connection.starting_psn : 0};
     auto shared=shared_sources_.find(key);
     if (shared==shared_sources_.end()) {

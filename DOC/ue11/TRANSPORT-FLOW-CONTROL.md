@@ -162,6 +162,9 @@ ASan/UBSan/leak 构建1.94秒；日志为 `/tmp/softue-tfc-bidirectional-{normal
 `tfc_receive_pressure_test` 新增4个三 Host 场景：RUD/ROD、NSCC开关，目的池只够
 一个 CCC；第二个发送方必须收到 NO_CCC 且不改变内存，第一 CCC 完成真实65毫秒
 SYN保护的 Close 后，第二发送方通过原 PDS 重试成功，预算始终不超过预留上限。
-这项新夹具尚待固定版本编译。
+固定源版本 `0a72faef5bad7bc264043727aed8e92041bf72bf` 的该项 CTest 已通过：
+普通构建0.02秒、ASan/UBSan/leak 构建0.12秒；日志为
+`/tmp/softue-tfc-pressure-{normal,asan}-tests.log`。随后补上 RUD 独立 CCC 配置回归，
+并在 group key 中显式保留 RUD/ROD 模式。新的整合版本尚待范围与全量编译验证。
 完整资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。
