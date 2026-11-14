@@ -567,6 +567,7 @@ struct PDStoNET_pkt
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
     uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
+    uint8_t outgoing_data_traffic_class=0; // Local NIC queue/DSCP selection; never a new PDS wire field.
     // Bytes following the CP's first four payload bytes. Negotiation has a
     // variable payload (§3.5.16.7); these bytes are not an SES payload.
     std::vector<uint8_t> control_extension;
@@ -651,6 +652,7 @@ struct PDC_SES_req
     uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
     uint8_t delivery_mode = ROD; /**< UUD has no PDC and must never generate ACKs. */
     uint32_t connection_start_psn = 0; /**< Local context generation, not an SES wire field. */
+    uint8_t local_data_traffic_class=0; /**< Receiving PDC's local outgoing TC, for exact CMS ownership. */
     uint32_t rudi_packet_id=0; /**< RUDI response correlation; never a PDC PSN. */
     bool rudi_retransmission=false,rudi_congestion_marked=false;
     // DATA_SMALL return packets carry a READ's forward PSN separately from

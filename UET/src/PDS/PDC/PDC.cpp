@@ -152,7 +152,7 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
     // Process a validated piggyback Clear even when SES has no new message
     // slots. Its asynchronous event may release the credit for a retry.
     clearReceivedPacketsThrough(header.psn+header.clear_psn_off);
-    const auto request=UET::PDS::semantic_admission_request(packet,SPDCID,dst_fep,mode,start_psn);
+    const auto request=UET::PDS::semantic_admission_request(packet,SPDCID,dst_fep,mode,start_psn,data_traffic_class_);
     const auto admission=runtime_->semantic_admission(request);
     if (admission!=UET::Runtime::SemanticAdmission::Rejected && admission!=UET::Runtime::SemanticAdmission::NoSynchronizationState) return true;
     // Table 3-68: no message tracking state. Do not accept this PSN, charge
@@ -223,12 +223,14 @@ void PDC::releaseCongestionState() {
         runtime_->congestion_control->closed(congestionConnection());
     congestion_engaged_=false;
     congestion_connection_.reset();
+    data_traffic_class_bound_=false;
     close_network_trigger_.reset();
     admission_deferred_retries_.clear();
 }
 
 void PDC::bindCongestionContext(pdc_mode delivery_mode) {
     mode=delivery_mode;
+    data_traffic_class_bound_=true;
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->opened(congestionConnection());
 }
@@ -494,6 +496,7 @@ void PDC::decorateAcknowledgmentNetwork(uint32_t sequence,const PDStoNET_pkt* tr
 }
 
 void PDC::decorateControl(PDStoNET_pkt& packet) {
+    packet.outgoing_data_traffic_class=data_traffic_class_;
     if (!runtime_) return;
     packet.wire_entropy=runtime_->default_wire_entropy;
     if (runtime_->congestion_control)
@@ -1136,6 +1139,7 @@ void PDC::fwdReq2SES(UET::Runtime::ReceivePacketHandle handle, RX_pkt_meta meta,
     req.source_fep = dst_fep;
     req.delivery_mode = mode;
     req.connection_start_psn = start_psn;
+    req.local_data_traffic_class=data_traffic_class_;
 
     if (public_ses_req_queue) {
         public_ses_req_queue->push(req);
@@ -1640,6 +1644,7 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
     p.dst_fep = dst_fep;
     p.src_fep = src_fep;
     p.PDS_type = RUOD_req_header;
+    p.outgoing_data_traffic_class=data_traffic_class_;
     p.PDS_header.RUOD_req_header.type = mode==RUD?RUD_REQ:ROD_REQ;
     p.PDS_header.RUOD_req_header.next_hdr = next_hdr;
     p.PDS_header.RUOD_req_header.flags.syn = syn;

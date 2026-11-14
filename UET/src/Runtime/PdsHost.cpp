@@ -28,8 +28,14 @@ PdsHost::PdsHost(uint32_t node, EventLoop& loop, Trace& trace, IPacketPort& port
             if (format_ == WireFormat::LegacySup1)
                 packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
             else {
+                // A trim notification carries its source data class in the configured
+                // DSCP meaning; local Frame queue metadata is not wire evidence.
+                std::optional<NetworkLayer::TrimmingOptions> receive_trimming;
+                if (const auto dscp=NetworkLayer::UetWireCodec::packet_dscp(frame.bytes))
+                    for (const auto& policy:trimming_policies_)
+                        if (policy.is_trimmed(*dscp)) { receive_trimming=policy; break; }
                 auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
-                    network_.crc,network_.native_ip_protocol,trimming_,network_.udp_destination_port,network_.udp);
+                    network_.crc,network_.native_ip_protocol,receive_trimming,network_.udp_destination_port,network_.udp);
                 if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                     decoded.network.source.ip != address(frame.source).ip ||
                     decoded.network.destination.ip != address(node_).ip)
@@ -163,7 +169,40 @@ auto PdsHost::configure_trimming(const NetworkLayer::TrimmingOptions& options) -
     options.validate();
     if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
         throw std::logic_error("configure trimming before opening connections");
-    trimming_=options;
+    auto candidate_policies=trimming_policies_;
+    const auto existing=std::find_if(candidate_policies.begin(),candidate_policies.end(),
+        [&](const auto& policy) { return policy.data_traffic_class==options.data_traffic_class; });
+    if (existing==candidate_policies.end()) candidate_policies.push_back(options);
+    else *existing=options;
+    std::array<std::optional<uint8_t>,8> candidate_dscps{};
+    candidate_dscps[0]=network_.dscp;
+    for (const auto& entry:data_traffic_class_dscps_) candidate_dscps[entry.first]=entry.second;
+    candidate_dscps[options.data_traffic_class]=options.trimmable_dscp;
+    // Validate the entire candidate before changing either mapping. A rejected
+    // configuration must not silently alter an unrelated class's packet roles.
+    NetworkLayer::validate_data_traffic_class_dscps(candidate_dscps,candidate_policies);
+    trimming_policies_=std::move(candidate_policies);
+    if (options.data_traffic_class) data_traffic_class_dscps_[options.data_traffic_class]=options.trimmable_dscp;
+    else network_.dscp=options.trimmable_dscp;
+}
+
+auto PdsHost::configure_data_traffic_class(uint8_t traffic_class,uint8_t dscp) -> void {
+    if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
+        throw std::logic_error("configure data traffic classes before opening connections");
+    if (traffic_class>=8 || dscp>=64)
+        throw std::invalid_argument("invalid data TC/DSCP");
+    std::array<std::optional<uint8_t>,8> candidate_dscps{};
+    candidate_dscps[0]=network_.dscp;
+    for (const auto& entry:data_traffic_class_dscps_) candidate_dscps[entry.first]=entry.second;
+    candidate_dscps[traffic_class]=dscp;
+    NetworkLayer::validate_data_traffic_class_dscps(candidate_dscps,trimming_policies_);
+    if (traffic_class) data_traffic_class_dscps_[traffic_class]=dscp;
+    else network_.dscp=dscp;
+}
+
+auto PdsHost::supports_data_traffic_class(uint8_t traffic_class) const -> bool {
+    return traffic_class==0 || (format_==WireFormat::Uet11 && traffic_class<8 &&
+        data_traffic_class_dscps_.count(traffic_class));
 }
 
 auto PdsHost::cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id) -> void {
@@ -207,10 +246,10 @@ auto PdsHost::set_receive_admission(std::function<SemanticAdmission(const PDC_SE
 }
 
 auto PdsHost::open_connection(uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
-                             PDS::PdcMappingIdentity identity) -> uint16_t {
+                             PDS::PdcMappingIdentity identity,uint8_t data_traffic_class) -> uint16_t {
     if (stopped_ || format_!=WireFormat::Uet11) return UINT16_MAX;
-    if (!identity.valid()) return UINT16_MAX;
-    const auto context=manager_.openWithControl(node_,peer,job,mode,negotiation,identity);
+    if (!identity.valid() || !supports_data_traffic_class(data_traffic_class)) return UINT16_MAX;
+    const auto context=manager_.openWithControl(node_,peer,job,mode,negotiation,identity,data_traffic_class);
     if (context!=UINT16_MAX) wake();
     return context;
 }
@@ -227,7 +266,9 @@ auto PdsHost::set_context_event_handler(std::function<void(const PdcEvent&)> cal
 
 auto PdsHost::submit(const SES_PDS_req& request) -> bool {
     if (stopped_ || request.src_fep != node_ || request.source_pid>0xfff) return false;
-    if (flow_control_ && request.tc!=0) return false;
+    // DSCP configuration belongs to the standard IP adapter. The explicit
+    // LegacySup1 path retains its existing local PDC traffic-class identity.
+    if (request.tc>=8 || (format_==WireFormat::Uet11 && !supports_data_traffic_class(request.tc))) return false;
     if (!manager_.pushSESRequest(request)) return false;
     trace_.record(node_, "ses_submit", request.tx_pkt_handle);
     wake();
@@ -398,7 +439,13 @@ auto PdsHost::pump() -> void {
                     packet.SESpkt.bth_type==Semantic_Response_with_Data_Header);
                 const bool data=packet.PDS_type==RUOD_req_header || packet.PDS_type==UUD_req_header || rudi_data;
                 const bool ordered_control=packet.PDS_type==RUOD_cp_header && packet.control_uses_request_traffic_class;
-                frame.traffic_class=(data || ordered_control)?0:1;
+                const auto data_traffic_class=packet.outgoing_data_traffic_class;
+                frame.traffic_class=(data || ordered_control)?data_traffic_class:1;
+                if (data || ordered_control) {
+                    if (!supports_data_traffic_class(data_traffic_class))
+                        throw std::logic_error("PDS emitted an unconfigured local data traffic class");
+                    options.dscp=data_traffic_class?data_traffic_class_dscps_.at(data_traffic_class):network_.dscp;
+                }
                 if (rudi_data) frame.traffic_class=2; // Local policy: separate uncontrolled RUDI from UET-CC traffic (§3.5.7.4).
                 if (services_.congestion_control || !data) options.entropy=packet.wire_entropy;
                 frame.entropy=options.entropy; // ECMP uses the actual on-wire EV, including without CMS.
@@ -406,13 +453,16 @@ auto PdsHost::pump() -> void {
                     options.ecn=packet.network_ecn;
                     if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
                 }
-                if (trimming_ && data) options.dscp=trimming_->trimmable_dscp;
+                const NetworkLayer::TrimmingOptions* data_trimming=nullptr;
+                for (const auto& policy:trimming_policies_)
+                    if (policy.data_traffic_class==data_traffic_class) { data_trimming=&policy; break; }
+                if (data_trimming && data) options.dscp=data_trimming->trimmable_dscp;
                 if (!data) {
                     // §3.5.16 / §3.6.4.7: numbered ROD controls cannot
                     // overtake data via the ACK TC. NO_TRIM shares the
                     // request TC while keeping all CPs non-trimmable.
-                    options.dscp=ordered_control?(trimming_?trimming_->no_trim_dscp:network_.dscp):
-                        (trimming_?trimming_->control_dscp:48);
+                    options.dscp=ordered_control?(data_trimming?data_trimming->no_trim_dscp:options.dscp):
+                        (trimming_policies_.empty()?48:trimming_policies_.front().control_dscp);
                 }
                 frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                 if (services_.congestion_control && packet.PDS_type==RUOD_ack_header &&
@@ -488,7 +538,8 @@ auto PdsHost::pump() -> void {
                     // upcall hands its contents to SES. Unexpected-message
                     // storage retained by SES is a separate resource domain.
                     services_.congestion_control->handed_to_semantics(
-                        {request.source_fep,request.PDCID,request.connection_start_psn,request.delivery_mode==ROD},
+                        {request.source_fep,request.PDCID,request.connection_start_psn,request.delivery_mode==ROD,
+                         request.local_data_traffic_class},
                         request.orig_psn);
                 }
                 if (stopped_) return;

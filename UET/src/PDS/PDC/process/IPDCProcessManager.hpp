@@ -215,7 +215,8 @@ public:
      * @param pdcid PDC identifier
      * @return Whether creation was successful
      */
-    bool createIPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD)
+    bool createIPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD,
+                           uint8_t data_traffic_class=0)
     {
         std::lock_guard<std::mutex> lock(manager_mutex);
 
@@ -261,6 +262,7 @@ public:
 
         // Set FEP addresses
         process_info->ipdc_instance->setFep(dst_fep, src_fep);
+        process_info->ipdc_instance->configureDataTrafficClass(data_traffic_class);
         process_info->ipdc_instance->bindCongestionContext(delivery_mode);
         LOG_DEBUG_PARAM(__FUNCTION__, "IPDC instance FEP addresses set, PDCID: " << pdcid << ", DST_FEP: " << dst_fep << ", SRC_FEP: " << src_fep);
 

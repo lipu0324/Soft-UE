@@ -59,11 +59,12 @@ public:
     }
 
     uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
-                             UET::PDS::PdcMappingIdentity identity={}) {
+                             UET::PDS::PdcMappingIdentity identity={},uint8_t data_traffic_class=0) {
         if (!local_node || !peer || (mode!=ROD && mode!=RUD)) return UINT16_MAX;
         uint16_t local_pdc=UINT16_MAX;
-        if (!identity.valid() || !assignPDC(job,peer,0,mode,0,&local_pdc,local_node,identity)) return UINT16_MAX;
-        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,peer,local_node,mode)) return UINT16_MAX;
+        if (!identity.valid() || data_traffic_class>=8 ||
+            !assignPDC(job,peer,data_traffic_class,mode,0,&local_pdc,local_node,identity)) return UINT16_MAX;
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,peer,local_node,mode,data_traffic_class)) return UINT16_MAX;
         return IPDC_Processmanager.openWithControl(local_pdc,mode,negotiation)?local_pdc:UINT16_MAX;
     }
 
@@ -742,7 +743,8 @@ public:
             deferred_close_requests_[local_pdc].push_back(std::move(request));
             return true;
         }
-        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,request.dst_fep,request.src_fep,static_cast<pdc_mode>(request.mode))) return false;
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,request.dst_fep,request.src_fep,
+            static_cast<pdc_mode>(request.mode),request.tc)) return false;
         if (semantic.som && request.establish_with_control &&
             !IPDC_Processmanager.openWithControl(local_pdc,static_cast<pdc_mode>(request.mode),false)) return false;
         fwdPkt2PDC(&request,local_pdc);
@@ -766,7 +768,8 @@ public:
      * @param pdc_id PDC ID to apply for
      * @return true if application successful, false otherwise
      */
-    bool allocPDC(uint16_t pdc_id, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD)
+    bool allocPDC(uint16_t pdc_id, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD,
+                  uint8_t data_traffic_class=0)
     {
         // PDC application logic
         // Simple simulation here, actual logic needs implementation based on specific requirements
@@ -791,7 +794,7 @@ public:
             }
             else
             {
-                if (IPDC_Processmanager.createIPDCProcess(pdc_id, dst_fep, src_fep,delivery_mode))
+                if (IPDC_Processmanager.createIPDCProcess(pdc_id,dst_fep,src_fep,delivery_mode,data_traffic_class))
                 {
                     pdc_list[pdc_id].is_open = true;
                     open_cnt++;

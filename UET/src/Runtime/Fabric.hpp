@@ -21,7 +21,8 @@ struct LinkConfig {
     std::array<std::optional<size_t>,8> ecn_threshold_bytes{}; // null disables; zero marks every ECT packet.
     std::array<uint16_t,8> traffic_class_weights{{1,1,1,1,1,1,1,1}};
     size_t scheduling_quantum_bytes=256; // Deficit round robin, local switch policy.
-    std::optional<NetworkLayer::TrimmingOptions> trimming;
+    std::optional<NetworkLayer::TrimmingOptions> trimming; // Legacy/default class policy.
+    std::vector<NetworkLayer::TrimmingOptions> additional_trimming; // Other data classes (§4.1).
 };
 
 struct LinkStats {
@@ -73,14 +74,17 @@ public:
         if (!nodes_.insert(node).second) throw std::invalid_argument("duplicate node");
     }
     void add_link(uint32_t from, uint32_t to, const LinkConfig& config) {
-        if (config.trimming) config.trimming->validate();
+        auto trimming_policies=config.additional_trimming;
+        if (config.trimming) trimming_policies.insert(trimming_policies.begin(),*config.trimming);
+        NetworkLayer::validate_trimming_policy_set(trimming_policies);
         if (from == to || !nodes_.count(from) || !nodes_.count(to) ||
             !config.rate_bps || !config.mtu || config.buffer_bytes < config.mtu ||
             config.drop_ppm > 1000000 || !config.scheduling_quantum_bytes ||
             std::any_of(config.traffic_class_weights.begin(),config.traffic_class_weights.end(),[](uint16_t weight) { return !weight; }) ||
             config.scheduling_quantum_bytes>UINT32_MAX || config.mtu>UINT32_MAX || edges_.count({from,to}))
             throw std::invalid_argument("invalid directed link");
-        edges_.emplace(std::make_pair(from,to), Edge{config});
+        Edge edge{config}; edge.trimming_policies=std::move(trimming_policies);
+        edges_.emplace(std::make_pair(from,to),std::move(edge));
     }
     void set_link_up(uint32_t from, uint32_t to, bool up) {
         auto& edge=edges_.at({from,to});
@@ -108,6 +112,7 @@ private:
         std::array<uint64_t,8> deficits{};
         size_t scheduler_class=0;
         bool new_scheduler_visit=true;
+        std::vector<NetworkLayer::TrimmingOptions> trimming_policies;
     };
     EventLoop& loop_;
     Trace& trace_;
@@ -185,15 +190,20 @@ private:
         auto& edge = edges_.at(key);
         auto& stats = edge.stats;
         auto size=frame->bytes.size();
-        if (edge.config.trimming) {
-            // Reclassify from the actual DSCP on every configured ingress.
-            // In particular, a trim notification received from another switch
-            // must not depend on the sender carrying our local Frame metadata.
+        const NetworkLayer::TrimmingOptions* matching_trimming=nullptr;
+        if (!edge.trimming_policies.empty()) {
+            // Reconstruct local queues from actual IP DSCP on every ingress;
+            // neither another switch nor a NIC must preserve Frame metadata.
             if (const auto dscp=NetworkLayer::UetWireCodec::packet_dscp(frame->bytes)) {
-                if (edge.config.trimming->is_trimmed(*dscp)) frame->traffic_class=edge.config.trimming->trimmed_traffic_class;
-                else if (*dscp==edge.config.trimming->control_dscp) frame->traffic_class=1;
-                else if (*dscp==edge.config.trimming->trimmable_dscp || *dscp==edge.config.trimming->no_trim_dscp)
-                    frame->traffic_class=0;
+                if (*dscp==edge.trimming_policies.front().control_dscp) frame->traffic_class=1;
+                for (const auto& policy:edge.trimming_policies) {
+                    if (policy.is_trimmed(*dscp)) {
+                        frame->traffic_class=policy.trimmed_traffic_class; matching_trimming=&policy; break;
+                    }
+                    if (*dscp==policy.trimmable_dscp || *dscp==policy.no_trim_dscp) {
+                        frame->traffic_class=policy.data_traffic_class; matching_trimming=&policy; break;
+                    }
+                }
             }
         }
         auto traffic_class=frame->traffic_class;
@@ -205,16 +215,16 @@ private:
         if (!edge.up) { drop(); return; }
         if (size>edge.config.buffer_bytes-stats.queued_by_class[traffic_class]) {
             bool trimmed=false;
-            if (edge.config.trimming) {
+            if (matching_trimming) {
                 try {
-                    trimmed=NetworkLayer::UetWireCodec::trim_packet(frame->bytes,*edge.config.trimming,hop+1==path->size());
+                    trimmed=NetworkLayer::UetWireCodec::trim_packet(frame->bytes,*matching_trimming,hop+1==path->size());
                 } catch (const std::invalid_argument&) { /* Invalid IP cannot become a trim notification. */ }
             }
             if (!trimmed) { drop(); return; }
             ++stats.trimmed; stats.trimmed_bytes+=size-frame->bytes.size();
             trace_.record(key.first,"packet_trim",key.second);
             size=frame->bytes.size();
-            traffic_class=edge.config.trimming->trimmed_traffic_class;
+            traffic_class=matching_trimming->trimmed_traffic_class;
             frame->traffic_class=traffic_class;
             // §4.1: trimmed traffic is a new admission into its own queue,
             // and still drops normally if that queue has insufficient space.

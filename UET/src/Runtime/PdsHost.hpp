@@ -41,7 +41,7 @@ public:
     void enable_nscc(const CMS::NsccConfig& config);
     const CMS::NsccEngine* nscc() const;
     // Experimental transport-credit policy. Configure optional NSCC first;
-    // this adapter currently uses the host's one data traffic class (TC 0).
+    // configure each nonzero reliable-data TC's DSCP policy before posting.
     void enable_tfc(const CMS::TfcEngineConfig& config);
     const CMS::TfcEngine* tfc() const;
     void configure_psn_ranges(const PDS::PsnRangeConfiguration& configured,uint32_t zero_override=0);
@@ -49,6 +49,10 @@ public:
     void configure_read_ack_data(uint32_t maximum_bytes);
     void configure_semantic_payload_mtu(uint32_t payload_bytes);
     void configure_trimming(const NetworkLayer::TrimmingOptions& options);
+    // Explicit data-TC to DSCP mapping. A trimming policy additionally reserves
+    // that class's DATA/NO_TRIM/TRIMMED/LASTHOP meanings (§3.6.4.7).
+    void configure_data_traffic_class(uint8_t traffic_class,uint8_t dscp);
+    bool supports_data_traffic_class(uint8_t traffic_class) const;
     void cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id);
     bool request_connection_close(uint16_t local_pdc_id);
     bool request_connection_probe(uint16_t local_pdc_id,uint32_t selective_base);
@@ -58,7 +62,7 @@ public:
     // Establish the transport without inventing an SES NO_OP message. The
     // optional negotiation request uses NO_NEG and enables no optional feature.
     uint16_t open_connection(uint32_t peer,uint32_t job=1,pdc_mode mode=ROD,bool negotiation=false,
-                             PDS::PdcMappingIdentity identity={});
+                             PDS::PdcMappingIdentity identity={},uint8_t data_traffic_class=0);
     void set_response_handler(std::function<void(const PDC_SES_rsp&)> callback);
     void set_datagram_transmit_handler(std::function<void(uint16_t,SendResult)> callback);
     void set_context_event_handler(std::function<void(const PdcEvent&)> callback);
@@ -98,7 +102,8 @@ private:
     std::function<void(const PDC_SES_rsp&)> response_handler_;
     WireFormat format_;
     NetworkLayer::WireOptions network_;
-    std::optional<NetworkLayer::TrimmingOptions> trimming_;
+    std::vector<NetworkLayer::TrimmingOptions> trimming_policies_;
+    std::map<uint8_t,uint8_t> data_traffic_class_dscps_; // Configured nonzero local data TCs.
 
     NetworkLayer::WireAddress address(uint32_t node) const;
 

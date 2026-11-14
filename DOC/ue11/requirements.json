@@ -314,14 +314,15 @@
       "summary": "trimming 检测及 NACK 恢复",
       "status": "partial",
       "tests": [
-        "packet_trimming_test"
+        "packet_trimming_test",
+        "multi_traffic_class_trimming_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Plain IPv4/IPv6/native/UDP switch trimming, unchanged UDP fields, bounds-only restricted parsing, no PDC creation/SES placement from a trimmed header, normal/last-hop NACK and RUD/ROD recovery tested. Additional loss/resource combinations and TSS/other modes remain open."
+      "evidence_note": "Plain IPv4/IPv6/native/UDP switch trimming, unchanged UDP fields, bounds-only restricted parsing, no PDC creation/SES placement from a trimmed header, normal/last-hop NACK and RUD/ROD recovery tested. Additional loss/resource combinations and TSS/other modes remain open. Multi-dataTC trimming54a1e64 verified in16-scoped virtual tests normal1.81s/ASan15.89s, actualDSCP queue reconstruction, ambiguousrolesrejected, retainedTFC16byteheader. Notfull179."
     },
     {
       "id": "SES-JOB",
@@ -480,14 +481,16 @@
         "packet_trimming_test",
         "mac_timing_test",
         "simulation_scenarios",
-        "nscc_lifecycle_test"
+        "nscc_lifecycle_test",
+        "cms_traffic_class_test",
+        "native_traffic_class_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md."
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md. CMS-only follow-up593e721 passes standaloneCMake/CTestprobe normal0.03s ASan/UBSan/leaks0.04s (newEngine.cpp/test+unchanged6f message library; notfull177). CMS Connection and NSCC/TFC group keys now include outgoing data TC, with direct-CMS window/credit isolation tests. Host/PDC/NIC/DSCP TC propagation remains open, TFC Host stillTC0; no end-to-end multi-TC claim. See CMS-TRAFFIC-CLASSES.md. Pending original-path increment: Native Operation TC -> SES request/PDC mapping -> immutablePDC/CCC/NIC DSCP; local receive handoff retainsPDCoutgoingTC for reverseREAD. New16dual-flow+4reverseREAD+configuration boundary scenes uncompiled. NonzeroRUDI/UUD and multiTC+legacytrimming explicitlyfenced. Wait6f full176ASan before compiling; no broaderProfile claim."
     },
     {
       "id": "NET-BASE",
@@ -678,10 +681,13 @@
         "tfc_context_test",
         "tfc_integration_test",
         "tfc_bidirectional_test",
-        "tfc_receive_pressure_test"
+        "tfc_receive_pressure_test",
+        "cms_traffic_class_test",
+        "native_traffic_class_test",
+        "multi_traffic_class_trimming_test"
       ],
       "profiles": [],
-      "evidence_note": "Source/destination arithmetic and wire/admission components are scoped-tested. Experimental TfcEngine now connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD CCC_ID lifetime, Credit ACK or Credit CP alongside NSCC, and injected RTO credit-loss recovery. bc98650 11/11 normal0.78s ASan7.75s includes48wire/recovery scenarios216operations plusrealQUIESCE;444e206 bidirectional96scenarios normal0.17s ASan1.94s;0a72fae three-Host pool-refusal/refill4scenarios normal0.02s ASan0.12s. Frozenafaca88f68928f7ec105d9d022fe136c0f043fa9 FULL176/176normal130.02s and176/176ASan/UBSan/leaks633.60s pass, provider/referenceON, no compilers, sequential-j1. Includes private-RUD clarification and corrected public recovery CQfixture (comp_orderNONE; strictcontext/length/once instead of completioncountorder). Prior6f fullASan175/176andartifactretained; identicalproduction plusfixturecorrection. Multi-dataTC/producerfairness in separatebranch is not partofthisfull176 proof. Host adapter is TC0/shared-Payload-MTU only, cell/overhead configured out of band, no native capability/Profile claim. Both specification unit-shift and READY credit-timer contradictions remain recorded review items. No complete TFC/M5/Profile claim. See TRANSPORT-FLOW-CONTROL.md."
+      "evidence_note": "Source/destination arithmetic and wire/admission components are scoped-tested. Experimental TfcEngine now connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD CCC_ID lifetime, Credit ACK or Credit CP alongside NSCC, and injected RTO credit-loss recovery. bc98650 11/11 normal0.78s ASan7.75s includes48wire/recovery scenarios216operations plusrealQUIESCE;444e206 bidirectional96scenarios normal0.17s ASan1.94s;0a72fae three-Host pool-refusal/refill4scenarios normal0.02s ASan0.12s. Frozenafaca88f68928f7ec105d9d022fe136c0f043fa9 FULL176/176normal130.02s and176/176ASan/UBSan/leaks633.60s pass, provider/referenceON, no compilers, sequential-j1. Includes private-RUD clarification and corrected public recovery CQfixture (comp_orderNONE; strictcontext/length/once instead of completioncountorder). Prior6f fullASan175/176andartifactretained; identicalproduction plusfixturecorrection. Multi-dataTC/producerfairness in separatebranch is not partofthisfull176 proof. Host adapter is TC0/shared-Payload-MTU only, cell/overhead configured out of band, no native capability/Profile claim. Both specification unit-shift and READY credit-timer contradictions remain recorded review items. No complete TFC/M5/Profile claim. See TRANSPORT-FLOW-CONTROL.md. Follow-up54a1e64 scopes16/16normal1.81s ASan/UBSan/leaks15.89s: configured reliableRUD/ROD dataTC now propagates NativeOperation->PDCmapping/CCC/NIC/DSCP, reverseREAD localleaseidentity, fair finiteproducerwindow, error-tailreuse, perTCtrimming with realDSCP reconstruction and retained16Bcreditrequest. Complete179suite pending; afaca176doesnotincludeTCincrement. NonzeroRUDI/UUD remainUnsupported; noProfileclaim. See CMS-TRAFFIC-CLASSES.md."
     },
     {
       "id": "NET-CSIG",

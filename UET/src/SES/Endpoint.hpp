@@ -10,6 +10,7 @@
 #include "../PDS/DefaultSemanticResponse.hpp"
 #include "../Runtime/PdsHost.hpp"
 #include <deque>
+#include <array>
 #include <tuple>
 #include <optional>
 
@@ -84,6 +85,7 @@ struct Operation {
     // §3.4.3.2: explicit single-packet format selection. Standard stays the
     // default; selecting a format does not expand its supported operations.
     RequestHeaderFormat header_format=RequestHeaderFormat::Standard;
+    uint8_t traffic_class=0; // Local reliable-data TC; configure its DSCP/queue policy on PdsHost first.
 };
 // Ignore bits apply to the tag only. An omitted initiator matches any source;
 // a specified rank is interpreted inside the posting's JobID, even with absolute addressing.
@@ -191,6 +193,8 @@ public:
     bool transport_pending(uint64_t operation) const;
     uint64_t unexpected_bytes() const;
     size_t queued_fragments() const;
+    size_t queued_fragments_for_traffic_class(uint8_t traffic_class) const;
+    size_t producer_messages_for_traffic_class(uint8_t traffic_class) const;
     size_t receive_intervals() const;
     size_t retained_read_packets() const;
     size_t pending_read_returns() const;
@@ -419,12 +423,19 @@ private:
     std::map<MessageKey,Incoming> incoming_;
     std::deque<Completion> completions_;
     size_t submission_window_,queued_fragments_=0;
+    // The payload-copy bound is host-local resource policy, independent of
+    // PDS reliability windows and each TC's congestion/credit gate.
+    std::array<size_t,8> queued_fragments_by_traffic_class_{};
+    std::array<size_t,8> producer_messages_by_traffic_class_{};
+    uint8_t last_producer_traffic_class_=0;
     size_t receive_message_limit_;
     uint64_t unexpected_limit_,unexpected_bytes_=0,next_receive_order_=0;
     std::map<uint64_t,MessageKey> unexpected_order_;
     std::map<std::tuple<uint16_t,uint16_t,ResourceSpace>,uint8_t> disabled_generations_;
     std::map<uint16_t,SourceMessage> sources_;
     std::deque<uint16_t> submission_order_;
+    bool select_producer_traffic_class();
+    bool producer_message_ready(uint16_t message,const SourceMessage& source) const;
     // A bounded target packet budget is independent of whole-message slots.
     // Holding each original READ ACK until its return packet completes keeps
     // PDS payload storage and response tokens bounded (§3.5.20.2.2).

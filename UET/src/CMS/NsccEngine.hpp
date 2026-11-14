@@ -137,7 +137,7 @@ public:
     }
     const NsccState& state(const Connection& connection) const { return sources_.at(connection).controller->state(); }
 private:
-    using ControllerKey=std::tuple<uint32_t,bool,uint16_t,uint32_t>;
+    using ControllerKey=std::tuple<uint32_t,bool,uint16_t,uint32_t,uint8_t>;
     struct Source {
         std::shared_ptr<NsccController> controller;
         ReceivedByteCounter byte_counter;
@@ -158,8 +158,10 @@ private:
     std::map<Connection,Receiver> receivers_;
 
     static ControllerKey controller_key(const Connection& connection) {
+        // §3.6.6: congestion on one data TC cannot regulate a different TC.
+        // RUD sharing is scoped to peer AND outgoing data traffic class.
         return {connection.peer,connection.ordered,connection.ordered?connection.local_pdc:uint16_t{0},
-            connection.ordered?connection.starting_psn:0};
+            connection.ordered?connection.starting_psn:0,connection.traffic_class};
     }
     Source& source(const Connection& connection) {
         const auto found=sources_.find(connection);

@@ -27,14 +27,17 @@ SES_PDS_req make_request(uint32_t source, uint32_t destination) {
     return request;
 }
 
-std::vector<TraceEvent> run_simulation() {
+std::vector<TraceEvent> run_simulation(uint8_t local_traffic_class) {
     EventLoop loop; Trace trace(loop); Fabric fabric(loop, trace, 42);
     auto& pa = fabric.add_host(11); auto& pb = fabric.add_host(22);
     LinkConfig link; fabric.add_link(11,22,link); fabric.add_link(22,11,link);
     PdsHost a(11,loop,trace,pa,PdsHost::WireFormat::LegacySup1),
             b(22,loop,trace,pb,PdsHost::WireFormat::LegacySup1);
     SESManager target_ses(b.manager());
-    const auto request = make_request(11,22);
+    auto request = make_request(11,22);
+    request.tc=local_traffic_class;
+    auto invalid_class=request; invalid_class.tc=8;
+    CHECK(!a.submit(invalid_class)); // Reject before allocating a legacy PDC.
     size_t requests = 0, responses = 0;
     b.set_request_handler([&](const PDC_SES_req& received) {
         CHECK(received.pkt.payload == request.pkt.payload);
@@ -58,11 +61,13 @@ std::vector<TraceEvent> run_simulation() {
 
 int main() {
     try {
-        const auto first = run_simulation(), second = run_simulation();
-        CHECK(first.size() == second.size());
-        for (size_t i=0; i<first.size(); ++i) {
-            CHECK(first[i].time == second[i].time); CHECK(first[i].node == second[i].node);
-            CHECK(first[i].event == second[i].event); CHECK(first[i].value == second[i].value);
+        for (const uint8_t local_traffic_class:{0,1,7}) {
+            const auto first=run_simulation(local_traffic_class),second=run_simulation(local_traffic_class);
+            CHECK(first.size()==second.size());
+            for (size_t index=0;index<first.size();++index) {
+                CHECK(first[index].time==second[index].time && first[index].node==second[index].node);
+                CHECK(first[index].event==second[index].event && first[index].value==second[index].value);
+            }
         }
         std::cout << "PASS: original SES/PDS/IPDC/TPDC handshake and semantic response under repeatable virtual time\n";
         return 0;

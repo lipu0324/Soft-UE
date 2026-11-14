@@ -74,7 +74,7 @@ public:
     uint8_t source_identifier(const Connection& connection) const;
 
 private:
-    using SourceKey=std::tuple<uint32_t,bool,uint16_t,uint32_t>;
+    using SourceKey=std::tuple<uint32_t,bool,uint16_t,uint32_t,uint8_t>;
     using DestinationKey=std::pair<uint32_t,uint8_t>;
     struct SourceContext {
         SourceContext(const TfcSourceConfig& geometry,SourceKey group,uint8_t id)
