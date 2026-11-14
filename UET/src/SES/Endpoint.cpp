@@ -2934,7 +2934,7 @@ auto Endpoint::receive_fetching_atomic(const PDC_SES_req& request) -> void {
         if (tagged_fetch) {
             // Dual-operand requests carry32B but touch only one datatype.
             // Target completion reports that span and preserves wire length
-            // separately; source completion retains the request length.
+            // separately. Source completion also reports the result span.
             Completion completion{0,message.context,CompletionStatus::Success,static_cast<uint32_t>(message.received),
                 1,true,{},0,0,message.tag};
             completion.original_length=header.request_length; completions_.push_back(completion);

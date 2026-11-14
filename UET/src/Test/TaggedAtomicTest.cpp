@@ -81,7 +81,7 @@ static void transaction(OperationType type,RequestHeaderFormat format,pdc_mode m
         throw std::runtime_error("tagged atomic failed: fetching="+std::to_string(fetching)+" format="+
             std::to_string(unsigned(format))+" mode="+std::to_string(mode)+" late="+std::to_string(late)+
             " datatype="+std::to_string(unsigned(datatype))+" code="+std::to_string(completion.remote_code));
-    CHECK(completion.operation==identifier && completion.length==length && completion.remote_generation==7);
+    CHECK(completion.operation==identifier && completion.length==(fetching?width:length) && completion.remote_generation==7);
     if (fetching) CHECK(source.memory().read(1,1,local.key,0,width)==previous);
     CHECK(target.poll_completion(completion) && completion.receive && completion.context==99 &&
         completion.status==CompletionStatus::Success && completion.tag==tag && completion.length==(fetching?width:length));
