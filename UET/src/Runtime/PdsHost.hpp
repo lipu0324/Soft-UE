@@ -226,6 +226,7 @@ public:
         context_events_.clear();
         transmit_notifications_.clear();
         services_.retired_semantic_messages.clear();
+        services_.retired_semantic_responses.clear();
         trace_.record(node_, "host_closed");
     }
 private:
@@ -287,6 +288,7 @@ private:
             while (!context_events_.empty()) {
                 const auto event=context_events_.front(); context_events_.pop_front();
                 services_.retired_semantic_messages.observe(event,MAX_PDC);
+                services_.retired_semantic_responses.observe(event,MAX_PDC*2,MAX_PDC);
                 services_.retired_semantic_messages.request_read_retirement(
                     [this](uint16_t local_pdc) { return request_connection_close(local_pdc); });
                 if (context_event_handler_) context_event_handler_(event);

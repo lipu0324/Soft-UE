@@ -435,4 +435,5 @@ See [ACK-data READ](READ-ACK-DATA.md) for the current READ limit, registered res
 Native Endpoint replacement keeps its source MID cursor and retired identity leases
 in the Host, with Clear/Close-based reclamation and exclusive live SES binding.
 This protects late queued PDS upcalls across object replacement; incomplete source messages drain existing MSG_ERROR tails without more application
-reads. Target replacement remains separate open work. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).
+reads. Target READ replacement now retires response tokens separately and terminates held RX handles.
+Receiver continuation ownership and deferred synchronization actions remain open work. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).

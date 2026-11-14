@@ -7,7 +7,8 @@
 #include <utility>
 
 namespace UET::Runtime {
-// Host-owned continuation of the native SES message-ID lease. Destroying SES
+// Host-owned continuation of native SES MID/response-token leases, held in
+// separate containers with explicit source/target PDC ranges. Destroying SES
 // does not make queued PDS packets or their local upcalls disappear. IDs stay
 // unavailable until real transport retirement; no timer guesses delivery.
 class RetiredSemanticMessages {
@@ -28,16 +29,16 @@ public:
         const auto found=leases_.find(message);
         if (found!=leases_.end() && found->second.datagram) leases_.erase(found);
     }
-    void observe(const PdcEvent& event,uint16_t source_pdc_limit) {
+    void observe(const PdcEvent& event,uint16_t context_limit,uint16_t context_begin=0) {
         if (event.kind==PdcEventKind::RequestTransmitted || event.kind==PdcEventKind::RequestRejected) {
             const auto found=leases_.find(event.message_id);
             if (found==leases_.end()) return;
             auto& lease=found->second;
             if (lease.datagram || lease.peer!=event.peer || (lease.job && *lease.job!=event.job)) return;
-            if (event.local_pdc>=source_pdc_limit) {
+            if (event.local_pdc<context_begin || event.local_pdc>=context_limit) {
                 // Manager admission failure has no PDC. It removes the whole
                 // unsent message; it cannot retire an already-bound lease.
-                if (event.kind==PdcEventKind::RequestRejected && event.local_pdc==UINT16_MAX && lease.local_pdc==UINT16_MAX)
+                if (!context_begin && event.kind==PdcEventKind::RequestRejected && event.local_pdc==UINT16_MAX && lease.local_pdc==UINT16_MAX)
                     leases_.erase(found);
                 return;
             }
