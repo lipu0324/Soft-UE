@@ -1,8 +1,9 @@
 # TFC 源信用计算与接入边界
 
 `CMS/TfcCredit.hpp`、目的预算、信用线格式和 PDS 发送准入桥已有分范围验证。
-本分支新增 `TfcEngine` 接入草稿，正在验证真实 PDS 信用反馈、缓冲池、定时器和
-CCC 生命周期。没有 Endpoint 宣告 TFC/Profile 支持；不能把组件单测当作 M5 验收。
+`TfcEngine` 已接入真实 PDS 信用反馈、缓冲池、定时器和 CCC 生命周期，并通过
+固定源的完整176项整合回归。Host 仍是显式实验配置，限 TC0、共用 Payload MTU；
+没有 Endpoint 宣告 TFC/Profile 支持，正式规范歧义与其他配置仍需复核。
 
 ## 显式的单位
 
@@ -184,5 +185,17 @@ SYN保护的 Close 后，第二发送方通过原 PDS 重试成功，预算始�
 `fi_endpoint(3)` 明确区分 `msg_order` 与 `comp_order`。小 eager 消息可先完成，
 而早先匹配的 rendezvous READ 仍在进行。修正后以真实 op_context 校验对应长度、
 每个 context 恰好一次，并保留两个缓冲的完整字节检查；不再断言未提供的 CQ 顺序。
-这只修改公共 API 测试夹具，没有更改 TFC 或 provider 协议逻辑。修正版本的范围及
-完整回归仍待验证，尚不将完整176项 Sanitizer 声明为通过。
+这只修改公共 API 测试夹具，没有更改 TFC 或 provider 协议逻辑。
+
+修正后固定源 `afaca88f68928f7ec105d9d022fe136c0f043fa9` 的四项进程恢复范围回归
+均通过：普通12.36秒、ASan/UBSan/leak 18.44秒。随后停止所有编译/链接，源保持
+不变，按普通→Sanitizer、各 `ctest -j1` 顺序完成**完整176/176 + 176/176**：
+普通130.02秒，ASan/UBSan/leak 633.60秒。provider 与固定参考对照均启用。
+全量日志为 `/tmp/softue-tfc-afaca-full-{normal,asan}-tests.log`，报告为
+`/tmp/softue-tfc-afaca-full-report.json`。这次是真正的固定源完整回归，保留了较早6f
+版本的175/176失败报告及现场。
+
+此证据包含48个 TFC wire/恢复场景、真实 QUIESCE、96个双向 READ/原子场景和
+4个三 Host 目的池拒绝/回收场景，不包含独立分支的多数据 TC 字段和 producer 调度
+增量。后者即使13项范围回归通过，也不能合并称为本次178项完整通过。所有四种
+Profile 继续保持未完成；TFC 单位与 READY 伪代码歧义、其余 TC/配置验收仍开放。
