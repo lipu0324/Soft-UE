@@ -15,7 +15,13 @@ TC 的合法发送。源 RUD 的共享查询因此至少需要 peer+outgoing dat
 - TC 1 的累计 TFC 授权不能补充 TC 0；同 TC 另一成员收到的授权可共同使用。
 - 关闭一个成员不会清除仍活动的其他 TC 或共享成员状态。
 
-这份增量尚待固定版本编译验证。它只处理 CMS 分组身份，**尚未**把 Native Operation、
+固定源 `593e72199b2050585d0f246c76d5ea8813f94ab5` 的独立 CMS CMake/CTest 探针
+已通过：普通0.03秒，ASan/UBSan/leak 0.04秒。探针直接编译本版本的 TfcEngine.cpp
+与 CmsTrafficClassTest.cpp，并链接固定6f4115d版本未改动的 softue_message（普通/
+Sanitizer 分别匹配）。日志为 `/tmp/softue-cms-tc-probe-{normal,asan}-tests.log`，
+探针 CMake 定义为 `/tmp/softue-cms-tc-probe/CMakeLists.txt`。这不是仓库完整177项构建。
+
+它只处理 CMS 分组身份，**尚未**把 Native Operation、
 PDC 创建、NIC 排队和 DSCP/TC 配置贯穿连接。`PdsHost::enable_tfc` 仍显式限制 TC 0，
 原有 Host 构造的 Connection 也默认 TC 0。因此不能凭这个单元宣布多 TC 端到端支持，
 也不能把 CMS 直接调用测试称作网络隔离回归；后续还需统一配置与原 PDS/NIC 场景。
