@@ -1,8 +1,8 @@
 # TFC 源信用计算与接入边界
 
-`CMS/TfcCredit.hpp` 目前只实现 §3.6.15 的源端数值规则，尚未接入 PDS 发送准入、
-目的缓冲分配、Credit CP/ACK、信用请求定时器或 CCC 生命周期。没有 Endpoint 宣告
-TFC 支持；不能把这个单元当作完整 TFC 或 M5 的验收。
+`CMS/TfcCredit.hpp`、目的预算、信用线格式和 PDS 发送准入桥已有分范围验证。
+本分支新增 `TfcEngine` 接入草稿，正在验证真实 PDS 信用反馈、缓冲池、定时器和
+CCC 生命周期。没有 Endpoint 宣告 TFC/Profile 支持；不能把组件单测当作 M5 验收。
 
 ## 显式的单位
 
@@ -101,3 +101,36 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验。固定源版本 `49cf6545be20f09d3aaecd1d1833ceada072932b`
 的源/目的两个数值单元 CTest 通过：普通构建0.08秒，ASan/UBSan/leak 构建0.25秒。
 日志为 `/tmp/softue-tfc-destination-{normal,asan}-tests.log`。
+
+## 原 PDS 接入草稿与验证边界
+
+`PdsHost::enable_tfc` 在创建连接前启用；可先启用 NSCC，再将 TFC 与其组合。
+配置区分 outgoing（对端目的缓冲几何）和 incoming（本机目的缓冲几何），允许
+双向 cell/overhead 不同。Host 当前共用一个 Payload MTU，实验适配器仅支持数据
+TC 0，其他 TC 的提交显式拒绝。RUDI/UUD 继续走不受 UET CCC 控制的路径。
+
+原 PDS 队列登记累计需求，原 TX cache 提供可信重传身份，原 receive admission
+在 SES 资源预约前检查目的 CCC 预算。成功接受后取得 transport buffer lease；
+Host 完成有效 SES upcall 后释放这块 transport buffer。SES 可能保留的 unexpected
+消息存储属于另一个资源域。未成功进入 PDS 的 PSN 不消耗新 buffer lease。
+
+源 RUD 可配置共享 CCC，ROD 默认独立；8位 CCC_ID 在一个 peer 的活动源上下文中
+唯一。最后成员进入 QUIESCE/关闭流程后，旧 CCC 从新绑定查询中移除，但保留旧成员
+的重传与关闭状态。目的按 peer+CCC_ID 共享独占缓冲预算，最后成员 Close 后退回
+主机总池；无可用预算时拒绝，不向另一个 CCC 借出已经承诺的空间。
+
+未组合 NSCC 时，ACK_CC/CC_CREDIT 携带累计授权；组合 NSCC 时保留 NSCC ACK，
+用 Credit CP 携带 TFC 信用。重复/重排反馈不重复授权。Credit/Credit Request CP
+使用原 PDS 已建立的连接发送，PSN、AR、SYN 均为0，不另建 PDC 或数据重传栈。
+
+§3.6.15.4（PDF 第508页）描述“有未发送工作、没有信用”时启动当前 RTO 信用定时器，
+随后伪代码却以 `ccc.state != READY` 返回；§3.6.8 将这种受阻状态定义为 ACTIVE。
+其注释还要求排除无工作、已有信用、已有数据包 RTO 的情形。当前实验适配器按这些
+明确恢复条件执行：有信用受阻的新包、没有未确认数据、且存在仍可用的已建立 PDC
+时计时；到期重发累计 target。规范 READY 条件的矛盾仍是正式符合性复核项。
+
+`tfc_context_test` 检查共享/最后 QUIESCE、新 CCC_ID、256 ID 耗尽与恢复、目的共享池
+和关闭回收。`tfc_integration_test` 的48个原 SES/PDS 事务覆盖 STD/MEDIUM、RUD/ROD、
+NSCC 开关、IPv4 UDP/IPv6 native、首包丢失、只有信用字段丢失而数据已经确认的恢复。
+这些接入代码及新测试尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
+其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。

@@ -408,7 +408,7 @@ public:
         }
 
         // Use instance member queue
-        process_info->ipdc_instance->tx_req_q.push(req);
+        process_info->ipdc_instance->enqueueRequest(req);
         if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }

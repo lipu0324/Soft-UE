@@ -140,6 +140,13 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
         sendNack(header.flags.retx,header.psn,UET_NO_PKT_BUFFER,rx_cur_psn+1,nullptr,&packet);
         return false; // Refuse before SES reserves a message or PDS accepts its PSN.
     }
+    if (runtime_ && runtime_->congestion_control) {
+        if (const auto refusal=runtime_->congestion_control->admit_receive(congestionConnection(),packet)) {
+            const auto& header=packet.PDS_header.RUOD_req_header;
+            sendNack(header.flags.retx,header.psn,*refusal,rx_cur_psn+1,nullptr,&packet);
+            return false;
+        }
+    }
     if (!runtime_ || !runtime_->semantic_admission) return true;
     const auto& header=packet.PDS_header.RUOD_req_header;
     // Process a validated piggyback Clear even when SES has no new message
@@ -224,6 +231,48 @@ void PDC::bindCongestionContext(pdc_mode delivery_mode) {
     mode=delivery_mode;
     if (runtime_ && runtime_->congestion_control)
         runtime_->congestion_control->opened(congestionConnection());
+}
+
+void PDC::updateCreditActivity() const {
+    if (!runtime_ || !runtime_->congestion_control || !runtime_->congestion_control->accepts_credit_requests()) return;
+    const bool pending_data=std::any_of(tx_pkt_map.begin(),tx_pkt_map.end(),[this](const auto& item) {
+        const auto cached=tx_pkt_buffer.find(item.first);
+        return !item.second.delivery_confirmed && cached!=tx_pkt_buffer.end() && cached->second.PDS_type==RUOD_req_header;
+    });
+    runtime_->congestion_control->update_activity(congestionConnection(),DPDCID && !SYN,
+        !tx_req_q.empty(),pending_data,close_req || closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT,
+        runtime_->rto_ns);
+}
+
+bool PDC::creditControlReady() const {
+    return runtime_ && runtime_->congestion_control && DPDCID && !SYN &&
+        runtime_->congestion_control->has_credit_control(congestionConnection());
+}
+
+void PDC::sendCreditControl() {
+    if (!creditControlReady()) return;
+    const auto message=runtime_->congestion_control->take_credit_control(congestionConnection());
+    if (!message) return;
+    PDStoNET_pkt packet{};
+    packet.src_fep=src_fep;
+    packet.dst_fep=dst_fep;
+    packet.PDS_type=RUOD_cp_header;
+    auto& control=packet.PDS_header.RUOD_cp_header;
+    control.type=CP;
+    control.ctl_type=message->subtype;
+    control.spdcid=SPDCID;
+    control.dpdcid=DPDCID;
+    control.payload=message->payload;
+    // §3.5.16.6: unnumbered, no SYN and no AR. These controls cannot open
+    // a PDC, consume a new PSN, enter the data CCC gate or acquire a data RTO.
+    decorateControl(packet);
+    if (public_net_queue) public_net_queue->push(packet);
+    else tx_pkt_q.push(std::move(packet));
+}
+
+void PDC::receiveCreditControl(const PDStoNET_pkt& packet) {
+    if (runtime_ && runtime_->congestion_control)
+        runtime_->congestion_control->received_credit_control(congestionConnection(),packet);
 }
 
 void PDC::initializePsnRanges() {
@@ -1136,7 +1185,7 @@ void PDC::chkRxError(PDStoNET_pkt* packet)
     const uint32_t sequence=header.psn;
     const uint32_t distance_from_clear=sequence-rx_clear_psn;
     const uint32_t distance_from_contiguous=sequence-rx_cur_psn;
-    if ((header.type==RUD_REQ)!=(mode==RUD)) {
+    if ((is_reliable_unordered_request(header.type))!=(mode==RUD)) {
         error_chk=INV_SYN;
     } else if (header.flags.syn && (sequence-header.psn_off!=start_psn ||
                                    sequence-start_psn>initial_psn_range_)) {

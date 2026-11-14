@@ -122,6 +122,7 @@ clean:
 SIM_SOURCES := $(filter-out $(CORE)/Test/PDS_fulltest.cpp,$(PDS_SOURCES)) \
   $(CORE)/SES/Endpoint.cpp \
   $(CORE)/Runtime/PdsHost.cpp \
+  $(CORE)/CMS/TfcEngine.cpp \
   $(CORE)/Network_Layer/PdsQueueTransport.cpp \
   $(CORE)/Network_Layer/PdsPacketCodec.cpp \
   $(CORE)/Network_Layer/UetWireCodec.cpp

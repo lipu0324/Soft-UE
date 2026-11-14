@@ -15,7 +15,7 @@ inline PDStoNET_pkt trimmed_negative_ack(const PDStoNET_pkt& received,uint16_t l
     nack.nack_code=received.trimmed_last_hop?UET_TRIMMED_LASTHOP:UET_TRIMMED;
     nack.nack_psn=received.PDS_header.RUOD_req_header.psn;
     nack.spdcid=local_pdc; nack.dpdcid=received.PDS_header.RUOD_req_header.spdcid;
-    nack.payload=local_pdc && received.PDS_header.RUOD_req_header.type==ROD_REQ?expected_psn:0;
+    nack.payload=local_pdc && is_reliable_ordered_request(received.PDS_header.RUOD_req_header.type)?expected_psn:0;
     return reply;
 }
 } // namespace UET::PDS

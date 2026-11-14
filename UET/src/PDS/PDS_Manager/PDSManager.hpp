@@ -493,7 +493,7 @@ public:
                 return;
             }
             if (!pdc_list[local_pdc_id].is_open) {
-                const bool ordered=is_request?received_packet.PDS_header.RUOD_req_header.type==ROD_REQ:
+                const bool ordered=is_request?is_reliable_ordered_request(received_packet.PDS_header.RUOD_req_header.type):
                     received_packet.PDS_header.RUOD_cp_header.flags.pdc_type==1;
                 const auto initial_offset=is_request?received_packet.PDS_header.RUOD_req_header.psn_off:
                     received_packet.PDS_header.RUOD_cp_header.psn_off;
@@ -508,7 +508,7 @@ public:
                 std::optional<PDC_SES_req> reserved_message;
                 if (is_request && runtime_ && runtime_->semantic_admission) {
                     const auto& header=received_packet.PDS_header.RUOD_req_header;
-                    const auto mode=header.type==RUD_REQ?RUD:ROD;
+                    const auto mode=is_reliable_unordered_request(header.type)?RUD:ROD;
                     // A ROD gap may allocate a PDC and return ROD_OOO, but it
                     // does not deliver a message. Reserve SES state only for
                     // a first packet that can enter the new receive window.
@@ -587,7 +587,9 @@ public:
         switch (packet->PDS_type) {
         case RUOD_req_header:
             return packet->PDS_header.RUOD_req_header.type == ROD_REQ ||
-                   packet->PDS_header.RUOD_req_header.type == RUD_REQ;
+                   packet->PDS_header.RUOD_req_header.type == RUD_REQ ||
+                   (runtime_ && runtime_->congestion_control && runtime_->congestion_control->accepts_credit_requests() &&
+                    (packet->PDS_header.RUOD_req_header.type==RUD_CC_REQ || packet->PDS_header.RUOD_req_header.type==ROD_CC_REQ));
         case RUOD_cp_header: {
             const auto& control=packet->PDS_header.RUOD_cp_header;
             const bool carries_mode=control.ctl_type==Noop || control.ctl_type==Negotiation;

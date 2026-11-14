@@ -209,6 +209,7 @@ void I_PDC::openChk(){
         rxNack(&p);      // Process negative acknowledgment packet
         }
     }
+    else if(creditControlReady()) { sendCreditControl(); }
     else if(probe_due_ || needsWindowProbe()) { progressProbe(); }
     else if(admissionRetryReady()) { retryAdmissionDeferred(); }
     else if(!rto_pkt_q.empty()){
@@ -325,7 +326,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
+            ((is_reliable_unordered_request(header.type))!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
 
@@ -515,6 +516,10 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
             break;
         case Probe:
             receiveProbe(*pkt);
+            break;
+        case Credit:
+        case Credit_req:
+            receiveCreditControl(*pkt);
             break;
         case ACK_req:
             rxCtrlAckReq(pkt);

@@ -115,6 +115,20 @@ auto PdsHost::enable_nscc(const CMS::NsccConfig& config) -> void {
 
 auto PdsHost::nscc() const -> const CMS::NsccEngine* { return congestion_.get(); }
 
+auto PdsHost::enable_tfc(const CMS::TfcEngineConfig& config) -> void {
+    if (stopped_ || format_!=WireFormat::Uet11 || flow_control_ || manager_.getPDSStatus().open_cnt ||
+        (services_.congestion_control && services_.congestion_control!=congestion_.get()))
+        throw std::logic_error("configure TFC once before opening connections; enable optional NSCC first");
+    if (config.outgoing.payload_mtu_bytes!=config.incoming.payload_mtu_bytes)
+        throw std::invalid_argument("PdsHost currently has one shared semantic Payload MTU");
+    flow_control_=std::make_unique<CMS::TfcEngine>(config,loop_,loop_,[this] { wake(); },network_,
+        congestion_.get(),&trace_,node_);
+    services_.semantic_payload_mtu=config.outgoing.payload_mtu_bytes;
+    services_.congestion_control=flow_control_.get();
+}
+
+auto PdsHost::tfc() const -> const CMS::TfcEngine* { return flow_control_.get(); }
+
 auto PdsHost::configure_psn_ranges(const PDS::PsnRangeConfiguration& configured,uint32_t zero_override) -> void {
     if (stopped_ || manager_.getPDSStatus().open_cnt)
         throw std::logic_error("configure PSN ranges before opening connections");
@@ -140,6 +154,8 @@ auto PdsHost::configure_semantic_payload_mtu(uint32_t payload_bytes) -> void {
     if (!payload_bytes || payload_bytes>8192) throw std::invalid_argument("invalid semantic Payload MTU");
     if (stopped_ || (manager_.getPDSStatus().open_cnt && services_.semantic_payload_mtu!=payload_bytes))
         throw std::logic_error("configure semantic Payload MTU before opening connections");
+    if (flow_control_ && flow_control_->config().outgoing.payload_mtu_bytes!=payload_bytes)
+        throw std::logic_error("semantic Payload MTU must match the immutable TFC geometry");
     services_.semantic_payload_mtu=payload_bytes;
 }
 
@@ -211,6 +227,7 @@ auto PdsHost::set_context_event_handler(std::function<void(const PdcEvent&)> cal
 
 auto PdsHost::submit(const SES_PDS_req& request) -> bool {
     if (stopped_ || request.src_fep != node_ || request.source_pid>0xfff) return false;
+    if (flow_control_ && request.tc!=0) return false;
     if (!manager_.pushSESRequest(request)) return false;
     trace_.record(node_, "ses_submit", request.tx_pkt_handle);
     wake();
@@ -465,6 +482,14 @@ auto PdsHost::pump() -> void {
                 if (!answer_retired_receive(request)) {
                     if (request_handler_) request_handler_(request);
                     else answer_inactive_receive(request);
+                }
+                if (services_.congestion_control && (request.delivery_mode==RUD || request.delivery_mode==ROD)) {
+                    // The transport buffer is reusable after the validated
+                    // upcall hands its contents to SES. Unexpected-message
+                    // storage retained by SES is a separate resource domain.
+                    services_.congestion_control->handed_to_semantics(
+                        {request.source_fep,request.PDCID,request.connection_start_psn,request.delivery_mode==ROD},
+                        request.orig_psn);
                 }
                 if (stopped_) return;
                 worked = true;
