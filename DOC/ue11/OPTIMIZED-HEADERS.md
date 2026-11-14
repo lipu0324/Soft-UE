@@ -96,7 +96,8 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
 
 整数非取回原子扩展的四项定向普通检查通过（1.58s），见 `/tmp/softue-optimized-atomic-tests.log`；
 800组独立算术/拒绝场景与扩为144组的故障矩阵均通过。该次检查期间另有构建，只作功能证据；
-新增原子路径的 sanitizer 及 STD 原子集成检查尚在执行。
+新增原子路径与 STD 原子/fetching 集成的6项 ASan/UBSan/泄漏检查全部通过（33.46s），
+日志 `/tmp/softue-optimized-atomic-asan-tests.log`。测试时其他工作树仍在编译，只作功能证据。
 
 固定5b4e049的 `util/uet_util.c` 在解析next_hdr时，把REQ_SMALL、REQ_MEDIUM和
 RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来扩大对照范围。
