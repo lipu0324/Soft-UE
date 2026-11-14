@@ -28,8 +28,14 @@ PdsHost::PdsHost(uint32_t node, EventLoop& loop, Trace& trace, IPacketPort& port
             if (format_ == WireFormat::LegacySup1)
                 packet = NetworkLayer::PdsPacketCodec::decode(frame.bytes.data(), frame.bytes.size());
             else {
+                // A trim notification carries its source data class in the configured
+                // DSCP meaning; local Frame queue metadata is not wire evidence.
+                std::optional<NetworkLayer::TrimmingOptions> receive_trimming;
+                if (const auto dscp=NetworkLayer::UetWireCodec::packet_dscp(frame.bytes))
+                    for (const auto& policy:trimming_policies_)
+                        if (policy.is_trimmed(*dscp)) { receive_trimming=policy; break; }
                 auto decoded = NetworkLayer::UetWireCodec::decode(frame.bytes.data(), frame.bytes.size(),
-                    network_.crc,network_.native_ip_protocol,trimming_,network_.udp_destination_port,network_.udp);
+                    network_.crc,network_.native_ip_protocol,receive_trimming,network_.udp_destination_port,network_.udp);
                 if (decoded.network.ipv6 != network_.ipv6 || decoded.network.udp != network_.udp ||
                     decoded.network.source.ip != address(frame.source).ip ||
                     decoded.network.destination.ip != address(node_).ip)
@@ -163,23 +169,33 @@ auto PdsHost::configure_trimming(const NetworkLayer::TrimmingOptions& options) -
     options.validate();
     if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
         throw std::logic_error("configure trimming before opening connections");
-    if (!data_traffic_class_dscps_.empty())
-        throw std::logic_error("multiple data TCs require a per-TC trimming configuration");
-    trimming_=options;
+    auto candidate_policies=trimming_policies_;
+    const auto existing=std::find_if(candidate_policies.begin(),candidate_policies.end(),
+        [&](const auto& policy) { return policy.data_traffic_class==options.data_traffic_class; });
+    if (existing==candidate_policies.end()) candidate_policies.push_back(options);
+    else *existing=options;
+    std::array<std::optional<uint8_t>,8> candidate_dscps{};
+    candidate_dscps[0]=network_.dscp;
+    for (const auto& entry:data_traffic_class_dscps_) candidate_dscps[entry.first]=entry.second;
+    candidate_dscps[options.data_traffic_class]=options.trimmable_dscp;
+    // Validate the entire candidate before changing either mapping. A rejected
+    // configuration must not silently alter an unrelated class's packet roles.
+    NetworkLayer::validate_data_traffic_class_dscps(candidate_dscps,candidate_policies);
+    trimming_policies_=std::move(candidate_policies);
+    if (options.data_traffic_class) data_traffic_class_dscps_[options.data_traffic_class]=options.trimmable_dscp;
+    else network_.dscp=options.trimmable_dscp;
 }
 
 auto PdsHost::configure_data_traffic_class(uint8_t traffic_class,uint8_t dscp) -> void {
     if (stopped_ || format_!=WireFormat::Uet11 || manager_.getPDSStatus().open_cnt)
         throw std::logic_error("configure data traffic classes before opening connections");
-    if (traffic_class>=8 || dscp>=64 || dscp==48)
-        throw std::invalid_argument("invalid data TC/DSCP or reserved simulator control DSCP");
-    if (traffic_class && trimming_)
-        throw std::logic_error("multiple data TCs require a per-TC trimming configuration");
-    if (traffic_class && dscp==network_.dscp)
-        throw std::invalid_argument("data TC DSCP is already assigned to TC 0");
-    for (const auto& configured:data_traffic_class_dscps_)
-        if (configured.first!=traffic_class && configured.second==dscp)
-            throw std::invalid_argument("data TC DSCP is already assigned to another TC");
+    if (traffic_class>=8 || dscp>=64)
+        throw std::invalid_argument("invalid data TC/DSCP");
+    std::array<std::optional<uint8_t>,8> candidate_dscps{};
+    candidate_dscps[0]=network_.dscp;
+    for (const auto& entry:data_traffic_class_dscps_) candidate_dscps[entry.first]=entry.second;
+    candidate_dscps[traffic_class]=dscp;
+    NetworkLayer::validate_data_traffic_class_dscps(candidate_dscps,trimming_policies_);
     if (traffic_class) data_traffic_class_dscps_[traffic_class]=dscp;
     else network_.dscp=dscp;
 }
@@ -435,13 +451,16 @@ auto PdsHost::pump() -> void {
                     options.ecn=packet.network_ecn;
                     if (packet.PDS_type==UUD_req_header) options.ecn=2; // ECT without reliable NSCC admission.
                 }
-                if (trimming_ && data) options.dscp=trimming_->trimmable_dscp;
+                const NetworkLayer::TrimmingOptions* data_trimming=nullptr;
+                for (const auto& policy:trimming_policies_)
+                    if (policy.data_traffic_class==data_traffic_class) { data_trimming=&policy; break; }
+                if (data_trimming && data) options.dscp=data_trimming->trimmable_dscp;
                 if (!data) {
                     // §3.5.16 / §3.6.4.7: numbered ROD controls cannot
                     // overtake data via the ACK TC. NO_TRIM shares the
                     // request TC while keeping all CPs non-trimmable.
-                    options.dscp=ordered_control?(trimming_?trimming_->no_trim_dscp:options.dscp):
-                        (trimming_?trimming_->control_dscp:48);
+                    options.dscp=ordered_control?(data_trimming?data_trimming->no_trim_dscp:options.dscp):
+                        (trimming_policies_.empty()?48:trimming_policies_.front().control_dscp);
                 }
                 frame.bytes=NetworkLayer::UetWireCodec::encode(packet,options);
                 if (services_.congestion_control && packet.PDS_type==RUOD_ack_header &&

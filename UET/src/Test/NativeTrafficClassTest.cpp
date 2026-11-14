@@ -169,7 +169,10 @@ void rejected_configuration_and_posting() {
     check_throws<std::invalid_argument>([&] { host.configure_data_traffic_class(4,0); });
     check_throws<std::invalid_argument>([&] { host.configure_data_traffic_class(4,3); });
     check_throws<std::invalid_argument>([&] { host.configure_data_traffic_class(0,3); });
-    check_throws<std::logic_error>([&] { host.configure_trimming({}); });
+    auto colliding_trimming=UET::NetworkLayer::TrimmingOptions{};
+    colliding_trimming.trimmed_dscp=3; // Already TC3 DATA, cannot also mean a trimmed TC0 request.
+    check_throws<std::invalid_argument>([&] { host.configure_trimming(colliding_trimming); });
+    host.configure_trimming({}); // Distinct packet roles can coexist across configured classes.
     Endpoint source(1,host,loop,trace,64);
     source.memory().add_job(1);
     Operation bad;

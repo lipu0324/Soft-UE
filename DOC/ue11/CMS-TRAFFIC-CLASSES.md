@@ -96,3 +96,19 @@ data/NO_TRIM/trimmed DSCP 分类与交换机配置。不能据此宣告完整多
 下溢或遗留预约影响后续操作。这项增量尚待固定版本编译。只读诊断接口
 `queued_fragments_for_traffic_class` / `producer_messages_for_traffic_class` 对非法索引
 抛出 out_of_range，不把错误类号用于数组访问。
+
+## 每个数据 TC 的包裁剪配置（待编译验证）
+
+`TrimmingOptions::data_traffic_class` 标识 DATA 和 NO_TRIM 的本地队列。Host 可按类
+注册策略，`LinkConfig::additional_trimming` 补充原有单策略入口；默认 TC0 行为保留。
+整个候选配置校验成功后才更新 Host 映射：不同类的 DATA、NO_TRIM、TRIMMED、
+LASTHOP DSCP 含义不能冲突，所有类共用一个控制 DSCP。数值是显式仿真配置。
+
+交换机每跳从实际 IP DSCP 重建队列类；Host 从裁剪 DSCP 选择解码策略。TFC 类型
+13/14 的裁剪请求保留16字节 PDS 头，包括 CCC_ID/credit_target；不解码 SES，
+不把残留字节视为有效语义数据或新接收信用。
+
+`multi_traffic_class_trimming_test` 规划验证16组 RUD/ROD、NSCC/TFC 开关与
+IPv4/UDP、IPv6/native 的真实队列溢出恢复；适配器主动清除本地 Frame TC，
+检查 DSCP 能恢复分类。另含16组信用扩展头保留/截短边界和配置冲突回归。
+本增量尚未编译，不属于已通过的 b1c24bc 13项范围或 afaca88 176项完整证据。

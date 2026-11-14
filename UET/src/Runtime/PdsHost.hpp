@@ -49,8 +49,8 @@ public:
     void configure_read_ack_data(uint32_t maximum_bytes);
     void configure_semantic_payload_mtu(uint32_t payload_bytes);
     void configure_trimming(const NetworkLayer::TrimmingOptions& options);
-    // Explicit best-effort data-TC to DSCP mapping. TC 0 keeps WireOptions.
-    // Multi-TC trimming policies are a separate configuration increment.
+    // Explicit data-TC to DSCP mapping. A trimming policy additionally reserves
+    // that class's DATA/NO_TRIM/TRIMMED/LASTHOP meanings (§3.6.4.7).
     void configure_data_traffic_class(uint8_t traffic_class,uint8_t dscp);
     bool supports_data_traffic_class(uint8_t traffic_class) const;
     void cancel_queued_message(uint32_t peer,uint32_t job,uint16_t message_id);
@@ -102,7 +102,7 @@ private:
     std::function<void(const PDC_SES_rsp&)> response_handler_;
     WireFormat format_;
     NetworkLayer::WireOptions network_;
-    std::optional<NetworkLayer::TrimmingOptions> trimming_;
+    std::vector<NetworkLayer::TrimmingOptions> trimming_policies_;
     std::map<uint8_t,uint8_t> data_traffic_class_dscps_; // Configured nonzero local data TCs.
 
     NetworkLayer::WireAddress address(uint32_t node) const;

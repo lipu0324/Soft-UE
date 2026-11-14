@@ -566,7 +566,10 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         const auto type=get(pds,2)>>11;
         if (!type || type>=16) throw PdsDecodeError(PdsDecodeError::Reason::UnknownType,type);
         if (type==2 || type==3 || type==13 || type==14) {
-            if (size<start+transport+12) throw std::invalid_argument("incomplete trimmed PDS request");
+            const bool credit_request=type==13 || type==14;
+            const size_t retained_request_size=credit_request?16:12;
+            if (size<start+transport+retained_request_size)
+                throw std::invalid_argument("incomplete trimmed PDS request");
             packet.PDS_type=RUOD_req_header;
             auto& header=packet.PDS_header.RUOD_req_header;
             header.type=static_cast<PDS_type>(type); header.next_hdr=UET_HDR_NONE;
@@ -576,6 +579,12 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
             const auto destination=get(pds+10,2);
             if (header.flags.syn) { header.pdc_info=(destination>>12)&1; header.psn_off=destination&0xfff; }
             else header.dpdcid=destination;
+            if (credit_request) {
+                // §3.5.15.1 / §3.6.10: retain the original credit request
+                // identity, but never decode SES or allocate receive credit.
+                packet.credit_request.ccc_id=get(pds+12,1);
+                packet.credit_request.credit_target_units=get(pds+13,3);
+            }
         } else if (type==4 || type==5) {
             if (size<start+transport+8) throw std::invalid_argument("incomplete trimmed RUDI header");
             packet.PDS_type=RUDI_header;
