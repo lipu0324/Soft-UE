@@ -194,3 +194,35 @@ Host 现在在没有 SES 时也处理旧请求的终止响应；新可靠请求�
 同一源码 `5b497b1` 的九项 ASan/UBSan/泄漏回归全部通过（3.55s），日志
 `/tmp/softue-receive-lifetime-asan-tests.log`。构建目录启用 libfabric 与参考实现，
 本轮仅运行上述九项定向用例；不把配置启用写成完整 provider/参考互通验收。
+
+## 关闭已放置前缀与未匹配 SEND
+
+`/tmp/softue-receive-close-before-tests.log` 复现了目标关闭丢失部分接收 CQ：一个已匹配
+SEND 或 WRITE notification 已放置4/8字节，但 EOM 尚未到达。关闭现在为它生成一次
+Cancelled CQ，记录已放置的长度、原消息长度和已收到的 header data；已完成的接收
+不会再报取消。缓存在 unexpected storage 的字节不算应用放置，错误长度归零。
+
+`receive_close_boundary_test` 的6个场景覆盖 RUD/ROD 的部分 SEND/WRITE，以及两种
+模式的未匹配 SEND。RUD 保持即时 NO_MATCH，ROD 保持等待接收 posting 的行为，
+关闭时消费其保存的 EOM RX handle、返回 Undeliverable，不创建无对应 posting 的 CQ。
+retired receive 的原有错误保证与真实 Clear 回收规则保持一致。
+
+接收替换用例扩为8场景，加入只有1个消息 credit 的边界：旧 Job1 退休状态占满预算时，
+新的 Job2/PDC 消息得到资源 NACK。旧 EOM Clear 之后，新消息通过真实重试成功。
+这是不同 PDC 间的共享预算检查，不以修改确认前沿来制造可用额度。
+
+扩展 rendezvous 生命周期检查曾报告 standalone READ 载体预期 Timeout、实际 Success，
+见 `/tmp/softue-receive-close-normal-tests2.log`。原测试刻意依赖“没有 SES handler 就
+没有反向语义 ACK”的旧行为。Host 的新关闭策略沿用 §3.4.5.2：迟到/取消 READ 数据可以
+丢弃并用 DEFAULT 确认。因此已完整放置 eager 字节的这个场景中，两种载体均允许
+远端源成功；目标自己的应用 CQ 仍为 Cancelled。测试继续检查目标内存和单次 CQ，
+并更新这项载体预期，不把本地关闭解释成线上取消包。
+
+CI run190（`19480b29eb3450c0c8803bbed0e218626fc0047f`）的两个 simulation 作业在
+构建阶段失败：PdsHost 使用 DefaultSemanticResponse 却依赖 Endpoint 间接包含头文件。
+reference-wire 作业成功；构建失败的两个作业没有进入 CTest。补上直接 include 后，
+独立的 RealtimeLateProgressTest 翻译单元语法检查通过；后续完整 CI 仍需单独核对。
+
+上述修正后的七项普通定向回归全部通过（0.45s），见
+`/tmp/softue-receive-close-final-normal-tests.log`。同时已通过直接包含 PdsHost 的
+RealtimeLateProgressTest 构建；其模拟时钟测试将与后续检查单独记录。

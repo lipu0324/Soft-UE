@@ -130,10 +130,12 @@ void target_closes_before_read(bool tagged,bool standalone) {
     fixture.loop.run_until(10000); CHECK(fixture.target.retained_rendezvous_receives()==1);
     fixture.target.close(); fixture.complete(fixture.target,77,CompletionStatus::Cancelled);
     fixture.loop.run(1000000);
-    // ACK_DATA can drain at PDS after the SES handler is detached. Standalone
-    // return data still needs that handler's semantic ACK, so its source times
-    // out. Both are separate from this target's Cancelled application CQ.
-    fixture.complete(fixture.source,99,standalone?CompletionStatus::Timeout:CompletionStatus::Success);
+    // §3.4.5.2 permits DEFAULT for cancelled/late READ data without placement.
+    // Host now drains both ACK-data and reverse-data carriers after SES closes.
+    // This eager payload was already placed in full: the remote source can
+    // finish successfully while this target reports its own Cancelled CQ.
+    // Closing a local Endpoint does not invent a wire cancellation message.
+    fixture.complete(fixture.source,99,CompletionStatus::Success);
     CHECK(fixture.target.memory().read(1,1,fixture.target_region.key,4,73)==fixture.bytes);
     fixture.close();
 }
