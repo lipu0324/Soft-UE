@@ -698,7 +698,7 @@ protected:
         if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
             request->second.PDS_type!=RUOD_req_header) return false;
         const auto fields=UET::SES::semantic_request_fields(request->second.SESpkt);
-        return fields && fields->header.opcode==4;
+        return fields && (fields->header.opcode==4 || fields->header.opcode==0x0e);
     }
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();

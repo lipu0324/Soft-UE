@@ -15,7 +15,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11, SynchronizedWrite=16, SynchronizedAtomic=17 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11, TaggedAtomic=13, TaggedFetchingAtomic=14, SynchronizedWrite=16, SynchronizedAtomic=17 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -116,7 +116,11 @@ struct EndpointCapabilities {
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
     bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
+    bool tagged_integer_atomic=true,tagged_fetching_integer_atomic=true;
+    bool optimized_medium_tagged_atomic=true,optimized_medium_tagged_fetching_atomic=true;
     bool synchronized_write=true,synchronized_integer_atomic=true; // Native bounded groups; no Profile claim.
+    bool optimized_small_synchronized_write=true,optimized_medium_synchronized_write=true;
+    bool optimized_small_synchronized_integer_atomic=true,optimized_medium_synchronized_integer_atomic=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     bool deferrable_send=true, deferrable_tagged_send=true,deferrable_header_capture=false;
@@ -300,6 +304,7 @@ private:
         CompletionStatus target_error=CompletionStatus::RemoteError;
         std::shared_ptr<SparseMemory> unexpected;
         uint64_t receive_order=0,tag=0;
+        uint64_t tagged_buffer_offset=0; // STD tagged atomic offset within the selected posting, never an MR key.
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
         // Pin both the registration incarnation and the logical RMA owner.
@@ -495,7 +500,7 @@ private:
     void start_rendezvous_read(const std::shared_ptr<RendezvousTargetTransaction>& transaction);
     bool bind_rendezvous_posting(const std::shared_ptr<RendezvousTargetTransaction>& transaction,const Posted& receive);
     void match_rendezvous_target(uint64_t id);
-    static PDC_SES_req rendezvous_response_handle(const PDC_SES_req& request);
+    static PDC_SES_req deferred_receive_handle(const PDC_SES_req& request);
     void receive_rendezvous(const PDC_SES_req& request);
 
     void start_rendezvous_source(Operation operation,uint64_t application_operation_id);
@@ -576,6 +581,7 @@ private:
 
     void receive_read(const PDC_SES_req& request);
     void receive_fetching_atomic(const PDC_SES_req& request);
+    bool bind_tagged_atomic_buffer(const PDC_SES_req& request,Incoming& message,const ResourceSelection& selected,uint32_t target_length);
     // §3.4.2.13 / §3.5.23: inspect and place each packet independently.
     // Duplicates repeat the idempotent access. There is no Incoming record,
     // message assembly, recovery cache, target CQ, or Clear lifetime here.

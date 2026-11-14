@@ -92,7 +92,7 @@ void put_request_extensions(Bytes& encoded_bytes,const SEStoPDS_pkt& semantic,ui
         put(encoded_bytes,(uint32_t{rendezvous.read_ri_generation}<<24)|
             (uint32_t{rendezvous.read_PIDonFEP}<<12)|rendezvous.read_resource_index,4);
         put(encoded_bytes,rendezvous.read_offset,8); put(encoded_bytes,rendezvous.read_mem_key,8);
-    } else if (opcode==3 || opcode==4) {
+    } else if (opcode==3 || opcode==4 || opcode==0x0d || opcode==0x0e) {
         const auto& atomic=semantic.eth_header.Atomic_Operation_Extension_Header;
         if (atomic.rsvd) throw std::invalid_argument("reserved atomic extension bits");
         put(encoded_bytes,atomic.atomic_opcode,1); put(encoded_bytes,atomic.atomic_datatype,1);
@@ -121,7 +121,7 @@ void get_request_extensions(Reader& reader,SEStoPDS_pkt& semantic,uint8_t opcode
         rendezvous.read_PIDonFEP=(read_address>>12)&0xfff;
         rendezvous.read_resource_index=read_address&0xfff;
         rendezvous.read_offset=reader.take(8); rendezvous.read_mem_key=reader.take(8);
-    } else if (opcode==3 || opcode==4) {
+    } else if (opcode==3 || opcode==4 || opcode==0x0d || opcode==0x0e) {
         semantic.eth_type=Atomic_Operation_Extension_Header;
         auto& atomic=semantic.eth_header.Atomic_Operation_Extension_Header;
         atomic.atomic_opcode=reader.take(1); atomic.atomic_datatype=reader.take(1);

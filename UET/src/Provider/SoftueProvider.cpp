@@ -45,6 +45,9 @@ constexpr uint64_t completion_levels=FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_
 // CQ or early buffer reuse is promised by INJECT_COMPLETE in this policy.
 // UUD uses local transmit acceptance and never promises remote completion.
 constexpr uint64_t supported_operation_flags=FI_COMPLETION|completion_levels|FI_FENCE|FI_INJECT;
+// FI_TAGGED changes only atomic buffer selection (fi_atomic(3)); it is not a
+// general RMA/SEND operation flag and must not make those APIs accept it.
+constexpr uint64_t atomic_operation_flags=supported_operation_flags|FI_TAGGED;
 constexpr uint64_t datagram_operation_flags=FI_COMPLETION|FI_INJECT_COMPLETE|FI_TRANSMIT_COMPLETE|FI_FENCE|FI_INJECT;
 // §2.2.6 defines two independent ordering predicates. A cross-operation flag
 // can participate in both. The provider's one application FIFO also supplies
@@ -224,14 +227,15 @@ int query_atomic(fid_domain* domain,fi_datatype datatype,fi_op operation,fi_atom
     if (!attributes) return -FI_EINVAL;
     *attributes={0,0};
     const auto native_type=atomic_datatype(datatype);
-    const bool fetching=flags==FI_FETCH_ATOMIC,comparing=flags==FI_COMPARE_ATOMIC;
+    const bool fetching=flags&FI_FETCH_ATOMIC,comparing=flags&FI_COMPARE_ATOMIC;
+    const bool returns_data=fetching || comparing;
     const auto native_operation=comparing?compare_atomic_operation(operation):atomic_operation(operation);
     if (!native_atomic_platform || (domain && owner<ProviderDomain>(domain).datagram) ||
-        (flags && !fetching && !comparing) || !native_type || !native_operation ||
-        (!flags && (*native_operation==SES::IntegerAtomicOperation::Read || SES::integer_atomic_width(*native_type)>8)))
+        (flags&~(FI_TAGGED|FI_FETCH_ATOMIC|FI_COMPARE_ATOMIC)) || (fetching && comparing) || !native_type || !native_operation ||
+        (!returns_data && (*native_operation==SES::IntegerAtomicOperation::Read || SES::integer_atomic_width(*native_type)>8)))
         return -FI_EOPNOTSUPP;
     attributes->size=SES::integer_atomic_width(*native_type);
-    attributes->count=flags?1:16*1024*1024/attributes->size;
+    attributes->count=returns_data?1:16*1024*1024/attributes->size;
     return 0;
 }
 
@@ -276,7 +280,8 @@ void queue_completion(ProviderCompletionQueue& queue,const ApplicationOperation&
 
 std::pair<uint32_t,SES::ResourceSpace> generation_key(const SES::Operation& request) {
     const auto space=(request.type==SES::OperationType::Send || request.type==SES::OperationType::RendezvousSend)?SES::ResourceSpace::Send:
-        (request.type==SES::OperationType::TaggedSend || request.type==SES::OperationType::RendezvousTaggedSend)?SES::ResourceSpace::Tagged:SES::ResourceSpace::Rma;
+        (request.type==SES::OperationType::TaggedSend || request.type==SES::OperationType::RendezvousTaggedSend ||
+         request.type==SES::OperationType::TaggedAtomic || request.type==SES::OperationType::TaggedFetchingAtomic)?SES::ResourceSpace::Tagged:SES::ResourceSpace::Rma;
     return {request.peer,space};
 }
 
@@ -764,18 +769,21 @@ ssize_t submit_atomic_operation(fid_ep* handle,const void* buffer,size_t count,f
         auto& endpoint=owner<ProviderEndpoint>(handle);
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
         if (endpoint.datagram) return -FI_EOPNOTSUPP;
+        const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
+        if (operation_flags&~atomic_operation_flags) return -FI_EOPNOTSUPP;
+        const bool tagged=operation_flags&FI_TAGGED;
         fi_atomic_attr limits{};
-        const int supported=query_atomic(nullptr,datatype,operation,&limits,0);
+        const int supported=query_atomic(nullptr,datatype,operation,&limits,tagged?FI_TAGGED:0);
         if (supported) return supported;
-        if ((count && !buffer) || (!count && operation!=FI_ATOMIC_WRITE) || count>limits.count || offset%limits.size) return -FI_EINVAL;
+        if ((count && !buffer) || (!count && operation!=FI_ATOMIC_WRITE) || count>limits.count || (!tagged && offset%limits.size)) return -FI_EINVAL;
         if ((flags.value_or(endpoint.default_operation_flags)&FI_INJECT) && count>maximum_inject_bytes/limits.size)
             return -FI_EMSGSIZE;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
         if (!peer) return -FI_EADDRNOTAVAIL;
-        SES::Operation request; request.type=SES::OperationType::Atomic; request.peer=*peer;
-        request.remote_key=key; request.remote_offset=offset;
+        SES::Operation request; request.type=tagged?SES::OperationType::TaggedAtomic:SES::OperationType::Atomic; request.peer=*peer;
+        request.remote_key=tagged?0:key; request.tag=tagged?key:0; request.remote_offset=offset;
         request.atomic_datatype=*atomic_datatype(datatype); request.atomic_operation=*atomic_operation(operation);
         const size_t bytes=count*limits.size; // count was bounded before multiplying.
         // Keep owned operands for FI_INJECT and semantic replay. Ordinary
@@ -784,7 +792,7 @@ ssize_t submit_atomic_operation(fid_ep* handle,const void* buffer,size_t count,f
         // The native integer-memory model is little endian. The platform used
         // by this provider is Linux/little endian; SES separately encodes each
         // operand in network order. Fetching/CAS use a separate result path.
-        ApplicationOperation application{context,FI_ATOMIC|FI_WRITE,suppress_success?nullptr:const_cast<void*>(buffer)};
+        ApplicationOperation application{context,FI_ATOMIC|FI_WRITE|(tagged?FI_TAGGED:0),suppress_success?nullptr:const_cast<void*>(buffer)};
         application.suppress_success_completion=suppress_success;
         enqueue_transmission(endpoint,std::move(request),std::move(application));
         return 0;
@@ -805,7 +813,7 @@ ssize_t write_atomic_vector(fid_ep* endpoint,const fi_ioc* buffers,void**,size_t
 }
 ssize_t write_atomic_message(fid_ep* endpoint,const fi_msg_atomic* message,uint64_t flags) {
     if (!message || !message->msg_iov || !message->rma_iov || message->iov_count!=1 || message->rma_iov_count!=1 ||
-        (flags&~supported_operation_flags)) return -FI_EOPNOTSUPP;
+        (flags&~atomic_operation_flags)) return -FI_EOPNOTSUPP;
     if (message->msg_iov[0].count!=message->rma_iov[0].count) return -FI_EINVAL;
     return submit_atomic_operation(endpoint,message->msg_iov[0].addr,message->msg_iov[0].count,
         message->addr,message->rma_iov[0].addr,message->rma_iov[0].key,message->datatype,message->op,message->context,flags);
@@ -827,19 +835,20 @@ ssize_t submit_fetching_atomic(fid_ep* handle,const void* buffer,size_t count,co
         if (!endpoint.enabled) return -FI_EOPBADSTATE;
         if (endpoint.datagram) return -FI_EOPNOTSUPP;
         const auto operation_flags=flags.value_or(endpoint.default_operation_flags);
-        if (operation_flags&~(supported_operation_flags&~FI_INJECT)) return -FI_EOPNOTSUPP;
+        if (operation_flags&~(atomic_operation_flags&~FI_INJECT)) return -FI_EOPNOTSUPP;
+        const bool tagged=operation_flags&FI_TAGGED;
         fi_atomic_attr limits{};
-        const auto supported=query_atomic(nullptr,datatype,operation,&limits,comparing?FI_COMPARE_ATOMIC:FI_FETCH_ATOMIC);
+        const auto supported=query_atomic(nullptr,datatype,operation,&limits,(comparing?FI_COMPARE_ATOMIC:FI_FETCH_ATOMIC)|(tagged?FI_TAGGED:0));
         if (supported) return supported;
         if (count>1 || (!count && (comparing || (operation!=FI_ATOMIC_READ && operation!=FI_ATOMIC_WRITE))) ||
             (count && !result) || (count && operation!=FI_ATOMIC_READ && !buffer) ||
-            (comparing && !compare) || offset%limits.size) return -FI_EINVAL;
+            (comparing && !compare) || (!tagged && offset%limits.size)) return -FI_EINVAL;
         if (endpoint.transmits.size()>=4096) return -FI_EAGAIN;
         progress(*endpoint.domain);
         const auto peer=resolve_peer(endpoint,destination);
         if (!peer) return -FI_EADDRNOTAVAIL;
-        SES::Operation request; request.type=SES::OperationType::FetchingAtomic;
-        request.peer=*peer; request.remote_key=key; request.remote_offset=offset;
+        SES::Operation request; request.type=tagged?SES::OperationType::TaggedFetchingAtomic:SES::OperationType::FetchingAtomic;
+        request.peer=*peer; request.remote_key=tagged?0:key; request.tag=tagged?key:0; request.remote_offset=offset;
         request.atomic_datatype=*atomic_datatype(datatype);
         request.atomic_operation=comparing?*compare_atomic_operation(operation):*atomic_operation(operation);
         request.zero_length_atomic=!count;
@@ -865,7 +874,7 @@ ssize_t submit_fetching_atomic(fid_ep* handle,const void* buffer,size_t count,co
             local_result_key=registration.key;
             request.atomic_result=SES::AtomicResultBuffer{registration.key,0,static_cast<uint32_t>(limits.size),1,1};
         }
-        ApplicationOperation application{context,FI_ATOMIC|FI_READ,result,local_result_key};
+        ApplicationOperation application{context,FI_ATOMIC|FI_READ|(tagged?FI_TAGGED:0),result,local_result_key};
         try { enqueue_transmission(endpoint,std::move(request),std::move(application)); }
         catch (...) { if (local_result_key) endpoint.domain->memory.deregister(local_result_key); throw; }
         return 0;
@@ -972,8 +981,12 @@ ssize_t post_application_receive(fid_ep* handle,void* buffer,size_t length,fi_ad
         if (endpoint.next_receive_token==UINT64_MAX) return -FI_ENOSPC; // Keep native context zero reserved for RMA CQ data.
         progress(*endpoint.domain);
         SES::RegionOptions local_receive; local_receive.local_placement_only=true;
+        // A tagged posting can be selected by TSEND_ATOMIC/FETCH_ATOMIC as
+        // well as TSEND. Grant the exact posting's local atomic rights; its
+        // private origin still rejects every incoming memory-key RMA lookup.
+        const uint8_t receive_permissions=match?uint8_t{7}:static_cast<uint8_t>(SES::Access::Write);
         const auto region=endpoint.domain->memory.register_buffer(1,1,static_cast<uint8_t*>(buffer),length,
-            static_cast<uint8_t>(SES::Access::Write),local_receive);
+            receive_permissions,local_receive);
         const auto token=++endpoint.next_receive_token;
         try {
             if (match) endpoint.semantic->post_tagged_receive(1,1,region.key,0,static_cast<uint32_t>(length),*match,token);
