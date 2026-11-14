@@ -920,7 +920,7 @@
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Native RegionOptions and shared-registry logical-message ownership implemented; exact registration pins cover READ/WRITE and integer atomics, including READ re-execution and actual Clear/Close retirement. Public libfabric2.0 has no standard use-once extension entry. Final commit-specific validation pending; see USE-ONCE-RMA.md. No Profile conformance claim."
+      "evidence_note": "Native RegionOptions and shared-registry logical-message ownership cover exact target MR pins for READ/WRITE/integer atomics, uncached READ re-execution and actual EOM Clear/Close retirement. Frozen36215503334cbbd6223430a014246315730c8418 passes158/158 full normal CTests127.04s and158/158 full ASan/UBSan/leak CTests711.79s, including provider/pinned reference, clean frozen sources and sequential suites without compilers. New fixtures cover124 native transactions,16 shared-domain lifetime scenes and registry policy boundaries. Public libfabric2.0 has no standard use-once extension entry; full Profile acceptance remains open. See USE-ONCE-RMA.md."
     }
   ]
 }
