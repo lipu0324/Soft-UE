@@ -156,3 +156,8 @@ Cancelled CQ，保留已写字节和 header data；不对已消费的 RX handle 
 同一源码提交 `9b41d7f` 的六项 ASan/UBSan/泄漏定向回归全部通过（3.03s），
 日志 `/tmp/softue-target-actions-final-asan-tests2.log`。普通与 sanitizer 构建均冻结
 Endpoint 头文件后运行；本次仅为定向功能结果，不替代完整 Profile 回归。
+
+GitHub Actions 对 `fc4fd85bd9d8fe4291eafa7ba53f209b6b85d399` 的 run186
+（ID43553700539）三项作业均已成功：simulation OFF、simulation ON（sanitizer）
+及 reference-wire。该提交包含源端分片收尾和目标 READ 替换，但不包含随后
+`9b41d7f` 的同步目标关闭改动；不能把这次 CI 结果标记为后续源码的完整验证。
