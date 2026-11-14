@@ -136,5 +136,12 @@ NSCC 开关、IPv4 UDP/IPv6 native、首包丢失、只有信用字段丢失而�
 发现公共 PDC 读取了发起端专有 close_req，未运行新测试。修正后使用两类 PDC 的
 关闭状态查询，并在 QUIESCE/关闭转换时立即通知 CMS。新增原生双 Job 事务，在旧
 PDC 仍受65毫秒 SYN 关闭保护时，检查新 RUD PDC 取得不同 CCC_ID。
-修正后的接入代码尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
+`03a2b82fcc48e5dba15fa0ea50239bd53046e90d` 已完成两个构建。首次两个普通
+CTest 中，context 测试通过，但首个集成事务超时；诊断轨迹显示只有256字节授权、
+没有 SES handoff 后的缓冲返还。原因是目标处理 SYN 前的调度查询缓存了旧/未建立的
+CCC 身份。现在等待目标 establishContext 后再查询 CCC；失败日志保留于
+`/tmp/softue-tfc-runtime-03a-initial-tests.log` 与
+`/tmp/softue-tfc-integration-03a-debug-tests.log`。故障夹具也改为在源发出 Credit Request
+之前屏蔽所有信用载体，保留普通 PDS/SES 确认，避免另一个 CP 掩盖定时器路径。
+这些修正尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。

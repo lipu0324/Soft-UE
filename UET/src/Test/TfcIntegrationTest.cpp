@@ -10,12 +10,13 @@ using namespace UET::SES;
 using namespace UET::NetworkLayer;
 
 namespace {
-enum class Fault { None, FirstData, FirstCredit };
+enum class Fault { None, FirstData, CreditFeedback };
 
 class CreditFaultPort final : public IPacketPort {
 public:
-    CreditFaultPort(IPacketPort& lower,EventLoop& loop,WireOptions network,Fault fault,bool nscc)
-        : lower_(lower),loop_(loop),network_(network),fault_(fault),nscc_(nscc) {}
+    CreditFaultPort(IPacketPort& lower,EventLoop& loop,WireOptions network,Fault fault,
+                    std::shared_ptr<bool> credit_blackout={})
+        : lower_(lower),loop_(loop),network_(network),fault_(fault),credit_blackout_(std::move(credit_blackout)) {}
     size_t data_packets=0,retransmissions=0,credit_requests=0,credit_packets=0,lost=0;
     std::set<uint16_t> data_paths;
     std::map<uint16_t,uint8_t> context_identifiers;
@@ -35,19 +36,21 @@ public:
             const auto& control=packet.PDS_header.RUOD_cp_header;
             if (control.ctl_type==Credit || control.ctl_type==Credit_req) {
                 CHECK(!control.psn && !control.flags.syn && !control.flags.ar);
-                if (control.ctl_type==Credit_req) ++credit_requests;
+                if (control.ctl_type==Credit_req) {
+                    ++credit_requests;
+                    if (credit_blackout_) *credit_blackout_=false;
+                }
                 else {
                     ++credit_packets;
-                    if (fault_==Fault::FirstCredit && nscc_) { fault_=Fault::None; return discard(frame); }
+                    if (credit_blackout_ && *credit_blackout_) return discard(frame);
                 }
             }
         }
-        if (!nscc_ && fault_==Fault::FirstCredit && packet.PDS_type==RUOD_ack_header &&
+        if (credit_blackout_ && *credit_blackout_ && packet.PDS_type==RUOD_ack_header &&
             packet.PDS_header.RUOD_ack_header.type==ACK_CC && packet.congestion_ack.type==1 &&
             packet.congestion_ack.credit_units) {
             // Deliver the ordinary PDS/SES receipt but lose its credit field.
             // A data RTO can no longer rescue this stall; the credit timer must.
-            fault_=Fault::None;
             ++lost;
             auto receipt=packet;
             receipt.PDS_header.RUOD_ack_header.type=ACK;
@@ -64,7 +67,7 @@ private:
     EventLoop& loop_;
     WireOptions network_;
     Fault fault_;
-    bool nscc_;
+    std::shared_ptr<bool> credit_blackout_;
     SendResult discard(const Frame& frame) {
         ++lost;
         if (frame.transmission_event) frame.transmission_event(loop_.now(),TransmitOutcome::Started);
@@ -80,8 +83,12 @@ void transaction(bool ordered,bool nscc,Fault fault,RequestHeaderFormat format,b
     network.ipv6=ipv6_native;
     network.udp=!ipv6_native;
     network.native_ip_protocol=253;
-    CreditFaultPort forward(fabric.add_host(1),loop,network,fault==Fault::FirstData ? fault : Fault::None,nscc);
-    CreditFaultPort reverse(fabric.add_host(2),loop,network,fault==Fault::FirstCredit ? fault : Fault::None,nscc);
+    // Suppress every credit carrier until the source actually requests it.
+    // Merely losing one ACK field is insufficient when a parallel CP can
+    // deliver the same cumulative grant before the source's credit timer.
+    auto credit_blackout=std::make_shared<bool>(fault==Fault::CreditFeedback);
+    CreditFaultPort forward(fabric.add_host(1),loop,network,fault==Fault::FirstData ? fault : Fault::None,credit_blackout);
+    CreditFaultPort reverse(fabric.add_host(2),loop,network,Fault::None,credit_blackout);
     LinkConfig link;
     link.delay_ns=1000;
     fabric.add_link(1,2,link);
@@ -118,7 +125,9 @@ void transaction(bool ordered,bool nscc,Fault fault,RequestHeaderFormat format,b
     CHECK(forward.data_packets==1); // No reverse feedback can have returned.
     loop.run_until(100*kMillisecond);
     Completion completion{};
-    if (!source.poll_completion(completion)) {
+    const bool completed=source.poll_completion(completion);
+    if (!completed || completion.status!=CompletionStatus::Success || completion.length!=512) {
+        std::cerr << "completed=" << completed << " status=" << int(completion.status) << " length=" << completion.length << '\n';
         std::cerr << "TFC incomplete ordered=" << ordered << " nscc=" << nscc << " fault=" << int(fault)
                   << " format=" << int(format) << " ipv6=" << ipv6_native << '\n';
         for (const auto& event:trace.events())
@@ -131,8 +140,8 @@ void transaction(bool ordered,bool nscc,Fault fault,RequestHeaderFormat format,b
     CHECK(target_host.tfc()->reserved_receive_bytes()<=flow.receive_pool_bytes);
     CHECK(ordered ? forward.data_paths.size()==1 : forward.data_paths.size()>1);
     if (fault==Fault::FirstData) CHECK(forward.lost==1 && forward.retransmissions>0);
-    if (fault==Fault::FirstCredit) {
-        CHECK(reverse.lost==1 && forward.credit_requests>0 && reverse.credit_packets>0);
+    if (fault==Fault::CreditFeedback) {
+        CHECK(reverse.lost>=1 && forward.credit_requests>0 && reverse.credit_packets>0);
         CHECK(std::any_of(trace.events().begin(),trace.events().end(),[](const auto& event) {
             return event.event=="tfc_credit_timer";
         }));
@@ -151,7 +160,7 @@ void real_last_member_quiesce() {
     EventLoop loop;
     Trace trace(loop);
     Fabric fabric(loop,trace,37);
-    CreditFaultPort forward(fabric.add_host(1),loop,{},Fault::None,false);
+    CreditFaultPort forward(fabric.add_host(1),loop,{},Fault::None);
     auto& reverse=fabric.add_host(2);
     fabric.add_link(1,2,{});
     fabric.add_link(2,1,{});
@@ -204,7 +213,7 @@ int main() {
     try {
         for (const bool ordered : {false,true})
             for (const bool nscc : {false,true})
-                for (const auto fault : {Fault::None,Fault::FirstData,Fault::FirstCredit})
+                for (const auto fault : {Fault::None,Fault::FirstData,Fault::CreditFeedback})
                     for (const auto format : {RequestHeaderFormat::Standard,RequestHeaderFormat::Medium})
                         for (const bool ipv6_native : {false,true})
                             transaction(ordered,nscc,fault,format,ipv6_native);

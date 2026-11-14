@@ -235,6 +235,10 @@ void PDC::bindCongestionContext(pdc_mode delivery_mode) {
 
 void PDC::updateCreditActivity() const {
     if (!runtime_ || !runtime_->congestion_control || !runtime_->congestion_control->accepts_credit_requests()) return;
+    // An unopened target may already have a queued SYN, but has not learned
+    // its start PSN or delivery mode. Do not cache a fictitious CCC identity
+    // during that scheduling query; establishContext binds the validated one.
+    if (state==CLOSED && tx_req_q.empty()) return;
     const bool pending_data=std::any_of(tx_pkt_map.begin(),tx_pkt_map.end(),[this](const auto& item) {
         const auto cached=tx_pkt_buffer.find(item.first);
         return !item.second.delivery_confirmed && cached!=tx_pkt_buffer.end() && cached->second.PDS_type==RUOD_req_header;
