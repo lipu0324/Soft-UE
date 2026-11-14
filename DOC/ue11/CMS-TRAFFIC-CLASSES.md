@@ -29,3 +29,38 @@ PDC 创建、NIC 排队和 DSCP/TC 配置贯穿连接。`PdsHost::enable_tfc` �
 完整176项整合验证在另一份固定源 `6f4115d818d65eb75213ba1364df5a359ab76fde`
 上进行，位于 `/workspace/Soft-UE-tfc-runtime`。该版本没有本文件所述 TC 字段增量；
 即使176项通过，也不能作为这里新增第177项或多 TC 功能的证据。
+
+## 正在接入的原生数据路径
+
+后续增量增加 `Operation::traffic_class`，默认0，在任何同步成员、消息 ID 或 MR
+预约之前检查合法性。非零类必须先通过
+`PdsHost::configure_data_traffic_class(traffic_class, dscp)` 配置。当前本地 NIC 有8个
+队列类，DSCP 必须为0～63、不能与另一个数据类重复，也不能使用模拟器控制 DSCP48。
+这是一套显式仿真配置，不是协议新增字段或固定的标准 DSCP 分配。
+
+```mermaid
+flowchart LR
+  Application[Operation.traffic_class] --> Request[SES_PDS_req.tc]
+  Request --> Mapping[PDC mapping tuple]
+  Mapping --> PDC[PDC immutable data TC]
+  PDC --> CMS[NSCC / TFC group key]
+  PDC --> NIC[Frame queue class]
+  NIC --> Wire[Configured IP DSCP]
+```
+
+PDC 创建时先设置数据类，再绑定 CMS；缓存重传保留同一类。编号 ROD NOOP/Close
+沿该数据类排队，避免通过控制队列越过早先数据。ACK 和 Credit 等反向控制仍使用
+控制类1。`open_connection` 的最后一个可选参数也允许选择已配置的数据类。
+
+接收 upcall 的 `local_data_traffic_class` 是接收 PDC 本地的发送类，用于精确 CMS
+buffer lease 身份；它不从对端 DSCP 推导。比如本机 TC3 发起 READ，对端可在其
+默认 TC0 返回数据，本机的 upcall 仍必须匹配本机 PDC 的 TC3 上下文以释放缓冲。
+
+`native_traffic_class_test` 新增16个真实双流 NIC 场景、4个反向 READ 场景及配置/提交
+边界。它检查实际 DSCP/Frame queue、不同 CCC_ID、受阻 TC0 不阻止 TC3 完成、
+编号 ROD NOOP 的队列，以及无效/未配置类在分配 PDC 之前拒绝。此接入尚未编译；
+正在等待固定6f版本的176项全量 Sanitizer 回归结束，期间不启动其他编译。
+
+这一版接入先支持可靠 RUD/ROD 的最佳努力网络。非零 RUDI/UUD 类仍明确拒绝；多
+数据 TC 与旧单一 trimming 配置的组合也在配置时拒绝，下一步需要统一每个 TC 的
+data/NO_TRIM/trimmed DSCP 分类与交换机配置。不能据此宣告完整多 TC Profile。

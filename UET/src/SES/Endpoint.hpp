@@ -84,6 +84,7 @@ struct Operation {
     // §3.4.3.2: explicit single-packet format selection. Standard stays the
     // default; selecting a format does not expand its supported operations.
     RequestHeaderFormat header_format=RequestHeaderFormat::Standard;
+    uint8_t traffic_class=0; // Local reliable-data TC; configure its DSCP/queue policy on PdsHost first.
 };
 // Ignore bits apply to the tag only. An omitted initiator matches any source;
 // a specified rank is interpreted inside the posting's JobID, even with absolute addressing.

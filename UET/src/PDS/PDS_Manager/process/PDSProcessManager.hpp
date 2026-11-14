@@ -177,9 +177,9 @@ public:
         if (pds_process_info) pds_process_info->pds_instance->cancelQueuedMessage(peer,job,message_id);
     }
     uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
-                             UET::PDS::PdcMappingIdentity identity={}) {
+                             UET::PDS::PdcMappingIdentity identity={},uint8_t data_traffic_class=0) {
         std::lock_guard<std::mutex> lock(manager_mutex);
-        return pds_process_info?pds_process_info->pds_instance->openWithControl(local_node,peer,job,mode,negotiation,identity):UINT16_MAX;
+        return pds_process_info?pds_process_info->pds_instance->openWithControl(local_node,peer,job,mode,negotiation,identity,data_traffic_class):UINT16_MAX;
     }
 
     /**

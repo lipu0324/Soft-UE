@@ -95,6 +95,12 @@ auto Endpoint::submit(Operation operation) -> uint64_t {
     if (closed_) throw std::logic_error("endpoint closed");
     if (next_operation_==UINT64_MAX) throw std::overflow_error("operation ids exhausted");
     const auto application_operation_id=++next_operation_;
+    if (operation.traffic_class>=8 || !host_.supports_data_traffic_class(operation.traffic_class) ||
+        (operation.traffic_class && (operation.delivery_mode==RUDI || operation.type==OperationType::DatagramSend))) {
+        const auto status=operation.traffic_class>=8 ? CompletionStatus::InvalidRequest : CompletionStatus::Unsupported;
+        completions_.push_back({application_operation_id,operation.context,status,0,0,false});
+        return application_operation_id; // Refuse before consuming a Sync Group member or local MR authority.
+    }
     if (operation.type==OperationType::SynchronizedWrite || operation.type==OperationType::SynchronizedAtomic)
         start_synchronized_source(std::move(operation),application_operation_id);
     else if (operation.synchronization)
@@ -937,6 +943,7 @@ auto Endpoint::deferred_receive_handle(const PDC_SES_req& request) -> PDC_SES_re
     handle.PDCID=request.PDCID; handle.rx_pkt_handle=request.rx_pkt_handle;
     handle.orig_psn=request.orig_psn; handle.source_fep=request.source_fep;
     handle.connection_start_psn=request.connection_start_psn; handle.delivery_mode=request.delivery_mode;
+    handle.local_data_traffic_class=request.local_data_traffic_class;
     handle.pkt.bth_type=Standard_Header; handle.pkt.bth_header=request.pkt.bth_header;
     return handle;
 }
@@ -1497,6 +1504,7 @@ auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
         request.src_fep=node_; request.dst_fep=operation.peer;
         request.source_pid=operation.source_pid;
         request.mode=datagram?UUD:operation.delivery_mode;
+        request.tc=operation.traffic_class;
         request.next_hdr=UET_HDR_REQUEST_STD; request.rod_context=1; request.lock_pdc=true;
         request.tx_pkt_handle=message; request.pkt.bth_type=Standard_Header;
         // Queue establishment through the original manager's transmit

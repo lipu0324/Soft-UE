@@ -470,6 +470,12 @@ public:
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    void configureDataTrafficClass(uint8_t traffic_class) {
+        if (traffic_class>=8 || congestion_connection_)
+            throw std::logic_error("configure PDC data traffic class before binding CMS");
+        data_traffic_class_=traffic_class;
+    }
+    uint8_t dataTrafficClass() const { return data_traffic_class_; }
     virtual bool creditQuiescing() const {
         return closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT;
     }
@@ -541,6 +547,7 @@ protected:
     void receiveProbe(const PDStoNET_pkt& packet);
     mutable bool congestion_engaged_=false;
     mutable std::optional<UET::CMS::Connection> congestion_connection_;
+    uint8_t data_traffic_class_=0;
     enum class RetryCause { Timeout, NegativeAcknowledgment };
     std::map<uint32_t,RetryCause> admission_deferred_retries_;
     void retryPacket(uint32_t sequence,RetryCause cause);
@@ -574,7 +581,7 @@ protected:
         // Before the first request is issued, its queued delivery mode has not
         // yet been committed by txReq. Admission must use that same future CCC.
         const auto delivery=(tx_cur_psn==start_psn && !tx_req_q.empty())?tx_req_q.front().delivery_mode:mode;
-        congestion_connection_=UET::CMS::Connection{dst_fep,SPDCID,start_psn,delivery==ROD};
+        congestion_connection_=UET::CMS::Connection{dst_fep,SPDCID,start_psn,delivery==ROD,data_traffic_class_};
         congestion_engaged_=true;
         return *congestion_connection_;
     }
@@ -728,7 +735,8 @@ public:
     }
     bool ownsReceiveExecution(const PDC_SES_req& request) const {
         if (state.load()==CLOSED || request.PDCID!=SPDCID || request.source_fep!=dst_fep ||
-            request.delivery_mode!=mode || request.connection_start_psn!=start_psn) return false;
+            request.delivery_mode!=mode || request.connection_start_psn!=start_psn ||
+            request.local_data_traffic_class!=data_traffic_class_) return false;
         const auto found=rx_pkt_map.find(request.rx_pkt_handle);
         return found!=rx_pkt_map.end() && found->second.psn==request.orig_psn;
     }
