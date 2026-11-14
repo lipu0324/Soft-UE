@@ -160,7 +160,10 @@ public:
         wake(); return true;
     }
     void set_request_handler(std::function<void(const PDC_SES_req&)> callback) {
-        request_handler_ = std::move(callback); wake();
+        request_handler_ = std::move(callback);
+        // Binding SES is configuration, not protocol work. Resume an existing
+        // upcall without inventing an event for an otherwise idle Host.
+        if (manager_.getQueueStatus().pdc_to_ses_req_count) wake();
     }
     void set_receive_admission(std::function<SemanticAdmission(const PDC_SES_req&)> reserve,
                                std::function<void(const PDC_SES_req&)> cancel) {

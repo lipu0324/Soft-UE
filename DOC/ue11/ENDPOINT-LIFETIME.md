@@ -254,3 +254,13 @@ Job 重建、注销、最后一个合法 key 和耗尽后不回绕；普通和 A
 前一源码 `aa9312b` 的七项 ASan/UBSan/泄漏定向回归全部通过（4.93s），
 日志 `/tmp/softue-receive-close-final-asan-tests.log`；不把它标记为本节自动 key 改动的
 sanitizer 事务验证。
+
+CI run196（`303c3d5e4fc1fc67cfbd214df0c374c500a64924`）普通 simulation 为131/133，
+失败的是 rendezvous_boundary_test 的空事件断言及 native_read_test 的生产者峰值断言；
+reference-wire 作业成功。固定 `e81265a` 的本地两项普通 probe 也复现相同失败，见
+`/tmp/softue-empty-bind-wake-before-tests.log`。原因是绑定 request handler 时无条件
+唤醒了空 Host，给同步本地验证失败留下了事件，并提前消耗首批生产者状态。
+现在只在 PDS-to-SES 请求队列非空时唤醒。两项修复后的独立可执行程序均通过，见
+`/tmp/softue-empty-bind-wake-rendezvous-after-tests.log`、
+`/tmp/softue-empty-bind-wake-read-after-tests.log`；完整修复版结果仍需后续核对。
+旧 `e81265a` 的 sanitizer 全量构建在确认此回归后主动中断，不把它记录为全量通过。
