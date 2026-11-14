@@ -115,5 +115,7 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 参考解析或事务互通证据，也不构成任何Profile验收声明。
 
 优化 fetching 的首轮四项普通回归通过（5.52s），包括1664个新场景及标准头 fetching 回归，
-见 `/tmp/softue-optimized-fetch-tests.log`。并发与 sanitizer 证据待其执行完成后补记；
+见 `/tmp/softue-optimized-fetch-tests.log`。1664组取回加40组并发的普通两项通过（4.25s），见 `/tmp/softue-optimized-fetch-concurrent-tests.log`；
+8项 ASan/UBSan/泄漏检查全部通过（37.45s），见 `/tmp/softue-optimized-fetch-asan-tests.log`，
+包含优化 WRITE/非取回原子/权限/畸形与标准 fetching 回归；
 期间存在其他构建，因此上述耗时只记录测试运行，不作为性能结果。
