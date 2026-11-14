@@ -669,9 +669,12 @@
       "id": "CMS-TFC",
       "reference": "§3.6.15",
       "summary": "TFC 信用与重传规则",
-      "status": "missing",
-      "tests": [],
-      "profiles": []
+      "status": "partial",
+      "tests": [
+        "tfc_credit_test"
+      ],
+      "profiles": [],
+      "evidence_note": "Pure source credit/cell law added, with immutable configuration, signed byte balance, free locally owned retransmissions, independent24bit cumulative grant decoding and atomic overflow rejection. Literal specification examples and576configuration properties added but not yet compiled/tested. Confirmed PDF505 pseudocode>>8 contradicts wire units256bytes and RCCC<<8; explicit unit interpretation is recorded. No PDS/NIC gating, destination allocation, credit CP/ACK/timer/sharedCCC/quiesce integration or Endpoint capability yet. See TRANSPORT-FLOW-CONTROL.md; no complete TFC/M5/Profile claim."
     },
     {
       "id": "NET-CSIG",
