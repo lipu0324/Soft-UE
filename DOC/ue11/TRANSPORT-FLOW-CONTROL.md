@@ -168,3 +168,21 @@ SYN保护的 Close 后，第二发送方通过原 PDS 重试成功，预算始�
 并在 group key 中显式保留 RUD/ROD 模式。新的整合版本尚待范围与全量编译验证。
 完整资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。
+
+
+## 完整整合回归中的 CQ 夹具问题
+
+固定源 `6f4115d818d65eb75213ba1364df5a359ab76fde` 完成全部176项构建，普通回归
+176/176通过（132.50秒）。ASan/UBSan/leak 为175/176通过（716.59秒），失败项为
+`libfabric_rendezvous_recovery_processes`。完整现场保留于
+`build/libfabric-process-failure-3xvgsu3n`，全量日志为
+`/tmp/softue-tfc-full-{normal,asan}-tests.log`。同源单项重跑通过（9.74秒），不能用此
+覆盖全量失败。首次 CHECK 退出后产生的清理泄漏报告不应掩盖先发生的 CQ 断言。
+
+夹具把第一个接收 CQ 当作 context11的大消息、第二个当作 context12的小消息。
+但 provider 显式报告 `rx_attr.comp_order=FI_ORDER_NONE`；libfabric 2.0 的
+`fi_endpoint(3)` 明确区分 `msg_order` 与 `comp_order`。小 eager 消息可先完成，
+而早先匹配的 rendezvous READ 仍在进行。修正后以真实 op_context 校验对应长度、
+每个 context 恰好一次，并保留两个缓冲的完整字节检查；不再断言未提供的 CQ 顺序。
+这只修改公共 API 测试夹具，没有更改 TFC 或 provider 协议逻辑。修正版本的范围及
+完整回归仍待验证，尚不将完整176项 Sanitizer 声明为通过。
