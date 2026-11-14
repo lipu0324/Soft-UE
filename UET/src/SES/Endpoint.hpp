@@ -106,6 +106,7 @@ struct Completion {
 struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
     bool optimized_small_write=true,optimized_medium_write=true,optimized_medium_send=true;
+    bool optimized_small_atomic=true,optimized_medium_atomic=true;
     bool datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
@@ -147,6 +148,7 @@ public:
             !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
         capabilities_.optimized_small_write=capabilities_.optimized_medium_write=capabilities_.optimized_medium_send=host_.services().standard_wire;
+        capabilities_.optimized_small_atomic=capabilities_.optimized_medium_atomic=host_.services().standard_wire;
         capabilities_.rudi_write=capabilities_.rudi_read=host_.services().standard_wire;
         host_.configure_semantic_payload_mtu(static_cast<uint32_t>(mtu_));
         host_.set_receive_admission(
@@ -263,12 +265,13 @@ private:
             const bool small=operation.header_format==RequestHeaderFormat::Small;
             const bool medium=operation.header_format==RequestHeaderFormat::Medium;
             const bool write=operation.type==OperationType::Write;
+            const bool atomic=operation.type==OperationType::Atomic;
             const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
             if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
-                (operation.type!=OperationType::Noop && !write && !(medium && send)) || (write && operation.immediate_data)) {
+                (operation.type!=OperationType::Noop && !write && !atomic && !(medium && send)) || (write && operation.immediate_data)) {
                 complete_local(CompletionStatus::Unsupported); return 0;
             }
-            if (small && write) {
+            if (small && (write || atomic)) {
                 try { MemoryKeyFormat::validate(operation.remote_key,KeyAssignment::Provider); }
                 catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return 0; }
                 if (!(operation.remote_key&MemoryKeyFormat::Optimized)) { complete_local(CompletionStatus::InvalidRequest); return 0; }
@@ -1783,9 +1786,12 @@ private:
                     optimized_header.initiator=standard.initiator; optimized_header.match_bits=standard.match_bits;
                 } else {
                     auto& optimized_header=request.pkt.bth_header.Optimized_Header; fill(optimized_header);
-                    if (standard.opcode==1) optimized_header.resource_index=operation.remote_key&0xfff;
+                    if (standard.opcode==1 || standard.opcode==3) optimized_header.resource_index=operation.remote_key&0xfff;
                 }
-                request.pkt_len=static_cast<uint16_t>((medium?32:20)+request.pkt.payload.size());
+                // pkt_len includes the operation extension as well as the
+                // optimized base header. PDS/CMS must account the actual SES
+                // bytes, even though the wire codec encodes fields itself.
+                request.pkt_len=static_cast<uint16_t>((medium?32:20)+(atomic?4:0)+request.pkt.payload.size());
             }
             const bool rudi=operation.delivery_mode==RUDI;
             if (rudi && read_failed) {
@@ -3072,9 +3078,9 @@ private:
         };
         const auto& header=request.pkt.bth_header.Standard_Header;
         if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
-        if ((header.opcode!=0 && header.opcode!=1 && !(medium && (header.opcode==5 || header.opcode==9))) ||
+        if ((header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && !(medium && (header.opcode==5 || header.opcode==9))) ||
             (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
-        if (!small || header.opcode!=1) { receive_standard(request); return; }
+        if (!small || (header.opcode!=1 && header.opcode!=3)) { receive_standard(request); return; }
         if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
         try {
             const auto selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
@@ -3087,7 +3093,7 @@ private:
             // before the ordinary WRITE consistency and permission checks.
             if (!owner.initialized) owner.key=projected.pkt.bth_header.Standard_Header.match_bits;
             // Resolving an index is not access authorization. The existing
-            // WRITE path below still checks live MR rights, scope and bounds.
+            // WRITE/atomic path below still checks live MR rights, scope and bounds.
             receive_standard(projected);
         } catch (const AddressingError& error) { reject(error.code,error.generation); }
         catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }

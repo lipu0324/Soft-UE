@@ -99,14 +99,15 @@
         "optimized_transaction_test",
         "optimized_fault_test",
         "optimized_safety_test",
-        "optimized_malformed_test"
+        "optimized_malformed_test",
+        "optimized_atomic_test"
       ],
       "profiles": [
         "AI_BASE",
         "AI_FULL",
         "HPC"
       ],
-      "evidence_note": "STD plus scale-out SMALL20/MEDIUM32/dataSmall12 explicit wire layouts have120 golden carrier/IP/CRC/operation vectors. Native SMALL WRITE/NOOP and MEDIUM WRITE/NOOP/SEND/tagged now use PSN-based target identity and trusted local source submission metadata, wire response MID0, checked optimized MR index resolution, real PDS retries/default/Clear. Focused88 transaction+96 fault+62 authority/boundary+28 malformed/reader scenarios cover selected RUD/ROD and NSCC combinations; six admission/fence cases retain unsupported dataSmall boundary. Native optimized READ/atomic/Sync, data responses, provider selection and full Profile acceptance remain open. Pinned parser explicitly rejects all three optimized formats; no optimized reference interoperability claim. See OPTIMIZED-HEADERS.md."
+      "evidence_note": "STD plus scale-out SMALL20/MEDIUM32/dataSmall12 explicit wire layouts have120 golden carrier/IP/CRC/operation vectors. Native SMALL WRITE/NOOP/integer atomic and MEDIUM WRITE/NOOP/SEND/tagged/integer atomic now use PSN-based target identity and trusted local source submission metadata, wire response MID0, checked optimized MR index resolution, real PDS retries/default/Clear. Focused88 transaction+144 fault+62 authority/boundary+28 malformed/reader scenarios cover selected RUD/ROD and NSCC combinations; six admission/fence cases retain unsupported dataSmall boundary. 800 independent integer arithmetic/boundary/rejection cases cover non-fetching atomics. Native optimized READ/fetch/tagged/float atomic/Sync, data responses, provider selection and full Profile acceptance remain open. Pinned parser explicitly rejects all three optimized formats; no optimized reference interoperability claim. See OPTIMIZED-HEADERS.md."
     },
     {
       "id": "PDS-MAPPING",

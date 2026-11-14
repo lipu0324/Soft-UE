@@ -125,10 +125,11 @@ int main() {
             OptimizedFault::ResponseLoss,OptimizedFault::RequestDuplicate,OptimizedFault::ResponseDuplicate,
             OptimizedFault::Reorder,OptimizedFault::ClearLoss}) {
             recovery(RequestHeaderFormat::Small,OperationType::Write,mode,congestion,fault); ++cases;
-            for (auto type:{OperationType::Write,OperationType::Send,OperationType::TaggedSend}) {
+            recovery(RequestHeaderFormat::Small,OperationType::Atomic,mode,congestion,fault); ++cases;
+            for (auto type:{OperationType::Write,OperationType::Atomic,OperationType::Send,OperationType::TaggedSend}) {
                 recovery(RequestHeaderFormat::Medium,type,mode,congestion,fault); ++cases;
             }
         }
-        CHECK(cases==96); std::cout<<"PASS96 no-MID packet faults, same-PDC concurrency, exact placement/CQ and Clear recovery\n";
+        CHECK(cases==144); std::cout<<"PASS144 no-MID packet faults, same-PDC concurrency, exact WRITE/atomic placement/CQ and Clear recovery\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
