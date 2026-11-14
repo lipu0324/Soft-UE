@@ -158,3 +158,8 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 `/tmp/softue-optimized-read-generation-before-tests2.log`。修复后的4项普通回归通过（0.68s），见 `/tmp/softue-optimized-read-final-normal-tests.log`，
 包含112事务、72并发、63权限/注册身份/代次和既有优化权限用例。修复后的6项 ASan/UBSan/泄漏回归全部通过（5.93s），日志
 `/tmp/softue-optimized-read-final-asan-tests.log`，包含共享 Clear 与 STD READ ACK-data 路径。这些定向检查期间其他工作树仍在构建，耗时不代表网络性能。
+
+整合到 `ee249ccda89271fac96ff7e0426e7427a30e00a0` 后，GitHub Actions176
+（run43541570125）的 simulation OFF、simulation ON（sanitizer）与 reference-wire
+三项工作全部成功。参考工作仍只证明其共同支持的 STD/其他既有格式，不能改写为
+优化格式参考互通通过。后续 Endpoint 生命周期改动有独立证据。
