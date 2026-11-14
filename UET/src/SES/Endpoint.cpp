@@ -927,6 +927,12 @@ auto Endpoint::rendezvous_response_handle(const PDC_SES_req& request) -> PDC_SES
     // Keep only the protocol handle/header while waiting for a RUD hole.
     // Eager bytes have already been placed or intentionally discarded.
     PDC_SES_req handle{};
+    // The local Standard_Header projection does not change wire identity
+    // (§3.4.3.2). Optimized requests remain PSN-owned; losing this format
+    // would make a delayed group action look for an unrelated MID0 message.
+    handle.request_wire_format=request.request_wire_format;
+    handle.next_hdr=request.next_hdr; handle.orig_pdcid=request.orig_pdcid;
+    handle.pkt_len=request.pkt_len;
     handle.PDCID=request.PDCID; handle.rx_pkt_handle=request.rx_pkt_handle;
     handle.orig_psn=request.orig_psn; handle.source_fep=request.source_fep;
     handle.connection_start_psn=request.connection_start_psn; handle.delivery_mode=request.delivery_mode;
