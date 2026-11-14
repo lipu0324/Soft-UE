@@ -112,6 +112,7 @@ struct EndpointCapabilities {
     bool datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
+    bool use_once_rma=true; // Native RegionOptions; not a public libfabric extension claim.
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
     bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
@@ -301,6 +302,10 @@ private:
         uint64_t receive_order=0,tag=0;
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
+        // Pin both the registration incarnation and the logical RMA owner.
+        // RX handles change on READ re-execution; this capability must not.
+        std::optional<Region> rma_registration;
+        RmaMessageOwnerToken rma_owner;
         uint32_t captured_header=0,reserved_restart=0,deferrable_source_token=0;
         uint64_t rendezvous_target=0;
         bool rendezvous_eager=false;
@@ -547,6 +552,7 @@ private:
                      uint64_t context,uint16_t resource_index,std::optional<TaggedReceiveMatch> match,std::optional<uint32_t> initiator={});
     static std::optional<uint64_t> received_tag(const Incoming& message);
     void release_unexpected(Incoming& message);
+    void retire_rma_registration(Incoming& message);
     void match_unexpected();
 
     // First-error state belongs to a whole message, not to its first packet.

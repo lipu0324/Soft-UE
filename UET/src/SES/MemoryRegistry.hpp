@@ -27,6 +27,12 @@ enum class Access : uint8_t { Read = 1, Write = 2, Atomic = 4 };
 enum class MemoryAccessOrigin { RemoteRequest, LocalPlacement, RendezvousSource };
 inline uint8_t operator|(Access a, Access b) { return static_cast<uint8_t>(a) | static_cast<uint8_t>(b); }
 
+// This local capability identifies one logical RMA message, not one packet or
+// RX execution. In particular an uncached READ may execute again after loss
+// (§3.5.17), while a second message must not reuse a use-once buffer (§3.4.2.6.1).
+struct RmaMessageOwner {};
+using RmaMessageOwnerToken = std::shared_ptr<const RmaMessageOwner>;
+
 // Storage selection is local policy. Remote requests see only a registered key
 // and a checked offset (§3.4.4); they never supply a process pointer.
 class MemoryStorage {
@@ -129,6 +135,7 @@ struct Region {
     std::optional<uint16_t> pid_scope;
     bool local_placement_only=false; // Trusted postings/results may use this region; a wire key cannot grant RMA access.
     bool rendezvous_source_only=false; // Only a trusted transaction may create a peer-bound read-only view.
+    bool use_once=false;
 };
 
 struct RegionOptions {
@@ -139,6 +146,7 @@ struct RegionOptions {
     bool bind_zero_pid=false; // Auto keys preserve the legacy domain-scope default for pid=0.
     bool local_placement_only=false;
     bool rendezvous_source_only=false;
+    bool use_once=false; // §3.4.4.1: exclusive to the first authorized logical RMA message.
 };
 
 enum class Atomic64 { Add, Swap, CompareSwap, And, Or, Xor, Min, Max };
@@ -161,7 +169,10 @@ public:
         jobs_.erase(job);
         for (auto bucket=regions_.begin();bucket!=regions_.end();) {
             auto& entries=bucket->second;
-            entries.remove_if([job](const Region& region) { return region.job==job; });
+            entries.remove_if([&](const Region& region) {
+                if (region.job!=job) return false;
+                use_once_owners_.erase(region.registration_id); return true;
+            });
             if (entries.empty()) bucket=regions_.erase(bucket); else ++bucket;
         }
     }
@@ -205,6 +216,7 @@ public:
         region.registry_authority=authority_;
         region.local_placement_only=options.local_placement_only;
         region.rendezvous_source_only=options.rendezvous_source_only;
+        region.use_once=options.use_once;
         if (pid || options.bind_zero_pid || options.requested_key) region.pid_scope=pid;
         // §2.2.5.3.4.1: non-optimized key namespaces include Job/PID/RI.
         // Equal numeric application keys may identify independent regions in
@@ -229,6 +241,7 @@ public:
         const auto found=regions_.find(key);
         if (found==regions_.end()) return false;
         if (found->second.size()!=1) throw std::invalid_argument("ambiguous memory key; revoke its registration handle");
+        use_once_owners_.erase(found->second.front().registration_id);
         regions_.erase(found); return true;
     }
     bool deregister(const Region& registration) {
@@ -240,6 +253,7 @@ public:
             return region.registration_id==registration.registration_id;
         });
         if (entry==entries.end()) return false;
+        use_once_owners_.erase(entry->registration_id);
         entries.erase(entry); if (entries.empty()) regions_.erase(found); return true;
     }
     // Table2-47: optimized indices are scoped by Job/PID, or PID alone for
@@ -275,34 +289,32 @@ public:
     }
     const Region& authorize(uint32_t job,uint16_t pid,uint64_t key,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},
-                            bool relative_addressing=true,MemoryAccessOrigin origin=MemoryAccessOrigin::RemoteRequest) const {
-        if (!regions_.count(key) && (relative_addressing || !regions_.count(key^kIdempotentSafe)))
-            throw MemoryAccessError(MemoryError::InvalidKey);
-        const Region* selected=nullptr;
-        bool job_found=false,pid_found=false,ambiguous=false;
-        unsigned specificity=0;
-        const size_t metadata_variants=relative_addressing?1:2;
-        for (size_t variant=0;variant<metadata_variants;++variant) {
-            const auto bucket=regions_.find(key^(variant?kIdempotentSafe:0));
-            if (bucket==regions_.end()) continue;
-            for (const auto& region:bucket->second) {
-                if (relative_addressing && (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))) continue;
-                job_found=true;
-                if (region.pid_scope && *region.pid_scope!=pid) continue;
-                pid_found=true;
-                if (resource_index && region.resource_index && resource_index!=region.resource_index) continue;
-                const unsigned score=(relative_addressing && !region.allow_any_job?4u:0u)+(region.pid_scope?2u:0u)+(resource_index && region.resource_index?1u:0u);
-                if (!selected || score>specificity) { selected=&region; specificity=score; ambiguous=false; }
-                else if (score==specificity) ambiguous=true;
-            }
-        }
-        if (!job_found) throw MemoryAccessError(MemoryError::WrongJob);
-        if (!pid_found) throw MemoryAccessError(MemoryError::WrongEndpoint);
-        if (!selected || ambiguous || selected->key!=key) throw MemoryAccessError(MemoryError::InvalidKey);
-        // Table 2-17: absolute addressing does not use JobID to select a
-        // buffer. Ambiguous equal keys are rejected before Job authorization.
-        return check_access(*selected,job,pid,offset,length,access,resource_index,origin);
+                            bool relative_addressing=true,MemoryAccessOrigin origin=MemoryAccessOrigin::RemoteRequest,
+                            const RmaMessageOwnerToken& owner={}) const {
+        return select_registration(job,pid,key,offset,length,access,resource_index,relative_addressing,origin,owner,false);
     }
+    Region claim_rma_registration(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint64_t length,
+                                  Access access,std::optional<uint16_t> resource_index,bool relative_addressing,
+                                  const RmaMessageOwnerToken& owner) {
+        if (!owner) throw std::invalid_argument("RMA message owner is required");
+        const auto& region=select_registration(job,pid,key,offset,length,access,resource_index,relative_addressing,
+            MemoryAccessOrigin::RemoteRequest,owner,true);
+        // Validate the entire operation before consuming a grant. Atomic RMA
+        // needs read/write rights as well as atomic capability (§3.4.7.3).
+        if (access==Access::Atomic && (region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
+        if (region.use_once) use_once_owners_.emplace(region.registration_id,owner);
+        return region;
+    }
+    bool finish_rma_registration(const Region& registration,const RmaMessageOwnerToken& owner) {
+        if (!registration.use_once || registration.registry_authority.lock()!=authority_) return false;
+        const auto claim=use_once_owners_.find(registration.registration_id);
+        if (claim==use_once_owners_.end() || !same_owner(claim->second,owner)) return false;
+        // Retire on logical EOM Clear/connection close, not on the first ACK:
+        // uncached READ retries still need the original registration until
+        // then. Exact identity prevents a reused numeric key from being revoked.
+        return deregister(registration);
+    }
+    size_t retained_use_once_claims() const { return use_once_owners_.size(); }
     const Region& authorize_local(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,uint64_t length,
                                  Access access,std::optional<uint16_t> resource_index={}) const {
         // This entry is reached from a trusted local posting/operation, never
@@ -312,7 +324,8 @@ public:
     }
     const Region& authorize_registration(const Region& registration,uint32_t job,uint16_t pid,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},
-                            MemoryAccessOrigin origin=MemoryAccessOrigin::LocalPlacement) const {
+                            MemoryAccessOrigin origin=MemoryAccessOrigin::LocalPlacement,
+                            const RmaMessageOwnerToken& owner={}) const {
         if (registration.registry_authority.lock()!=authority_) throw MemoryAccessError(MemoryError::InvalidKey);
         const auto bucket=regions_.find(registration.key);
         if (bucket==regions_.end()) throw MemoryAccessError(MemoryError::InvalidKey);
@@ -322,7 +335,7 @@ public:
         if (found==bucket->second.end()) throw MemoryAccessError(MemoryError::InvalidKey);
         // A receive posting already selected a buffer. Authenticate that exact
         // live registration; never reselect by a peer's JobID or a reused key.
-        return check_access(*found,job,pid,offset,length,access,resource_index,origin);
+        return check_access(*found,job,pid,offset,length,access,resource_index,origin,owner,false);
     }
     void write(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
@@ -332,8 +345,9 @@ public:
         if (!bytes.empty()) region.storage->write(offset,bytes.data(),bytes.size());
     }
     void write_registration(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
-               const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={}) {
-        const auto& region=authorize_registration(registration,job,pid,offset,bytes.size(),Access::Write,resource_index);
+               const std::vector<uint8_t>& bytes,std::optional<uint16_t> resource_index={},
+               MemoryAccessOrigin origin=MemoryAccessOrigin::LocalPlacement,const RmaMessageOwnerToken& owner={}) {
+        const auto& region=authorize_registration(registration,job,pid,offset,bytes.size(),Access::Write,resource_index,origin,owner);
         // §3.4.2.12: a zero-byte write authorizes the address but writes no
         // memory. Storage adapters may observe calls, so do not call write(0).
         if (!bytes.empty()) region.storage->write(offset,bytes.data(),bytes.size());
@@ -343,6 +357,14 @@ public:
         const auto& region=authorize(job,pid,key,offset,length,Access::Read,resource_index,relative_addressing);
         std::vector<uint8_t> bytes(length);
         region.storage->read(offset,bytes.data(),length);
+        return bytes;
+    }
+    std::vector<uint8_t> read_registration(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
+                             size_t length,std::optional<uint16_t> resource_index={},
+                             MemoryAccessOrigin origin=MemoryAccessOrigin::LocalPlacement,const RmaMessageOwnerToken& owner={}) const {
+        const auto& region=authorize_registration(registration,job,pid,offset,length,Access::Read,resource_index,origin,owner);
+        std::vector<uint8_t> bytes(length);
+        region.storage->read(offset,bytes.data(),length); // Zero-byte READ still accesses the checked address (§3.4.2.12).
         return bytes;
     }
     // An atomic event is indivisible in the single-threaded protocol runtime.
@@ -376,13 +398,14 @@ public:
     std::vector<uint8_t> fetch_atomic_element(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                          IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
                          const std::vector<uint8_t>& operand,const std::vector<uint8_t>& compare_or_mask={},
-                         std::optional<uint16_t> resource_index={},bool relative_addressing=true,bool zero_length=false) {
+                         std::optional<uint16_t> resource_index={},bool relative_addressing=true,bool zero_length=false,
+                         const RmaMessageOwnerToken& owner={}) {
         const auto width=integer_atomic_width(datatype);
         if (offset%width) throw MemoryAccessError(MemoryError::Alignment);
         if (zero_length && (operation!=IntegerAtomicOperation::Read && operation!=IntegerAtomicOperation::Write))
             throw std::invalid_argument("zero-byte atomic is put/get only");
         if (zero_length && (!operand.empty() || !compare_or_mask.empty())) throw std::invalid_argument("zero-byte atomic has operands");
-        const auto& region=authorize(job,pid,key,offset,zero_length?0:width,Access::Atomic,resource_index,relative_addressing);
+        const auto& region=authorize(job,pid,key,offset,zero_length?0:width,Access::Atomic,resource_index,relative_addressing,MemoryAccessOrigin::RemoteRequest,owner);
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
         if (zero_length) {
             // §3.4.2.12 requires an actual zero-byte read at the selected
@@ -401,11 +424,12 @@ public:
     }
     void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
                          IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
-                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={},bool relative_addressing=true) {
+                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={},bool relative_addressing=true,
+                         const RmaMessageOwnerToken& owner={}) {
         const auto element_width=integer_atomic_width(datatype);
         if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
         if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
-        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index,relative_addressing);
+        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index,relative_addressing,MemoryAccessOrigin::RemoteRequest,owner);
         // §3.4.7.3: atomics need both read and write permission in addition
         // to the explicit atomic capability of this simulator's MR model.
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
@@ -423,8 +447,43 @@ public:
         }
     }
 private:
+    const Region& select_registration(uint32_t job,uint16_t pid,uint64_t key,
+                            uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index,
+                            bool relative_addressing,MemoryAccessOrigin origin,
+                            const RmaMessageOwnerToken& owner,bool permit_unclaimed) const {
+        if (!regions_.count(key) && (relative_addressing || !regions_.count(key^kIdempotentSafe)))
+            throw MemoryAccessError(MemoryError::InvalidKey);
+        const Region* selected=nullptr;
+        bool job_found=false,pid_found=false,ambiguous=false;
+        unsigned specificity=0;
+        const size_t metadata_variants=relative_addressing?1:2;
+        for (size_t variant=0;variant<metadata_variants;++variant) {
+            const auto bucket=regions_.find(key^(variant?kIdempotentSafe:0));
+            if (bucket==regions_.end()) continue;
+            for (const auto& region:bucket->second) {
+                if (relative_addressing && (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))) continue;
+                job_found=true;
+                if (region.pid_scope && *region.pid_scope!=pid) continue;
+                pid_found=true;
+                if (resource_index && region.resource_index && resource_index!=region.resource_index) continue;
+                const unsigned score=(relative_addressing && !region.allow_any_job?4u:0u)+(region.pid_scope?2u:0u)+(resource_index && region.resource_index?1u:0u);
+                if (!selected || score>specificity) { selected=&region; specificity=score; ambiguous=false; }
+                else if (score==specificity) ambiguous=true;
+            }
+        }
+        if (!job_found) throw MemoryAccessError(MemoryError::WrongJob);
+        if (!pid_found) throw MemoryAccessError(MemoryError::WrongEndpoint);
+        if (!selected || ambiguous || selected->key!=key) throw MemoryAccessError(MemoryError::InvalidKey);
+        // Table 2-17: absolute addressing does not use JobID to select a
+        // buffer. Ambiguous equal keys are rejected before Job authorization.
+        return check_access(*selected,job,pid,offset,length,access,resource_index,origin,owner,permit_unclaimed);
+    }
+    static bool same_owner(const std::weak_ptr<const RmaMessageOwner>& claimed,const RmaMessageOwnerToken& candidate) {
+        return candidate && !claimed.owner_before(candidate) && !candidate.owner_before(claimed);
+    }
     const Region& check_access(const Region& region,uint32_t job,uint16_t pid,uint64_t offset,uint64_t length,
-                               Access access,std::optional<uint16_t> resource_index,MemoryAccessOrigin origin) const {
+                               Access access,std::optional<uint16_t> resource_index,MemoryAccessOrigin origin,
+                               const RmaMessageOwnerToken& owner,bool permit_unclaimed) const {
         if (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))
             throw MemoryAccessError(MemoryError::WrongJob);
         if (region.pid_scope && *region.pid_scope!=pid) throw MemoryAccessError(MemoryError::WrongEndpoint);
@@ -441,8 +500,16 @@ private:
         if (!(region.permissions&static_cast<uint8_t>(access))) throw MemoryAccessError(MemoryError::Permission);
         if (offset>region.storage->size() || length>region.storage->size()-offset)
             throw MemoryAccessError(MemoryError::Bounds);
+        if (region.use_once && origin==MemoryAccessOrigin::RemoteRequest) {
+            const auto claimed=use_once_owners_.find(region.registration_id);
+            if (!owner || (claimed==use_once_owners_.end() ? !permit_unclaimed : !same_owner(claimed->second,owner)))
+                throw MemoryAccessError(MemoryError::InvalidKey);
+        }
         return region;
     }
+    // Retain the weak control block even if a caller drops its owner without
+    // finishing. Expiry must never make an already used grant available again.
+    std::map<uint64_t,std::weak_ptr<const RmaMessageOwner>> use_once_owners_;
     std::shared_ptr<MemoryKeyAllocator> key_allocator_;
     uint64_t next_registration_=0;
     std::set<uint32_t> jobs_;

@@ -192,7 +192,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0189-004 | 表 3-2，本地直接寻址 | Unified Local 通过 FA/JobID 选择目标内存。 | M8 缺失；禁止把收到的地址直接转换为执行器指针。 |
 | UE11-p0189-005 | §3.3.3，四个授权义务 | 所有 Profile 实现 SES 授权、插入 JobID、访问前检查 JobID，每 FEP 至少一个 JobID。 | native Job0/多 Job/exact/any MR 已有测试；特权管理到公开 provider 的链条与 Unified Local 未实现。 |
 | UE11-p0189-006 | §3.3.4，表格总要求 | 按表 3-3 各 Profile 支持相应 buffer 行为。 | 这是后续行的总则，不额外记为一个已通过功能。 |
-| UE11-p0189-007 | 表 3-3，use-once RMA | HPC 支持 RMA use-once。 | M5 缺失；当前重复消除不是 use-once buffer 生命周期的替代。 |
+| UE11-p0189-007 | 表 3-3，use-once RMA | HPC 支持 RMA use-once。 | 原生 RMA 已加入每缓冲区配置和共享注册域消息授权；provider 扩展与完整 HPC 验收仍待完成，见 USE-ONCE-RMA.md。 |
 | UE11-p0189-008 | 表 3-3，full-range key | AI Base/Full/HPC 支持标准头全范围 memory key。 | native 64 位 API/48 位线 RKEY 已有边界回归；provider 用户 key 与完整授权矩阵仍不全。 |
 | UE11-p0189-009 | 表 3-3，limited-range key | HPC 支持 optimized 头有限范围 key。 | M5 optimized 编解码/索引授权缺失。 |
 | UE11-p0190-001 | 表 3-3 续，本地与 tag | Unified Local 支持本地头直接内存；Full/HPC exact tag，HPC wildcard。 | M5/M8 缺失；MULTI_RECV/Sync Group 行为空，不把本表当作其所有 Profile 强制依据。 |
@@ -229,7 +229,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0206-003 | §3.4.2.4.1，逐 buffer 授权 | 每次访问确认 Job 可访问该 buffer；至少一个 Job。只确认 Job 属于 FEP 集合不充分。 | exact/any MR 与相对/绝对访问已有回归；provider 固定 Job 和未完成的配置链仍需补全。 |
 | UE11-p0207-001 | §3.4.2.4.2，选定 TSS 后的 SDI 授权 | SDI 必须被 endpoint 允许；失败按 TSS 丢弃并报告，不发送 SES response 或 PDS NACK。 | M6 缺失；认证失败不得沿当前普通 semantic error 路径回复。UET_NO_RESPONSE 的提前返回例外不允许最终成功完成。 |
 | UE11-p0207-002 | §3.4.2.5，消息大小与分包 | bulk 上限由标准头 32 位长度决定，可分别限制 RMA/send；分包遵循 Payload MTU，紧凑头还有更窄限制。 | streamed WRITE 已验证 UINT32_MAX 和内存有界；其他大消息与紧凑头仍缺失，provider 大小能力不能由 WRITE 单测推广到全部操作。 |
-| UE11-p0211-001 | §3.4.2.6.1，use-once 生命周期 | 一条消息独占已匹配 buffer，其他消息不可再用；保留到该消息完成才还给应用。支持 SEND/RECV，支持 tag 时也覆盖 tag。 | native posted receive 绑定 registration identity 并在最终完成前保留，撤销/重复/晚到有回归；tag 与 RMA use-once 仍未实现。 |
+| UE11-p0211-001 | §3.4.2.6.1，use-once 生命周期 | 一条消息独占已匹配 buffer，其他消息不可再用；保留到该消息完成才还给应用。支持 SEND/RECV，支持 tag 时也覆盖 tag。 | native posted receive/tagged 绑定注册身份；原生 RMA 通过逻辑消息授权跨分片和 READ 重执行保留缓冲区，在真实 Clear/Close 时退休。见 USE-ONCE-RMA.md；完整扩展验收仍开放。 |
 | UE11-p0212-001 | §3.4.2.6.3，HPC tag 匹配 | HPC 目标支持 tagged；使用 match_bits 和 initiator，是否硬件加速不影响要求。 | 原生与 provider tagged 使用64位 tag/ignore mask 和 Job 内32位 initiator criteria，有通配、FIFO、定向接收回归；完整 HPC 仍未验收，见 TAGGED-MESSAGES.md。 |
 
 ## 第 161～180 个候选
@@ -281,7 +281,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0238-001 | 表 3-19，local response | reserved 发送0；mm/opcode/version/code/ehl/payload_length 按本地格式解释。 | M8 缺失；不能由标准 SES reserved 接收测试推广到本地头。 |
 | UE11-p0239-001 | 表 3-21，small 合法集跨页 | optimized non-matching 单包，NO_OP payload0，其他允许请求不超过一 Payload MTU。 | M5 格式未实现；需结合下一页完整 opcode 列表与响应头要求。 |
 | UE11-p0240-001 | 表 3-21 续，格式/opcode 限制 | 分别校验 small/medium/std/local 的合法 opcode、NO_OP0、单包、offset 和长度约束；local ac0 至多16383、ac1 至多4095且仍受 MTU约束；响应格式与请求匹配。 | 标准头与零长 NO_OP 子集有测试，其余紧凑/packed 与完整响应关联缺失；本候选含多组独立义务，不能整体通过。 |
-| UE11-p0241-001 | §3.4.4.1，buffer 集/行为 | relative tuple 和 absolute pair 唯一选择 buffer 集；每个 buffer 可配置 use-once/persistent；direct 按 Job。 | native posted receive 与 persistent MR 部分覆盖；RMA use-once、tagged 与直接本地地址缺失。 |
+| UE11-p0241-001 | §3.4.4.1，buffer 集/行为 | relative tuple 和 absolute pair 唯一选择 buffer 集；每个 buffer 可配置 use-once/persistent；direct 按 Job。 | native posted receive/tagged 与每 MR use-once/persistent 选择已有实现；原生 RMA 固定精确注册和共享域消息所有权。直接本地地址仍缺失；见 USE-ONCE-RMA.md。 |
 | UE11-p0241-002 | §3.4.4.1.1，untagged 消耗 | ROD 消耗队首，同消息所有包命中同一 buffer；RUD 可按到达次序；无 buffer 时采用规范 unexpected 流程。 | native posting/pinned registration、分片/FIFO、late receive 与 RUD/ROD provider 恢复已有回归；全部 unexpected 扩展行为仍待 M5。 |
 | UE11-p0241-003 | §3.4.4.1.2，optimized RMA 唯一性 | small RMA 的 Job/PID/index 精确映射一个 buffer，provider 按规定选择。 | M5 缺失；普通 key MR 表不能代替 index-only 资源绑定。 |
 | UE11-p0241-004 | §3.4.4.1.2，标准 RMA 唯一性 | 标准头 RMA 的 Job/PID/index/key 唯一映射一个 buffer。 | native 注册/授权和公开 provider MR 基础测试有覆盖；完整标准地址/授权配置仍未完成。 |

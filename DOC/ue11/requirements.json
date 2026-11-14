@@ -906,6 +906,21 @@
         "HPC"
       ],
       "evidence_note": "Narrow default receiver compatibility behavior: opcode0x08, token/address separation, posting/NoMatch in both ROD and RUD, explicit retry and header data. Optional native deferral/RTR/restart and tagged transactions are tracked separately by SES-DEFER; this verified fallback does not establish complete deferrable semantics."
+    },
+    {
+      "id": "SES-USE-ONCE-RMA",
+      "reference": "Table 3-3; §3.4.2.6.1; §3.4.4.1",
+      "summary": "原生 RMA 每缓冲区 use-once/persistent 行为与逻辑消息所有权",
+      "status": "partial",
+      "tests": [
+        "use_once_memory_test",
+        "use_once_rma_test",
+        "use_once_rma_lifetime_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native RegionOptions and shared-registry logical-message ownership implemented; exact registration pins cover READ/WRITE and integer atomics, including READ re-execution and actual Clear/Close retirement. Public libfabric2.0 has no standard use-once extension entry. Final commit-specific validation pending; see USE-ONCE-RMA.md. No Profile conformance claim."
     }
   ]
 }

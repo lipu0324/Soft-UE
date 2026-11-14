@@ -535,6 +535,7 @@ auto Endpoint::close() -> void {
             message.end_of_message_psn,message.end_seen,message.error_response_generated,
             static_cast<uint8_t>(message.first_error.value_or(SemanticReturnCode::Undeliverable)),
             message.error_generation,message.response_list});
+    for (auto& [identity,message]:incoming_) retire_rma_registration(message);
     incoming_.clear(); rendezvous_order_.clear(); deferred_order_.clear(); unexpected_order_.clear(); unexpected_bytes_=0; disabled_generations_.clear();
     posted_.clear(); message_leases_.clear(); transmit_clear_frontiers_.clear();
     read_returns_.clear(); read_packet_reservations_.clear();
@@ -712,11 +713,12 @@ auto Endpoint::drive_synchronized_target(uint64_t owner) -> void {
             // Preserve the original registration identity across the
             // barrier. A revoked/reused numeric key is never rebound.
             memory_.authorize_registration(*action.registration,header.job_id,action.selected.absolute_pid,
-                header.buffer_offset,action.length,Access::Atomic,action.selected.resource_index,MemoryAccessOrigin::RemoteRequest);
+                header.buffer_offset,action.length,Access::Atomic,action.selected.resource_index,
+                MemoryAccessOrigin::RemoteRequest,message->second.rma_owner);
             memory_.atomic_elements(header.job_id,action.selected.absolute_pid,header.match_bits,header.buffer_offset,
                 static_cast<IntegerAtomicOperation>(message->second.atomic_operation),
                 static_cast<IntegerAtomicDatatype>(message->second.atomic_datatype),action.request.pkt.payload,
-                action.selected.resource_index,header.rel);
+                action.selected.resource_index,header.rel,message->second.rma_owner);
             message->second.completed=true;
             for (const auto& response:action.responses) reply(response,SemanticReturnCode::Ok,action.length);
             trace_.record(node_,"synchronized_atomic_executed",action.length);
@@ -1830,6 +1832,7 @@ auto Endpoint::context_event(const Runtime::PdcEvent& event) -> void {
                     if (event.kind==Runtime::PdcEventKind::ConnectionClosed) process_synchronized_member(message->second,true);
                     synchronized_target_groups_.cleared(message->second.synchronization_member);
                 }
+                retire_rma_registration(message->second);
                 message=incoming_.erase(message);
             } else ++message;
         }
@@ -2222,6 +2225,11 @@ auto Endpoint::post_buffer(uint32_t job,uint16_t pid,uint64_t key,uint64_t offse
 
 auto Endpoint::received_tag(const Incoming& message) -> std::optional<uint64_t> {
     return message.opcode==9?std::optional<uint64_t>{message.tag}:std::nullopt;
+}
+
+auto Endpoint::retire_rma_registration(Incoming& message) -> void {
+    if (message.rma_registration) memory_.finish_rma_registration(*message.rma_registration,message.rma_owner);
+    message.rma_registration.reset(); message.rma_owner.reset();
 }
 
 auto Endpoint::release_unexpected(Incoming& message) -> void {
@@ -2719,8 +2727,10 @@ auto Endpoint::receive_read(const PDC_SES_req& request) -> void {
     if (!bind_rendezvous_read(request,offset,count)) return;
     try {
         if (!message.initialized) {
-            memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,header.buffer_offset,
-                header.request_length,Access::Read,selected.resource_index,header.rel);
+            message.rma_owner=std::make_shared<const RmaMessageOwner>();
+            message.rma_registration=memory_.claim_rma_registration(header.job_id,selected.absolute_pid,
+                header.match_bits,header.buffer_offset,header.request_length,Access::Read,
+                selected.resource_index,header.rel,message.rma_owner);
             message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
             message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel; message.initialized=true;
         }
@@ -2732,10 +2742,12 @@ auto Endpoint::receive_read(const PDC_SES_req& request) -> void {
             }
             processed=true; message.received=message.read_requests.bytes();
         }
-        // Always reauthorize the actual access. An ACK-data READ may be
-        // re-executed after loss and is allowed to observe newer memory.
-        auto bytes=memory_.read(header.job_id,selected.absolute_pid,header.match_bits,
-            Runtime::add_time(header.buffer_offset,offset),count,selected.resource_index,header.rel);
+        // Reauthorize the original live registration on every access. An
+        // ACK-data READ may observe newer bytes after loss (§3.5.17), but a
+        // revoked numeric key must never select a replacement registration.
+        auto bytes=memory_.read_registration(*message.rma_registration,header.job_id,selected.absolute_pid,
+            Runtime::add_time(header.buffer_offset,offset),count,selected.resource_index,
+            MemoryAccessOrigin::RemoteRequest,message.rma_owner);
         SEStoPDS_pkt data{}; data.bth_type=Semantic_Response_with_Data_Header;
         auto& result=data.bth_header.Semantic_Response_with_Data_Header;
         result.opcode=2; result.return_code=1; result.job_id=header.job_id;
@@ -2817,9 +2829,12 @@ auto Endpoint::receive_fetching_atomic(const PDC_SES_req& request) -> void {
     } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
     try {
         const auto operands=zero_length?FetchingAtomicOperands{}:decode_fetching_atomic_operands(request.pkt.payload,operation,datatype);
+        message.rma_owner=std::make_shared<const RmaMessageOwner>();
+        message.rma_registration=memory_.claim_rma_registration(header.job_id,selected.absolute_pid,header.match_bits,
+            header.buffer_offset,zero_length?0:width,Access::Atomic,selected.resource_index,header.rel,message.rma_owner);
         auto previous=memory_.fetch_atomic_element(header.job_id,selected.absolute_pid,header.match_bits,
             header.buffer_offset,operation,datatype,operands.operand,operands.compare_or_mask,
-            selected.resource_index,header.rel,zero_length);
+            selected.resource_index,header.rel,zero_length,message.rma_owner);
         convert_integer_atomic_byte_order(previous,datatype);
         SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
         response.rsp_len=20+previous.size(); response.gtd_del=true;
@@ -3044,13 +3059,14 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
         if (!message.initialized) {
             message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
             message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
-            if (header.opcode==1 && !poisoned)
-                memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
-                    header.buffer_offset,header.request_length,Access::Write,selected.resource_index,header.rel);
-            else if (header.opcode==3 && !poisoned) {
-                const auto& region=memory_.authorize(header.job_id,selected.absolute_pid,header.match_bits,
-                    header.buffer_offset,header.request_length,Access::Atomic,selected.resource_index,header.rel);
-                if ((region.permissions&3u)!=3u) { reject(SemanticReturnCode::OperationViolation); return; }
+            if ((header.opcode==1 || header.opcode==3) && !poisoned) {
+                message.rma_owner=std::make_shared<const RmaMessageOwner>();
+                message.rma_registration=memory_.claim_rma_registration(header.job_id,selected.absolute_pid,header.match_bits,
+                    header.buffer_offset,header.request_length,header.opcode==1?Access::Write:Access::Atomic,
+                    selected.resource_index,header.rel,message.rma_owner);
+            }
+            if (header.opcode==3 && !poisoned) {
+                const auto& region=*message.rma_registration;
                 if (synchronized_atomic) {
                     message.synchronization_registration=region;
                     message.synchronization_operands.resize(message.total);
@@ -3132,13 +3148,20 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
                     message.synchronization_responses.push_back(rendezvous_response_handle(request));
                 }
             }
-            else memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
-                static_cast<IntegerAtomicOperation>(message.atomic_operation),
-                static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index,message.relative_addressing);
+            else {
+                memory_.authorize_registration(*message.rma_registration,header.job_id,message.pid,
+                    Runtime::add_time(message.base,offset),operands.size(),Access::Atomic,message.resource_index,
+                    MemoryAccessOrigin::RemoteRequest,message.rma_owner);
+                memory_.atomic_elements(header.job_id,message.pid,message.key,Runtime::add_time(message.base,offset),
+                    static_cast<IntegerAtomicOperation>(message.atomic_operation),
+                    static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index,
+                    message.relative_addressing,message.rma_owner);
+            }
         } else if (message.receive_registration) memory_.write_registration(*message.receive_registration,
             header.job_id,message.pid,Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index);
-        else if (header.opcode!=0) memory_.write(header.job_id,message.pid,message.key,
-            Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index,message.relative_addressing);
+        else if (header.opcode!=0) memory_.write_registration(*message.rma_registration,header.job_id,message.pid,
+            Runtime::add_time(message.base,offset),request.pkt.payload,message.resource_index,
+            MemoryAccessOrigin::RemoteRequest,message.rma_owner);
         // Coalesce adjacent intervals: ordered large messages retain one
         // record; RUD retains only holes allowed by the PDS receive window.
         uint32_t merged_offset=offset,merged_length=static_cast<uint32_t>(count);
