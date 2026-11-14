@@ -75,6 +75,7 @@ public:
     PdsHost& operator=(const PdsHost&) = delete;
 
     PDSProcessManager& manager() { return manager_; }
+    bool closed() const { return stopped_; }
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
@@ -224,6 +225,7 @@ public:
         outbound_.clear();
         context_events_.clear();
         transmit_notifications_.clear();
+        services_.retired_semantic_messages.clear();
         trace_.record(node_, "host_closed");
     }
 private:

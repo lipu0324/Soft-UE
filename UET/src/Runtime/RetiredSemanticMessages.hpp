@@ -22,6 +22,7 @@ public:
     };
     bool contains(uint16_t message) const { return leases_.count(message)!=0; }
     std::size_t size() const { return leases_.size(); }
+    void clear() { leases_.clear(); } // Host shutdown has stopped every local PDS owner.
     void retain(uint16_t message,Lease lease) { leases_.insert_or_assign(message,std::move(lease)); }
     void datagram_completed(uint16_t message) {
         const auto found=leases_.find(message);
