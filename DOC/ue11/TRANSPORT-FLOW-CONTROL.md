@@ -148,5 +148,13 @@ CCC 身份。现在等待目标 establishContext 后再查询 CCC；失败日志
 Payload MTU=64 的单包格式上，原生 API 正确返回 Unsupported。独立诊断日志为
 `/tmp/softue-tfc-integration-ebf-debug-tests.log`。夹具现改成8个合法64字节 MEDIUM
 WRITE（STD 保持一个8分片消息），共48场景、216个源操作，另有双 Job QUIESCE 回归。
-这个夹具修正尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
+固定源版本 `bc9865067941eedd674e8b110f8db842af740237` 的11项范围回归已通过：
+普通构建0.78秒，ASan/UBSan/leak 构建7.75秒；日志为
+`/tmp/softue-tfc-runtime-medium-{normal,asan}-tests.log`。这是范围证明，不是完整174项回归。
+
+新增 `tfc_bidirectional_test` 的96个场景覆盖 STD/SMALL/MEDIUM、RUD/ROD、NSCC开关、
+ACK-data READ 与反向数据 READ、fetch-add/CAS，以及首次结果丢失后修改远端内存。
+短 READ 按规范允许重新读取新内容；反向 PDS 数据及原子结果必须保持已缓存内容。
+每个操作后排队一个 NO_OP，以验证双向数据与新消息信用共同进展；新夹具尚待编译。
+完整资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。
