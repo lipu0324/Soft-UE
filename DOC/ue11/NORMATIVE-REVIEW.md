@@ -58,7 +58,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0101-002 | §2.2.5.2.2，端点类型条件项 | scalable endpoint 的每个 RX context 获得独立 resource index；普通 endpoint 获得一个 index。 | 本段跨页；scalable endpoint 未实现。当前 native/provider 的固定目标索引不等于完整服务索引分配。 |
 | UE11-p0103-001 | §2.2.5.3.2，基础要求 | provider 支持 EQ，且每个 endpoint 至少支持绑定一个。 | 现已实现非阻塞 EQ 的 owned FIFO、PEEK、背压、同 fabric 绑定和生命周期，公开 API 测试通过；阻塞等待和异步管理/错误生产者仍未接入。 |
 | UE11-p0103-002 | §2.2.5.3.4，目标内存要求 | 远程 RMA/atomic 的目标 buffer 先注册到资源 domain；本地发送缓冲注册是可选条件。 | provider 和 native 共享受检 MR，非法 key/撤销/越界有回归；完整授权与 domain 绑定仍需联合验收。 |
-| UE11-p0104-001 | 表 2-13，多个 key 字段约束 | IDEMPOTENT_SAFE=0 禁止幂等传输；保留位为零；用户 key 的 vendor 位为零；optimized key 的中间保留位为零且使用 12 位 index。 | `memory_key_test` 验证格式与 namespace；RUDI 尚未实现，所以幂等传输的使用约束不能通过。optimized 头也未实现。 |
+| UE11-p0104-001 | 表 2-13，多个 key 字段约束 | IDEMPOTENT_SAFE=0 禁止幂等传输；保留位为零；用户 key 的 vendor 位为零；optimized key 的中间保留位为零且使用 12 位 index。 | `memory_key_test` 与 `optimized_safety_test` 验证普通/优化格式和命名空间；原生 RUDI WRITE/READ 重新授权实际幂等 MR，见 RUDI.md。其余幂等操作与完整 Profile 仍待验收。 |
 | UE11-p0104-002 | §2.2.5.3.4.1，key API 格式 | 用户和 provider key 都使用标准 64 位格式；API 传递完整 64 位；RKEY 范围由 mr_key_size 决定。 | native 用户 key 与 provider 生成 key 有部分覆盖，公开 provider 仅 FI_MR_PROV_KEY；mr_key_size 约束由下一段续完。 |
 | UE11-p0105-001 | §2.2.5.3.4.1，前段续文 | mr_key_size<6 时，把未使用的高位 RKEY 位清零。 | 与 p0104-002 合并追踪位宽义务；当前 provider 固定 6，尚无可选小位宽路径的边界验收。 |
 
@@ -70,9 +70,9 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
 | UE11-p0105-002 | §2.2.5.3.4.1，本地 key 解释 | provider 选择 RKEY 到 MR 的本地映射方法；不要求复制特定 vendor 的 key 编码。 | native registry 已按 key/地址 namespace 查找，并保留注册 identity；`memory_key_test` 有覆盖。 |
-| UE11-p0105-003 | §2.2.5.3.4.1，optimized 条件项 | 采用 optimized RMA 头时，把 RKEY/index 放入 ses.resource_index。 | optimized 头未实现；不能把标准头中的 48 位 key 映射算作本项。 |
+| UE11-p0105-003 | §2.2.5.3.4.1，optimized 条件项 | 采用 optimized RMA 头时，把 RKEY/index 放入 ses.resource_index。 | 原生 SMALL WRITE/整数原子把低12位 key/index 放入 RI，并在目标按 Job/PID 解析实际 MR；MEDIUM 保留完整 key。provider 自动格式选择尚未接通，见 OPTIMIZED-HEADERS.md。 |
 | UE11-p0105-004 | §2.2.5.3.4.1，small RMA 条件项 | 只有满足表 2-15 的单 MTU 操作、无 remote CQ data 等前提才使用 small RMA 头；优先使用属于 SHOULD。 | small RMA 头未实现。后续必须把“允许使用的条件”和“建议选择”分开。 |
-| UE11-p0105-005 | §2.2.5.3.4.1，标准头回退 | 不满足 optimized 与 small RMA 前提时，RMA 使用标准 SES 头。 | 当前 RMA 一律使用标准头，覆盖回退分支；不据此通过所有头格式选择要求。 |
+| UE11-p0105-005 | §2.2.5.3.4.1，标准头回退 | 不满足 optimized 与 small RMA 前提时，RMA 使用标准 SES 头。 | 原生默认 STD，显式 SMALL/MEDIUM 只接受已实现子集，非法组合在源端拒绝；provider 仍使用 STD。尚未完整验收自动选择策略。 |
 | UE11-p0105-006 | §2.2.5.3.4.1，RUDI 条件项 | RUDI 需要表 2-16 中无 R/W 消息顺序、IDEMPOTENT_SAFE、目标支持等前提；选择使用属于条件性 SHOULD。 | RUDI 未实现；保留 safe key 元数据不等于可直接启用 RUDI。 |
 | UE11-p0106-001 | §2.2.5.3.4.1，绑定限制与选择建议 | IDEMPOTENT_SAFE MR 绑定 completion counter 必须失败；保留 requested metadata、optimized 分配失败回退是 SHOULD 项。 | 已保留 safe bit 和未支持 optimized 时的回退；counter 整体尚不支持，后续实现后仍需专项失败测试，不能靠全部拒绝绑定证明完整 counter 功能。 |
 | UE11-p0106-002 | §2.2.5.3.5，特权配置 | JobID 由特权实体编程到硬件。 | 真实硬件/驱动后续系统集成；本轮 M7 仍需管理模型来表示这一授权边界。 |
@@ -100,7 +100,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0114-001 | 表 2-22，两种携带 CQ data 的 API | fi_senddata 与 fi_injectdata 都必选，远端 CQ data 放在 ses.header_data；inject 继承成功不生成 CQ、可靠交付失败生成错误 CQ 的规则。 | senddata 有公开进程与 header_data 回归；injectdata 已通过公开 API 到原生对端的复制、目标 CQ data、成功 CQ 抑制和错误完成测试。 |
 | UE11-p0114-002 | §2.2.5.4.1.1，接收策略与发送兼容 | 目标至少选一种规范 unexpected-message 策略；发起端正确响应所有目标行为。 | 已有 ROD 暂存、RUD 丢弃/查询及晚到 receive 场景；全部目标行为及 deferral/rendezvous 的组合仍未覆盖。 |
 | UE11-p0114-003 | §2.2.5.4.1.2，Profile 条件项 | AI Full 支持 deferrable send；HPC 支持 rendezvous。 | 原生 DS 源端、捕获头、RTR、后缀重启与错误清理已有独立真实 PDS 回归；完整 Profile、公开按大小选择及 rendezvous 事务仍未完成。rendezvous 当前仅24字节扩展头基础。 |
-| UE11-p0114-004 | §2.2.5.4.1.2，rendezvous 条件项 | RENDEZVOUS_SEND 的 eager 数据不超过配置上限。 | M5 未实现；需要零、恰好上限及超限测试。触发使用 rendezvous 的大小选择另列 SHOULD。 |
+| UE11-p0114-004 | §2.2.5.4.1.2，rendezvous 条件项 | RENDEZVOUS_SEND 的 eager 数据不超过配置上限。 | 原生与 provider RDM rendezvous 已接通，含 eager 边界、源 MR 权限和双向恢复；见 RENDEZVOUS.md 及相应源/目标/边界回归。完整 M5 仍未退出。 |
 | UE11-p0115-001 | §2.2.5.4.2，Profile 条件项 | AI Full/HPC 支持 tagged API；DGRAM 不支持。 | 原生及公开 scalar/v/msg tagged 已实现，64位精确/通配与 CQ 有回归；DGRAM 不公布 tagged。优化格式、rendezvous 等完整 M5 仍待验收。 |
 | UE11-p0115-002 | 表 2-23，接收 API 与匹配 | 支持 trecv/trecvv/trecvmsg，按 posted 顺序搜索；AI Full 至少 exact match，不支持 wildcard 时拒绝非零 ignore；HPC 支持 wildcard。 | 需拆分三个 API、FIFO、exact、ignore 拒绝及 wildcard，当前均缺失。 |
 | UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data、tsenddata 已有0/MTU/多包、缓冲区所有权与 CQ 回归；原生 deferrable 源/目标已有事务回归；公开按 Profile/大小选择和 rendezvous 事务仍缺失。 |
@@ -135,8 +135,8 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0126-003 | 表 2-34，rekey 条件项 | 支持 AN/SDI/SSI、16 位 epoch、96 位 IVMASK、raw/wrapped key 类型、长度及 key 参数。 | M6 缺失。后页 C 示例把 IVMASK octet 常数写为 96，与表中 96 bit 不一致，需以正式 TSS 结构/算法交叉复核。 |
 | UE11-p0127-001 | §2.2.9，三方管理流程 | driver 发请求；特权进程返回参数；driver 接受主动推送及请求响应并编程安全状态。 | 本轮需 M6/M7 行为模型；真实驱动不在 M0–M8 范围。请求/响应权限与主动推送分别验收。 |
 | UE11-p0127-002 | 表 2-35，请求字段 | rekey 请求带 AN、31 位 SDI、32 位 SSI。 | 当前缺失；必须校验安全域与源归属，不能仅把任意 key 写入对象。 |
-| UE11-p0131-001 | §2.2.10.4，optimized 原子条件项 | 原子操作使用与 RMA 相同的 optimized 头前提；使用该头的建议另列 SHOULD。 | optimized 未实现。该段将 SMALL 表示 optimized non-matching；与后续 small-message 表题须按正式 SES 格式区分。 |
-| UE11-p0132-001 | §2.2.10.4，small RMA 原子条件项 | 原子也采用 small RMA 的适用前提。 | small RMA 未实现；与 optimized 条件分开，不把两类紧凑头合并。 |
+| UE11-p0131-001 | §2.2.10.4，optimized 原子条件项 | 原子操作使用与 RMA 相同的 optimized 头前提；使用该头的建议另列 SHOULD。 | 原生显式 SMALL/MEDIUM 整数非取回原子复用 RMA 授权与原子执行；fetch/tagged/浮点等优化分支及 provider 自动格式选择仍待接通，见 OPTIMIZED-HEADERS.md。 |
+| UE11-p0132-001 | §2.2.10.4，small RMA 原子条件项 | 原子也采用 small RMA 的适用前提。 | 与 SMALL 区分的 MEDIUM32B 保留完整 key；显式非取回整数原子子集有独立算术与故障测试，完整条件矩阵仍待验收。 |
 | UE11-p0132-002 | 表 2-43，small RMA 映射 | hd 必须为零，其余 opcode/dc/rel/index/generation/Job/PID/长度/offset/initiator/key 按各自来源映射。 | 未实现；无 CQ data 是必要前提，不能静默丢弃调用者提供的 CQ data 来选择该头。 |
 | UE11-p0132-003 | §2.2.10.4，deferrable token | 两个 restart token 替代 buffer_offset，RTR 携带相同 token；发起 FEP 的活跃 token 唯一。 | 原生源/目标 token 使用 FEP Services 的64位游标，32位耗尽拒绝回绕；并发、取消、替换 Endpoint 与迟到 RTR 有回归。实际 reference RTR 互通仍待验；见 DEFERRABLE-TRANSACTIONS.md。 |
 | UE11-p0133-001 | 表 2-44，rendezvous 源 MR | 源 buffer 注册 REMOTE_READ；扩展头包含源 PID/index/generation、消息起始 offset、rkey 和受上限约束的 eager 长度。 | 24字节扩展已按 Figure3-21 独立黄金字节编解码；源 MR 远端 READ 授权、撤销、偏移及整个消息 READ 尚未整合，不能由线格式推断。 |
@@ -188,7 +188,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0188-002 | 表 3-1，多操作/大小矩阵 | NO_OP/WRITE/非取回原子四种均必选；前三种 Profile 还需 SEND/DATAGRAM/WRITE IMM；Full/HPC 需 exact tag/READ/fetch+CAS；HPC 另需 wildcard/tagged atomic/rendezvous；Full 需 DS/DTSEND。 | AI Base native 基础操作有回归，WRITE 已验证 4GiB−1；Full/HPC SEND 上限、M5 扩展及 Unified Local 16383 字节 READ/WRITE 仍缺失。表内每个操作与大小应独立建项，不能算一次测试通过整表。 |
 | UE11-p0189-001 | §3.3.2，基础寻址与 key | 遵守基础寻址；WRITE 使用 memory key；支持 RMA READ 时，READ/ATOMIC 也支持 memory key；匹配按 Profile 表。 | native 相对/绝对、key 与权限有回归；Unified Local direct memory 与本段全 Profile key 用语的关系需结合 §3.4 正式格式处理，不能给无 key 的本地头杜撰字段。 |
 | UE11-p0189-002 | 表 3-2，相对/绝对与 exact | AI Base/Full/HPC 均需相对和绝对；Full/HPC 需 exact tag。 | native 寻址部分覆盖，provider 标准 UET 地址/授权和 tag 缺失。 |
-| UE11-p0189-003 | 表 3-2，wildcard | HPC 需 wildcard tag。 | M5 缺失；不是 AI Base/Full 的通用必选项。 |
+| UE11-p0189-003 | 表 3-2，wildcard | HPC 需 wildcard tag。 | 原生与 RDM provider 支持64位 ignore mask 的 wildcard tag，FIFO/源 rank 约束有回归；见 TAGGED-MESSAGES.md。完整 HPC 能力尚未验收。 |
 | UE11-p0189-004 | 表 3-2，本地直接寻址 | Unified Local 通过 FA/JobID 选择目标内存。 | M8 缺失；禁止把收到的地址直接转换为执行器指针。 |
 | UE11-p0189-005 | §3.3.3，四个授权义务 | 所有 Profile 实现 SES 授权、插入 JobID、访问前检查 JobID，每 FEP 至少一个 JobID。 | native Job0/多 Job/exact/any MR 已有测试；特权管理到公开 provider 的链条与 Unified Local 未实现。 |
 | UE11-p0189-006 | §3.3.4，表格总要求 | 按表 3-3 各 Profile 支持相应 buffer 行为。 | 这是后续行的总则，不额外记为一个已通过功能。 |
@@ -211,7 +211,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
-| UE11-p0191-005 | 表 3-5，RUDI | HPC 必选幂等操作的 RUDI。 | 与 p0191-004 的原图补行相同义务；尚未实现，不因 provider 可为某次 RMA 选 RUD 就免除 HPC RUDI 能力要求。 |
+| UE11-p0191-005 | 表 3-5，RUDI | HPC 必选幂等操作的 RUDI。 | 原生 source-owned RUDI WRITE/READ 有独立恢复、幂等 MR 授权和无 target PDC/CQ 的回归；其余操作与完整 HPC 验收仍开放，见 RUDI.md。 |
 | UE11-p0191-006 | 表 3-5，UUD | AI Base/Full/HPC 必选 UUD。 | native/provider DGRAM 已有回归；不推断远端收到或可靠交付。 |
 | UE11-p0192-001 | 表 3-6/3-7，网络条件 | 最佳努力网络中 AI Base/Full/HPC 必选 NSCC；无损表的 NSCC/RCCC 格为空。 | NSCC 已接入发送准入、反馈及真实 trim；尚未全部规范验收。RCCC 虽非此表通用必选，仍按 roadmap 在 M5 实现。 |
 | UE11-p0199-001 | §3.4.2.3，key namespace | 两种 namespace 都遵守 key 格式及绑定；未找到或不允许的 MR 映射返回 RC_BAD_MKEY。 | native exact/any/Job/PID/index 优先与 key 格式已有回归；权限错误与映射错误需按标准区分，不能统一报告成功或任意错误。 |
@@ -220,9 +220,9 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0201-002 | §3.4.2.3.2，进程隔离 | 各 OS 进程有不同 PIDonFEP；同一 OS 进程可有多个，且与 OS PID/PASID 解耦。 | 当前 native 可配置 PID namespace，尚无特权进程分配模型；固定 PID=1 的 provider 不是完整跨进程隔离证明。 |
 | UE11-p0202-001 | §3.4.2.3.2，PID scope | PIDonFEP 范围相对于 Job 或 Fabric Address。 | `ResourceDirectory` 支持相对映射和绝对 PID；provider 标准地址入口仍缺失。 |
 | UE11-p0202-002 | §3.4.2.3.3，资源空间/optimized | SEND/tag/RMA index 空间独立；optimized RMA 的 index 精确选择一个 RMA resource。 | native SEND/RMA 空间已分开；tag 与 optimized 单资源关联未实现。标准头允许一个 RMA resource 的情形不能反推所有 index 强制只有一个 MR。 |
-| UE11-p0204-001 | §3.4.2.3.5，匹配顺序 | ROD wildcard 在所有匹配的 posted buffers 中按 FIFO 消耗；RUD FIFO 为 SHOULD，网络乱序可导致不同次序。 | tagged 未实现。ROD 普通 receive 的 FIFO 测试不等于 wildcard 匹配验证。 |
+| UE11-p0204-001 | §3.4.2.3.5，匹配顺序 | ROD wildcard 在所有匹配的 posted buffers 中按 FIFO 消耗；RUD FIFO 为 SHOULD，网络乱序可导致不同次序。 | tagged_message_test 及 provider directed/tagged 回归覆盖精确/通配、FIFO 与源 rank；RUD 不将网络乱序误写成全局发送顺序，完整组合仍待验收。 |
 | UE11-p0204-002 | §3.4.2.3.5，API key 映射 | 采用 RMA memory key 时把 API key 映射到线头 match_bits，保持相应 namespace。 | native/provider 标准头已有 key 到线格式与目标授权回归；optimized 通过 index 选择的无 key 路径另验。 |
-| UE11-p0204-003 | §3.4.2.3.7，唯一 buffer 选择 | 未标记 tuple 唯一选择一个 buffer；匹配 tuple+criteria 也唯一选择 buffer，可采用不同内部数据结构。 | native untagged/RMA 受检选择有覆盖；tag 缺失，不把具体 map 容器误写成标准要求。 |
+| UE11-p0204-003 | §3.4.2.3.7，唯一 buffer 选择 | 未标记 tuple 唯一选择一个 buffer；匹配 tuple+criteria 也唯一选择 buffer，可采用不同内部数据结构。 | native untagged/tagged/RMA 使用受检选择和具体注册身份，有 FIFO/匹配/Job 隔离回归；不把内部 map 容器写成规范要求。 |
 | UE11-p0205-001 | §3.4.2.3.7，无 key RMA | 未携 key 时 tuple 唯一选择 buffer；三种操作使用独立 index 空间。 | optimized/index-only RMA 与 tag 缺失；标准头 key lookup 不代替无 key 条件项。 |
 | UE11-p0206-001 | §3.4.2.4，定位后授权 | buffer 定位后执行 JobID 与适用安全域授权。 | native Job/MR 检查已有负向回归；M6 SDI 检查尚缺。 |
 | UE11-p0206-002 | §3.4.2.4.1，源端可信 Job | 由发起节点可信层分配或验证 JobID。 | native 源端检查配置 Job，但任意应用可自行配置的教学 API 不等于特权管理；M7 授权对象/可信边界待实现。 |

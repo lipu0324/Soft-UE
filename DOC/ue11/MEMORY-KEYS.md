@@ -9,7 +9,7 @@ MR（Memory Region，注册内存区域）是 SES 访问本地存储的授权记
 | 位 | 标准字段 | 当前实现 |
 |---|---|---|
 | 63 | IDEMPOTENT_SAFE | 可设置；表示区域允许幂等传输使用，不表示非幂等原子操作可以重复执行 |
-| 62 | OPTIMIZED | 原生显式 optimized key 暂不接受；provider 请求该标志时回退到非 optimized key |
+| 62 | OPTIMIZED | 原生接受应用显式 optimized key，低12位为索引；provider 请求该标志时仍回退到非 optimized key |
 | 56～61 | Reserved | 注册时校验为零 |
 | 48～55 | Vendor-specific | provider 分配的 key 可使用；应用分配的 key 必须为零 |
 | 0～47 | RKEY | 非 optimized key 的 48 位远端内存 key；零值也合法 |
@@ -17,7 +17,8 @@ MR（Memory Region，注册内存区域）是 SES 访问本地存储的授权记
 RKEY 的范围与整体 key 的大小不同。provider 的 `mr_key_size=6` 描述 RKEY 的六字节
 范围；`fi_mr_key()` 和线上标准头仍携带完整 64 位，包括高位元数据。provider 在
 `FI_MR_PROV_KEY` 模式下分配 RKEY，保留请求中的 IDEMPOTENT_SAFE 标志；OPTIMIZED
-暂不启用。支持幂等标志本身不会启用 RUDI，也不会改变普通 ROD/RUD 的去重规则。
+在 provider 路径暂不启用。原生 RUDI WRITE/READ 要求区域实际具有幂等权限，见 [RUDI](RUDI.md)；
+幂等标志不改变普通 ROD/RUD 的去重规则。
 
 `MemoryKeyFormat` 只判断格式是否合法。一个格式正确的 key 仍须在目标注册表中存在，
 并通过 JobID、PID、Resource Index、权限和边界检查。
@@ -81,9 +82,12 @@ endpoint.memory().deregister(job_one_region);
 
 ## 当前边界与验证
 
-原生接口已支持应用分配的非 optimized key。实验 libfabric provider 仍明确要求
+原生接口已支持应用分配的普通与 OPTIMIZED key。OPTIMIZED 的位12～47必须为零，
+资源索引由低12位导出；若显式提供不同 RI，注册失败。SMALL 省略 key，接收端按
+Job/PID/index 解析实际 key，再执行完整 MR 授权。绝对寻址的等索引歧义仍拒绝；
+见 [优化头](OPTIMIZED-HEADERS.md)。自动分配优化索引尚未实现。实验 libfabric provider 仍明确要求
 `FI_MR_PROV_KEY`，不会把原生能力当作已实现的 libfabric 用户 key 模式。优化头、
-optimized-key 绑定及更多 MR/API 模式在后续阶段实现，各 Profile 的符合性声明保持关闭。
+provider optimized-key 绑定及更多 MR/API 模式在后续阶段实现，各 Profile 的符合性声明保持关闭。
 
 ```sh
 ctest --test-dir build/cmake -R 'memory_key_test|memory_registry_test|addressing_test' --output-on-failure

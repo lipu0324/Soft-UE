@@ -29,11 +29,11 @@ MEDIUM的union只表达同一个槽的两种名字，不授权任何内存访问
 
 | 原生格式 | 已接通操作 | 约束 |
 |---|---|---|
-| SMALL | NOOP、WRITE | WRITE key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
-| MEDIUM | NOOP、WRITE、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
+| SMALL | NOOP、WRITE、整数非取回 atomic | RMA key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
+| MEDIUM | NOOP、WRITE、整数非取回 atomic、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
 | 两者 | RUD、ROD；NSCC 开或关 | SOM=EOM=1，消息不超过配置的 Payload MTU（最大8192） |
 
-RMA 立即数、READ、atomic/fetch、Sync Group、RUDI/UUD 优化请求及优化数据响应尚未接通。
+RMA 立即数、READ、fetching/tagged/浮点 atomic、Sync Group、RUDI/UUD 优化请求及优化数据响应尚未接通。
 源端拒绝不支持的组合；接收端独立验证格式和操作，不能依赖可信源端的 API 检查。
 Table2-14/15 的 RMA 选择条件排除 FI_REMOTE_CQ_DATA，而 §3.4.3.2 正文还讨论立即数；
 当前保守关闭该组合，MEDIUM SEND 的 header data 共用槽则实际验证。
@@ -53,7 +53,7 @@ Legacy SUP1 端点不公布这些标准格式能力，也不公布标准 RUDI �
 DEFAULT 推断、重传、恰好一次放置和 Clear 回收继续由现有 PDS 负责。
 
 SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 Job/PID/index
-作用域查找实际注册 key，再用原有 WRITE 授权路径检查权限、存活注册、资源代次及区间。
+作用域查找实际注册 key，再用原有 WRITE/atomic 授权路径检查权限、存活注册、资源代次及区间。
 索引解析不授予访问权限；绝对寻址不能借 Job 在多个相同索引间任意选一个。
 应用可注册 OPTIMIZED key，显式 RI 必须等于 key 索引；自动分配优化 key 尚未实现。
 收到的地址始终是经过 MR 检查的偏移，不能成为宿主指针。
@@ -65,8 +65,10 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
 
 - `optimized_transaction_test`：88组零长度、1/73/MTU长度、两种模式、NSCC、idempotent 元数据、
   完成上下文、SEND 立即数及 tagged rank/tag；捕获真实线包核对请求无 MID、响应 MID0。
-- `optimized_fault_test`：96组请求/响应丢失、重复、乱序、Clear 丢失，每组同连接8个事务；
-  计数实际 MR 写入，核对数据与每次唯一完成。乱序延迟发生在实际 MAC 发出之后。
+- `optimized_fault_test`：144组请求/响应丢失、重复、乱序、Clear 丢失，每组同连接8个事务；
+  计数实际 MR 写入，核对数据与每次唯一完成，包括不能重复执行的 SUM。乱序延迟发生在实际 MAC 发出之后。
+- `optimized_atomic_test`：800组固定算术向量，8种整数类型×12种操作×两种格式/模式/NSCC；
+  加上 MTU、零字节 WRITE 与独立接收端权限/对齐/范围/操作控制拒绝。期望结果不调用实现的算术 helper。
 - `optimized_safety_test`：62组 Job/PID/索引、代次、权限、私有注册、撤销、绝对歧义，
   Job/PID/index零及index4095、UINT64_MAX区域末端、8192B与源端拒绝、legacy能力。
 - `optimized_malformed_test`：28组绕过 Endpoint 的缺 SOM/EOM、超 MTU、未支持 READ、
@@ -91,6 +93,10 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
 日志为 `/tmp/softue-optimized-expanded-normal-tests2.log`、`/tmp/softue-optimized-expanded-asan-tests2.log`。
 其后增加的畸形/reader失败28场景普通通过（0.02s），见 `/tmp/softue-optimized-malformed-tests.log`。
 这些是开发树的定向证据，提交后的完整普通和 sanitizer 集成检查另行记录。
+
+整数非取回原子扩展的四项定向普通检查通过（1.58s），见 `/tmp/softue-optimized-atomic-tests.log`；
+800组独立算术/拒绝场景与扩为144组的故障矩阵均通过。该次检查期间另有构建，只作功能证据；
+新增原子路径的 sanitizer 及 STD 原子集成检查尚在执行。
 
 固定5b4e049的 `util/uet_util.c` 在解析next_hdr时，把REQ_SMALL、REQ_MEDIUM和
 RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来扩大对照范围。
