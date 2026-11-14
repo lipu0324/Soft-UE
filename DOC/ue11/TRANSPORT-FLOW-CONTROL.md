@@ -53,4 +53,6 @@ TFC 支持；不能把这个单元当作完整 TFC 或 M5 的验收。
 
 `tfc_credit_test` 检查规范例子、576种 cell/MTU/overhead 组合、正数准入/负余额、
 零成本 NO_OP、免费重传、24位重复/重排/回绕，以及溢出拒绝后的累计计数原子更新。
-当前代码及测试尚待固定版本编译验证。
+固定源版本 `64c796abaf156ad1dfbd73cc5b218843eb2bfbe8` 的该项 CTest 已通过：
+普通 Debug 构建0.01秒，ASan/UBSan/leak 构建0.03秒。日志为
+`/tmp/softue-tfc-credit-{normal,asan}-tests.log`。仅验证数值单元，不扩大为接入证明。
