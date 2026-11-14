@@ -75,7 +75,7 @@ LASTHOP 裁剪通知，原 PDS NACK/重传恢复后检查两个目标区域的�
   `/tmp/softue-multi-tc-trim-scoped-report.json`。均为虚拟时间场景；与独立 RCCC
   编译可重叠，墙钟时间不作为性能结果。
 - `afaca88f68928f7ec105d9d022fe136c0f043fa9` 的完整176项证据包含真实 TFC，
-  不包含这里的多 TC 增量。当前整合版准备179项完整回归，尚无该范围通过声明。
+  不包含这里的多 TC 增量。后续完整整合版本的证据如下。
 
 非零 RUDI/UUD、完整队列/管理配置及 Profile 审核仍开放，四种 Profile 均未宣布完成。
 
@@ -85,3 +85,12 @@ LASTHOP 裁剪通知，原 PDS NACK/重传恢复后检查两个目标区域的�
 legacy回归增加TC0/1/7各两次确定性轨迹比较。原失败报告
 `/tmp/softue-multi-tc-67-full-failure-report.json` 保留；67的Sanitizer完整构建成功，
 因发现普通生产回归未启动全量Sanitizer测试。修正版本需要重新完整验证。
+
+修正固定源 `c725d0225a5047ee6a34502a2fc1725f1b464c37` 已完整通过179项回归：
+普通179/179（133.78秒），ASan/UBSan/leak 179/179（690.55秒）。provider及固定
+参考实现启用，全部编译/归档结束后按普通、Sanitizer顺序，各自-j1执行，源全程冻结。
+日志 `/tmp/softue-multi-tc-c725-full-{normal,asan}-tests.log`，报告
+`/tmp/softue-multi-tc-c725-full-report.json`。包含真实多TC、有限producer公平策略、
+反向READ租约、错误清理/复用、按DSCP恢复裁剪类及legacy修正；不包含独立RCCC分支。
+先前67ae310的178/179失败及未执行全量Sanitizer的事实仍保留，未用单项重跑替代完整证明。
+四种Profile仍未完成。
