@@ -29,11 +29,11 @@ MEDIUM的union只表达同一个槽的两种名字，不授权任何内存访问
 
 | 原生格式 | 已接通操作 | 约束 |
 |---|---|---|
-| SMALL | NOOP、WRITE、整数 atomic/fetching atomic | RMA key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
-| MEDIUM | NOOP、WRITE、整数 atomic/fetching atomic、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
+| SMALL | NOOP、WRITE、READ、整数 atomic/fetching atomic | RMA key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
+| MEDIUM | NOOP、WRITE、READ、整数 atomic/fetching atomic、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
 | 两者 | RUD、ROD；NSCC 开或关 | SOM=EOM=1，消息不超过配置的 Payload MTU（最大8192） |
 
-RMA 立即数、READ、tagged/浮点 atomic、Sync Group、RUDI/UUD 优化请求及反向通道的优化 READ 数据响应尚未接通；fetching atomic 已在 ACK 中使用 DATA_SMALL。
+RMA 立即数、tagged/浮点 atomic、Sync Group、RUDI/UUD 优化请求及READ 已按 Max_ACK_Data_Size 在 ACK 和反向通道中使用 DATA_SMALL；fetching atomic 始终在 ACK 中返回结果。
 源端拒绝不支持的组合；接收端独立验证格式和操作，不能依赖可信源端的 API 检查。
 Table2-14/15 的 RMA 选择条件排除 FI_REMOTE_CQ_DATA，而 §3.4.3.2 正文还讨论立即数；
 当前保守关闭该组合，MEDIUM SEND 的 header data 共用槽则实际验证。
@@ -67,6 +67,31 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
 例如，注册 `MemoryKeyFormat::Optimized | 3`，配置 PID1/RMA RI3 后，SMALL WRITE
 可以向该区域写入一个不超过 MTU 的消息。MEDIUM WRITE 则携带完整 key，按通常资源选择规则访问。
 
+## READ 的双向关联与恢复
+
+优化 READ 只接受单包消息，长度0～配置 MTU；请求没有 payload，目标地址仍是受检 MR 偏移。
+当前默认/provider STD 路径不自动改选优化格式，应用通过 `header_format` 显式选择。
+
+READ 的 DATA_SMALL 有两种传递方式，沿用原有 READ 的阈值规则：
+
+- 小结果直接放入 ACK。ACK 指向的 PSN 和 DATA_SMALL 的 `original_request_psn` 必须相等。
+  丢失后通过原 PDS 的 ACK Request/NACK/原请求重发路径重新读取；目标不保留结果快照。
+- 大于 Max_ACK_Data_Size 的结果走同一 PDC 的反向请求通道。反向数据包有自己的 PSN，
+  DATA_SMALL 则携带正向 READ 的原 PSN。源 SES 按 FEP/PDC incarnation/Job/原 PSN
+  查找 pending READ，再放入已经绑定的本地注册；未知或迟到结果不能重选一个 MR。
+  反向 PDS 保留 payload 并负责重传，目标收到反向确认后才确认原 READ。
+
+反向通道额外使用一个**仅在目标本地存在的响应 token**，放在 PDS TX 元数据中。
+DATA_SMALL 及其线上确认没有这个 token（确认 MID0）；PDC 用确切反向 PSN 把 token
+带回 SES，回收对应的 ReadReturn。它不能与应用 operation ID、本地提交句柄、正向 PSN
+或反向 PSN互换。`SemanticDataFields` 只在内部投影省略字段，不改变线格式。
+
+每次重读仍重新授权活跃 MR、私有访问来源、权限和区间。已准入消息的资源代次选择保持
+与 STD READ 一致：改变资源代次只限制新消息，不把已接收 PSN 的重执行变成新准入。
+回归先在 SMALL 复现了错误 RC_BAD_GEN（7→8，日志见下），随后修复这一分支；该规则
+不允许绕过 MR 撤销。源结果 MR 使用确切 registration identity，数值 key 重用不能重绑定旧结果。
+这仍不是全部 WAR 排序保证或 Profile 完整能力的验收。
+
 ## 事务回归范围
 
 - `optimized_transaction_test`：88组零长度、1/73/MTU长度、两种模式、NSCC、idempotent 元数据、
@@ -79,6 +104,11 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
   另含零字节操作、丢失/重复结果、缓存旧值、目标撤销、源端旧 MR 身份及错误 PSN/Job/DEFAULT。
 - `optimized_fetching_concurrency_test`：40组同连接8个独立返回缓冲区；注入结果丢失、重复、
   延迟及不相符原请求 PSN，按实际原子写入次数检查恰好一次执行。
+- `optimized_read_test`：112组两格式/模式/NSCC、0/1/73/MTU、三个 ACK 阈值及结果丢失；
+  检查 ACK 重新读取与反向缓存重传对目标后续修改的不同观察。
+- `optimized_read_concurrency_test`：72组同连接8个读取、两通道、结果丢失/重复/延迟及 ACK 原 PSN 拒绝。
+- `optimized_read_safety_test`：63组 MR/Job/PID/私有来源/代次、0/4095索引、UINT64_MAX末端与8192B；
+  另含结果 MR 撤销后同 key 新注册不受写入、以及 STD/MEDIUM/SMALL 已准入 READ 的资源代次一致性。
 - `optimized_safety_test`：62组 Job/PID/索引、代次、权限、私有注册、撤销、绝对歧义，
   Job/PID/index零及index4095、UINT64_MAX区域末端、8192B与源端拒绝、legacy能力。
 - `optimized_malformed_test`：28组绕过 Endpoint 的缺 SOM/EOM、超 MTU、未支持 READ、
@@ -119,3 +149,12 @@ RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来�
 8项 ASan/UBSan/泄漏检查全部通过（37.45s），见 `/tmp/softue-optimized-fetch-asan-tests.log`，
 包含优化 WRITE/非取回原子/权限/畸形与标准 fetching 回归；
 期间存在其他构建，因此上述耗时只记录测试运行，不作为性能结果。
+
+优化 READ 初轮4项普通检查通过（1.57s），见 `/tmp/softue-optimized-read-tests2.log`；
+8项 ASan/UBSan/泄漏检查通过（8.53s），见 `/tmp/softue-optimized-read-asan-tests.log`。
+它们验证资源代次修复前的代码，不能当作修复后证据。
+
+随后独立负向 probe 在 STD/MEDIUM 通过后，精确复现 SMALL 的 `format=1 code=2`：
+`/tmp/softue-optimized-read-generation-before-tests2.log`。修复后的4项普通回归通过（0.68s），见 `/tmp/softue-optimized-read-final-normal-tests.log`，
+包含112事务、72并发、63权限/注册身份/代次和既有优化权限用例。修复后的6项 ASan/UBSan/泄漏回归全部通过（5.93s），日志
+`/tmp/softue-optimized-read-final-asan-tests.log`，包含共享 Clear 与 STD READ ACK-data 路径。这些定向检查期间其他工作树仍在构建，耗时不代表网络性能。

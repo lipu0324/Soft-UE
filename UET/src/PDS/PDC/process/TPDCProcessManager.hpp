@@ -65,6 +65,13 @@ public:
         request.next_hdr=UET_HDR_RESPONSE_DATA; request.pkt=data;
         request.tx_pkt_handle=data.bth_header.Semantic_Response_with_Data_Header.response_message_id;
         request.pkt_len=20+data.payload.size();
+        if (original.request_wire_format==Optimized_Header || original.request_wire_format==Small_Message_RMA_Header) {
+            UET::SES::compact_data_response(request.pkt,original.orig_psn);
+            request.next_hdr=UET_HDR_RESPONSE_DATA_SMALL;
+            request.pkt_len=12+data.payload.size();
+            // The target response token stays in TX metadata. DATA_SMALL has
+            // no response MID; its ACK will carry MID0 (Table3-18).
+        }
         // Each queued return packet owns its own response token. It does not
         // start another application request/message in the forward direction.
         request.som=request.eom=true;

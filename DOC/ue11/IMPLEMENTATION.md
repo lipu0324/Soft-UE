@@ -23,10 +23,10 @@ transactions bound the capability; full HPC acceptance remains open.
 See [RUDI boundaries](RUDI.md).
 
 Scale-out optimized SMALL/MEDIUM/data-response wire layouts have independent
-20/32/12-byte vectors. Explicit native SMALL WRITE/NOOP and MEDIUM WRITE/NOOP/
+20/32/12-byte vectors. Explicit native SMALL WRITE/READ/NOOP and MEDIUM WRITE/READ/NOOP/
 SEND/tagged and both formats’ integer and fetching atomics use local submission metadata and target PSN identities, with checked
-optimized MR-index resolution. READ/tagged/float atomic/Sync optimized transactions and optimized
-READ data responses remain open; fetching results use the12-byte DATA_SMALL ACK; see [optimized headers](OPTIMIZED-HEADERS.md).
+optimized MR-index resolution. Tagged/float atomic/Sync optimized transactions remain open. READ uses12-byte
+DATA_SMALL in ACKs or its reverse PDC; fetching results use DATA_SMALL ACKs; see [optimized headers](OPTIMIZED-HEADERS.md).
 
 Unknown PDS/control types are silently dropped before connection state changes,
 with host-local typed counters; see [ingress diagnostics](PDS-INVALID-TYPES.md).

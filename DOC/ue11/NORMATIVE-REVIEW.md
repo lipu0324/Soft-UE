@@ -73,7 +73,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0105-003 | §2.2.5.3.4.1，optimized 条件项 | 采用 optimized RMA 头时，把 RKEY/index 放入 ses.resource_index。 | 原生 SMALL WRITE/整数原子把低12位 key/index 放入 RI，并在目标按 Job/PID 解析实际 MR；MEDIUM 保留完整 key。provider 自动格式选择尚未接通，见 OPTIMIZED-HEADERS.md。 |
 | UE11-p0105-004 | §2.2.5.3.4.1，small RMA 条件项 | 只有满足表 2-15 的单 MTU 操作、无 remote CQ data 等前提才使用 small RMA 头；优先使用属于 SHOULD。 | small RMA 头未实现。后续必须把“允许使用的条件”和“建议选择”分开。 |
 | UE11-p0105-005 | §2.2.5.3.4.1，标准头回退 | 不满足 optimized 与 small RMA 前提时，RMA 使用标准 SES 头。 | 原生默认 STD，显式 SMALL/MEDIUM 只接受已实现子集，非法组合在源端拒绝；provider 仍使用 STD。尚未完整验收自动选择策略。 |
-| UE11-p0105-006 | §2.2.5.3.4.1，RUDI 条件项 | RUDI 需要表 2-16 中无 R/W 消息顺序、IDEMPOTENT_SAFE、目标支持等前提；选择使用属于条件性 SHOULD。 | RUDI 未实现；保留 safe key 元数据不等于可直接启用 RUDI。 |
+| UE11-p0105-006 | §2.2.5.3.4.1，RUDI 条件项 | RUDI 需要表 2-16 中无 R/W 消息顺序、IDEMPOTENT_SAFE、目标支持等前提；选择使用属于条件性 SHOULD。 | 原生 RUDI WRITE/READ 按操作和真实 MR 幂等权限准入，有重传/拒绝/作用域回归；provider 尚未按 HPC 排序自动选择 RUDI，见 RUDI.md。 |
 | UE11-p0106-001 | §2.2.5.3.4.1，绑定限制与选择建议 | IDEMPOTENT_SAFE MR 绑定 completion counter 必须失败；保留 requested metadata、optimized 分配失败回退是 SHOULD 项。 | 已保留 safe bit 和未支持 optimized 时的回退；counter 整体尚不支持，后续实现后仍需专项失败测试，不能靠全部拒绝绑定证明完整 counter 功能。 |
 | UE11-p0106-002 | §2.2.5.3.5，特权配置 | JobID 由特权实体编程到硬件。 | 真实硬件/驱动后续系统集成；本轮 M7 仍需管理模型来表示这一授权边界。 |
 | UE11-p0106-003 | §2.2.5.3.5，两个基础端点类型 | 同时支持 FI_EP_DGRAM 和 FI_EP_RDM。 | 两种实验端点已有公开 API 独立进程测试；这只证明端点类型入口，不证明标准地址/授权。 |
@@ -87,7 +87,7 @@ JobID=0，也不能由 provider 固定使用 JobID=1 来替代。
 | UE11-p0112-001 | §2.2.5.4.1，两个端点上的消息 API | DGRAM 与 RDM 都支持 fi_msg 系列，具体义务由表 2-21/2-22 展开。 | 两类 SEND/receive 与 CQ data 已有进程覆盖；系列内 inject 和部分 flags 缺失。 |
 | UE11-p0112-002 | 表 2-21，三个 receive API 与 flag | fi_recv、fi_recvv、fi_recvmsg，至少 vendor 声明的 scatter-gather 大小；FI_COMPLETION 必选；消息边界/FIFO/JobID 条件分别验证。 | 目前支持单 iovec、普通接收与 FI_COMPLETION；authorization 分支未完成。MULTI_RECV 是 SHOULD，不能和强制基础接收混为一个义务。 |
 | UE11-p0112-003 | 表 2-22，fi_send | API 必选；DGRAM 映射 DATAGRAM_SEND，RDM 映射 SEND。 | 已有两种公开进程测试及 wire/CQ 回归。 |
-| UE11-p0112-004 | 表 2-22，fi_sendv 与跨页映射 | fi_sendv 必选，iovec 上限由 vendor 声明；AI Full/HPC 的大消息 opcode 选择在下一页展开。 | 单 iovec 路径存在；deferrable/rendezvous 的源端大小选择仍未实现。 |
+| UE11-p0112-004 | 表 2-22，fi_sendv 与跨页映射 | fi_sendv 必选，iovec 上限由 vendor 声明；AI Full/HPC 的大消息 opcode 选择在下一页展开。 | 公开 scalar/vector/message SEND 已有缓冲区所有权与 CQ 回归；provider RDM 按可配阈值选择普通或 rendezvous（默认65536），deferrable/Profile 选择仍待补全，见 PROVIDER-RENDEZVOUS.md。 |
 | UE11-p0113-001 | 表 2-22，多个 send/inject 义务 | fi_sendmsg 支持 CQ data、completion、inject、三种完成级别及 fence；fi_inject 成功不生成 CQ，可靠端点交付失败必须生成错误 CQ。 | CQ data/部分完成语义及 FI_FENCE 已实现；inject API/flag 已有所有权、CQ 与重试回归；三个可靠完成等级采用更强 GO 完成点，标准地址/授权仍不全。需拆成功抑制、错误报告和每个 flag，不能用 sendmsg 基础通过代替。 |
 
 ## 第 61～80 个候选
@@ -103,10 +103,10 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0114-004 | §2.2.5.4.1.2，rendezvous 条件项 | RENDEZVOUS_SEND 的 eager 数据不超过配置上限。 | 原生与 provider RDM rendezvous 已接通，含 eager 边界、源 MR 权限和双向恢复；见 RENDEZVOUS.md 及相应源/目标/边界回归。完整 M5 仍未退出。 |
 | UE11-p0115-001 | §2.2.5.4.2，Profile 条件项 | AI Full/HPC 支持 tagged API；DGRAM 不支持。 | 原生及公开 scalar/v/msg tagged 已实现，64位精确/通配与 CQ 有回归；DGRAM 不公布 tagged。优化格式、rendezvous 等完整 M5 仍待验收。 |
 | UE11-p0115-002 | 表 2-23，接收 API 与匹配 | 支持 trecv/trecvv/trecvmsg，按 posted 顺序搜索；AI Full 至少 exact match，不支持 wildcard 时拒绝非零 ignore；HPC 支持 wildcard。 | 需拆分三个 API、FIFO、exact、ignore 拒绝及 wildcard，当前均缺失。 |
-| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data、tsenddata 已有0/MTU/多包、缓冲区所有权与 CQ 回归；原生 deferrable 源/目标已有事务回归；公开按 Profile/大小选择和 rendezvous 事务仍缺失。 |
+| UE11-p0115-003 | 表 2-24，发送 API 与 opcode | tsend/tsendv 及跨页 tsendmsg/tinject/tsenddata 必选；AI Full/HPC 分别按大小选择 tagged、deferrable tagged 或 rendezvous tagged。 | 公开 tsend/v/msg、tinject/data 及源端大消息 rendezvous tagged 已有回归；原生 deferrable tagged 有重启事务。完整按 Profile/大小选择仍待验收，见 PROVIDER-TAGGED.md 与 PROVIDER-RENDEZVOUS.md。 |
 | UE11-p0116-001 | §2.2.5.4.2.1，两个匹配分支 | 指定 src_addr 时同时匹配 tag 与地址中的 Initiator ID；UNSPEC 时不得用 initiator 过滤。 | 原生 Job 内32位 rank 与公开 FI_DIRECTED_RECV 已用两个独立对端验证；未请求能力时忽略 src_addr，UNSPEC 为任意源。provider 使用UDP端点node作为rank代理；其他地址字段不混入强制匹配。 |
 | UE11-p0116-002 | §2.2.5.4.2.1，Profile/能力条件项 | AI Full/HPC 支持 UNSPEC；HPC 支持指定源地址。 | 未实现；FI_EXACT_DIRECTED_RECV 例外声明及与前句的关系需在选用该能力时单独复核，当前不宣称该能力。 |
-| UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 与未标记 rendezvous 分开验收；两者当前均缺失。 |
+| UE11-p0116-003 | §2.2.5.4.2.2，tagged rendezvous 条件项 | RENDEZVOUS_TSEND 的 eager 数据不超过配置上限。 | 原生与 provider 的 tagged rendezvous 已分别检查 eager 边界、源 MR 只读租约、源 rank/tag 和 CQ；不将普通 rendezvous 的测试直接代用，见 RENDEZVOUS.md。 |
 | UE11-p0117-001 | 表 2-25，RMA API 与 flags | AI Full/HPC 支持 read/readv/readmsg；AI Base/Full/HPC 支持 write/writev/writemsg/inject_write/writedata；分别支持表列 flags 与 vendor iovec 上限。 | WRITE/WRITE IMM、单 iovec、CQ data 和部分完成等级已有覆盖；公开 read/v/msg 已有 RAW/WAR、两种结果载体与丢包回归；三个完成等级采用 GO 点，inject 已覆盖复制/CQ/边界，FI_FENCE 已覆盖混合模式/重试。不能用 WRITE 成功证明整张表通过。 |
 | UE11-p0118-001 | §2.2.5.4.4，原子数量约束 | 非取回原子支持 bulk；取回原子限制为所选类型的一个单位。 | 非取回 bulk 已在 native/provider 实现并测试，公开 valid/query 返回类型相关数量；公开8～128位整数 fetching 已实现，查询数量1并拒绝多单位；零字节put/get是§3.4.2.12的显式例外。 |
 | UE11-p0118-002 | 表 2-26，非取回 API 与 flags | atomic/atomicv/atomicmsg 必选；支持 COMPLETION、INJECT、FENCE，以及下一页续列的 TAGGED。 | bulk 整数操作已有覆盖；FI_FENCE 与 FI_INJECT 已有公开 API 回归；TAGGED 尚缺。“all profiles” 按本章范围解释。 |
@@ -116,7 +116,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0120-002 | §2.2.5.4.5，选定 INC 后的管理条件项 | 支持 INC 时能与 manager 通信，并解释 PRIMARY/SECONDARY URL 配置。 | 当前未选定 INC；后续增强需正向、fallback 与失效测试。 |
 | UE11-p0121-001 | §2.2.5.6，错误 CQ 三项义务 | err 采用相应 libfabric 错误，无对应项时用 FI_EIO；prov_errno 保留 SES 错误码。 | provider 已实现映射、FI_EIO fallback 与 prov_errno；公开错误进程测试仅覆盖部分 SES 错误，完整映射表仍需逐项验证。 |
 | UE11-p0121-002 | §2.2.6，DGRAM 模式 | FI_EP_DGRAM 使用 UUD。 | 已有公开 DGRAM 进程与 wire 路径；不能推断为远端可靠交付。 |
-| UE11-p0121-003 | §2.2.6，RDM 模式跨页续文 | RDM 使用 RUD/ROD，HPC 可使用 RUDI；AI Base/Full 依操作和排序按表 2-29/30 选择，HPC 按表 2-31。 | provider 现按独立 SEND/R/W 谓词选择 ROD/RUD，公开 API 与实际报文检查四种组合；HPC RUDI/rendezvous 未实现。后续 p0122 候选包含同一义务的细化。 |
+| UE11-p0121-003 | §2.2.6，RDM 模式跨页续文 | RDM 使用 RUD/ROD，HPC 可使用 RUDI；AI Base/Full 依操作和排序按表 2-29/30 选择，HPC 按表 2-31。 | provider SEND/tagged 与 RMA/ATOMIC 已按独立排序谓词选择 ROD/RUD；大消息 rendezvous 已接通。原生 RUDI WRITE/READ 有回归，provider 的 HPC RUDI 策略仍缺失。 |
 
 ## 第 81～100 个候选
 
@@ -128,7 +128,7 @@ libfabric 映射范围，不能据此把 Unified Local 强制映射到 libfabric
 | UE11-p0121-004 | §2.2.6，前段 RDM 选择的细化 | AI Base/Full 只使用 RUD/ROD，按操作和配置的排序选择。 | 与 p0121-003、后续两张表共享实现差距，不重复算已实现功能。 |
 | UE11-p0122-001 | 表 2-29，AI Base 四种组合 | SEND 排序只控制 SEND 的 ROD/RUD；R/W 排序只控制 RMA/ATOMIC 的 ROD/RUD，两者独立。 | `libfabric_mode_selection_test` 检查四行中的 SEND、WRITE、ATOMIC 及实际 PDS type，另覆盖 RAS/SAR/SAW/WAS 交叉 flags；完整 Profile 仍有其他缺口。 |
 | UE11-p0122-002 | 表 2-30，AI Full 四种组合 | SEND/TAGGED 与 RMA/ATOMIC 分别遵循各自排序；有 SEND 排序的 deferrable tagged 初始/eager 数据用 ROD，后续数据用 RUD。 | 公开 SEND/tagged 与 RMA/ATOMIC 已分别按排序谓词选择 ROD/RUD；真实线上模式和分空间代次有回归。deferrable 初始/eager与重启跨模式事务仍缺失，不能通过整表。 |
-| UE11-p0122-003 | 表 2-31，HPC 组合与策略 | SEND/TAGGED、rendezvous 初始/后续、RMA、ATOMIC 分别选择表列模式；无 R/W 排序的 RMA 可依策略用 RUD 或 RUDI。 | RUDI 为可选分支而非所有 RMA 强制；当前未实现 HPC/rendezvous/RUDI，未作能力声明。 |
+| UE11-p0122-003 | 表 2-31，HPC 组合与策略 | SEND/TAGGED、rendezvous 初始/后续、RMA、ATOMIC 分别选择表列模式；无 R/W 排序的 RMA 可依策略用 RUD 或 RUDI。 | 原生 rendezvous 与独立 RUDI WRITE/READ 已接通；provider rendezvous 有双进程恢复与排序证据。完整表2-31及 provider RUDI 自动选择仍未通过，HPC 能力未宣告。 |
 | UE11-p0124-001 | §2.2.8.1，排序端点条件项 | 配置消息排序的 endpoint 操作约束到一个发送队列。 | provider 当前串行应用队列符合这一局部分支；多队列及流量类别映射是 SHOULD，PDC 内 packet window 不等于多个应用发送队列。 |
 | UE11-p0126-001 | §2.2.9，选定 TSS 后的条件项 | provider 支持表 2-33 的完整安全绑定参数，并由特权地址分配流程取得。 | M6/M7 管理与 TSS 缺失；真实 kernel driver 后续系统集成。 |
 | UE11-p0126-002 | 表 2-33，字段与保留位 | 支持 AES-GCM-256、三种模式、AN/automatic rekey 选择、shift/mask、四种封装及 offset/AN/SDI/SSI；rekey 保留位必须为零。 | 需逐字段、范围、组合和无效保留值建项，当前未实现。AES 库调用本身不代替安全绑定。 |
@@ -200,9 +200,9 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0190-003 | 表 3-4，标准头 | AI Base/Full/HPC 均需 44 字节标准请求头。 | codec 黄金样例/native/参考互通部分覆盖；尚非全部字段组合通过。 |
 | UE11-p0190-004 | 表 3-4，多格式矩阵 | Full 需 DS/RTR；前三 Profile 需 DS-as-SEND；HPC 需 optimized non-matching/small 和 rendezvous；Unified Local 需 local 格式；原子扩展四种必选；CAS 扩展 Full/HPC/Local 必选。 | DS-as-SEND、标准原子扩展已有子集测试，其余 M5/M8 缺失；不能把未选择的 DS/RTR 当作 AI Base 源端必选。 |
 | UE11-p0191-001 | 表 3-4，标准响应 | AI Base/Full/HPC 支持标准 response。 | 当前 codec 和 SES 响应有回归；表中 16B 与正式 §3.4.3.7 的长度差异已在 BASELINE-AUDIT 记录，按正式字段布局编码。 |
-| UE11-p0191-002 | 表 3-4 续，响应/packing/GO | Full/HPC 支持带数据响应；HPC optimized response；Local compact response 和每包最多 16 消息的接收处理；四种均支持 GO delivery complete。 | 带数据/optimized/local/packing 缺失；native 成功在受检目标内存写入后报告，完整 GO、完成等级及本地路径联合证明未完成。 |
+| UE11-p0191-002 | 表 3-4 续，响应/packing/GO | Full/HPC 支持带数据响应；HPC optimized response；Local compact response 和每包最多 16 消息的接收处理；四种均支持 GO delivery complete。 | STD READ/fetch 及选定 DATA_SMALL fetching 数据响应有回归；Local compact/packing 缺失。native 成功在受检目标内存动作/结果放置后报告，完整 GO/完成等级及本地路径联合证明未完成。 |
 | UE11-p0191-003 | §3.3.6，模式总要求 | 各 Profile 支持表 3-5 列出的模式及对应网络行为。 | 不能用一种通用可靠网络后端覆盖所有模式；当前仍由原 PDC 实现 RUD/ROD/UUD。 |
-| UE11-p0191-004 | 表 3-5，模式矩阵跨页截断 | AI Base/Full/HPC 都需 RUD/ROD/UUD；HPC 需 RUDI；Unified Local 需 RODL。 | 原图确认本候选文本遗漏表后两行。前两种可靠模式与 UUD 有回归；RUDI/RODL 缺失，独立能力保持 false。 |
+| UE11-p0191-004 | 表 3-5，模式矩阵跨页截断 | AI Base/Full/HPC 都需 RUD/ROD/UUD；HPC 需 RUDI；Unified Local 需 RODL。 | 原图确认本候选遗漏表后两行。RUD/ROD/UUD 及原生 RUDI WRITE/READ 子集已有回归；RODL 缺失，完整 HPC/Unified Local 能力保持 false。 |
 
 ## 第 141～160 个候选
 
@@ -219,18 +219,18 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0201-001 | §3.4.2.3.1，Job provisioning | 同一可达网络内同时运行、不可互通的实体使用不同 JobID；可通信实体可共享；应用可用多个 Job。 | native 能表示多 Job，但网络级特权分配/冲突检测与回收生命周期待 M7；单 registry 的集合不代替全局 provisioning。 |
 | UE11-p0201-002 | §3.4.2.3.2，进程隔离 | 各 OS 进程有不同 PIDonFEP；同一 OS 进程可有多个，且与 OS PID/PASID 解耦。 | 当前 native 可配置 PID namespace，尚无特权进程分配模型；固定 PID=1 的 provider 不是完整跨进程隔离证明。 |
 | UE11-p0202-001 | §3.4.2.3.2，PID scope | PIDonFEP 范围相对于 Job 或 Fabric Address。 | `ResourceDirectory` 支持相对映射和绝对 PID；provider 标准地址入口仍缺失。 |
-| UE11-p0202-002 | §3.4.2.3.3，资源空间/optimized | SEND/tag/RMA index 空间独立；optimized RMA 的 index 精确选择一个 RMA resource。 | native SEND/RMA 空间已分开；tag 与 optimized 单资源关联未实现。标准头允许一个 RMA resource 的情形不能反推所有 index 强制只有一个 MR。 |
+| UE11-p0202-002 | §3.4.2.3.3，资源空间/optimized | SEND/tag/RMA index 空间独立；optimized RMA 的 index 精确选择一个 RMA resource。 | native SEND/tagged/RMA 有独立 index 空间；SMALL 的优化索引按 Job/PID 解析 MR，并拒绝绝对同索引歧义。自动优化 key 分配及完整资源类仍待验收，见 MEMORY-KEYS.md。 |
 | UE11-p0204-001 | §3.4.2.3.5，匹配顺序 | ROD wildcard 在所有匹配的 posted buffers 中按 FIFO 消耗；RUD FIFO 为 SHOULD，网络乱序可导致不同次序。 | tagged_message_test 及 provider directed/tagged 回归覆盖精确/通配、FIFO 与源 rank；RUD 不将网络乱序误写成全局发送顺序，完整组合仍待验收。 |
 | UE11-p0204-002 | §3.4.2.3.5，API key 映射 | 采用 RMA memory key 时把 API key 映射到线头 match_bits，保持相应 namespace。 | native/provider 标准头已有 key 到线格式与目标授权回归；optimized 通过 index 选择的无 key 路径另验。 |
 | UE11-p0204-003 | §3.4.2.3.7，唯一 buffer 选择 | 未标记 tuple 唯一选择一个 buffer；匹配 tuple+criteria 也唯一选择 buffer，可采用不同内部数据结构。 | native untagged/tagged/RMA 使用受检选择和具体注册身份，有 FIFO/匹配/Job 隔离回归；不把内部 map 容器写成规范要求。 |
-| UE11-p0205-001 | §3.4.2.3.7，无 key RMA | 未携 key 时 tuple 唯一选择 buffer；三种操作使用独立 index 空间。 | optimized/index-only RMA 与 tag 缺失；标准头 key lookup 不代替无 key 条件项。 |
+| UE11-p0205-001 | §3.4.2.3.7，无 key RMA | 未携 key 时 tuple 唯一选择 buffer；三种操作使用独立 index 空间。 | 原生 SMALL WRITE/整数原子/fetch 的索引路径与 tagged 匹配已有定向回归；索引解析不替代 MR 权限。更多优化组合及 Unified Local 仍待补齐。 |
 | UE11-p0206-001 | §3.4.2.4，定位后授权 | buffer 定位后执行 JobID 与适用安全域授权。 | native Job/MR 检查已有负向回归；M6 SDI 检查尚缺。 |
 | UE11-p0206-002 | §3.4.2.4.1，源端可信 Job | 由发起节点可信层分配或验证 JobID。 | native 源端检查配置 Job，但任意应用可自行配置的教学 API 不等于特权管理；M7 授权对象/可信边界待实现。 |
 | UE11-p0206-003 | §3.4.2.4.1，逐 buffer 授权 | 每次访问确认 Job 可访问该 buffer；至少一个 Job。只确认 Job 属于 FEP 集合不充分。 | exact/any MR 与相对/绝对访问已有回归；provider 固定 Job 和未完成的配置链仍需补全。 |
 | UE11-p0207-001 | §3.4.2.4.2，选定 TSS 后的 SDI 授权 | SDI 必须被 endpoint 允许；失败按 TSS 丢弃并报告，不发送 SES response 或 PDS NACK。 | M6 缺失；认证失败不得沿当前普通 semantic error 路径回复。UET_NO_RESPONSE 的提前返回例外不允许最终成功完成。 |
 | UE11-p0207-002 | §3.4.2.5，消息大小与分包 | bulk 上限由标准头 32 位长度决定，可分别限制 RMA/send；分包遵循 Payload MTU，紧凑头还有更窄限制。 | streamed WRITE 已验证 UINT32_MAX 和内存有界；其他大消息与紧凑头仍缺失，provider 大小能力不能由 WRITE 单测推广到全部操作。 |
 | UE11-p0211-001 | §3.4.2.6.1，use-once 生命周期 | 一条消息独占已匹配 buffer，其他消息不可再用；保留到该消息完成才还给应用。支持 SEND/RECV，支持 tag 时也覆盖 tag。 | native posted receive 绑定 registration identity 并在最终完成前保留，撤销/重复/晚到有回归；tag 与 RMA use-once 仍未实现。 |
-| UE11-p0212-001 | §3.4.2.6.3，HPC tag 匹配 | HPC 目标支持 tagged；使用 match_bits 和 initiator，是否硬件加速不影响要求。 | M5 未实现；后续测试同时验证 tag 与 source criteria，不能只比较 tag。 |
+| UE11-p0212-001 | §3.4.2.6.3，HPC tag 匹配 | HPC 目标支持 tagged；使用 match_bits 和 initiator，是否硬件加速不影响要求。 | 原生与 provider tagged 使用64位 tag/ignore mask 和 Job 内32位 initiator criteria，有通配、FIFO、定向接收回归；完整 HPC 仍未验收，见 TAGGED-MESSAGES.md。 |
 
 ## 第 161～180 个候选
 
@@ -242,10 +242,10 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0212-002 | §3.4.2.6.4，目标 memory key | RMA 支持把 match_bits 用作 memory key，并遵循 libfabric 定义的结构。 | native/provider 标准头已有 key 映射及授权回归；不把内部容器选择当作线格式要求。 |
 | UE11-p0213-001 | §3.4.2.7.1.1，消息排序条件 | 需要 SEND 顺序时，决定目标 buffer 的初始 SEND/TSEND/rendezvous 请求使用 ROD；DS/rendezvous 后续数据可独立使用 RUD。 | provider 普通 SEND 模式映射已按独立谓词修正并检查实际报文；原生 tagged 与 DS 的 ROD初始/RUD重启已验证；完整跨退避顺序、Sync Group 和 rendezvous 两阶段仍未实现。 |
 | UE11-p0213-002 | §3.4.2.7.1.1，混合顺序 | 混合 RMA/messaging 的顺序可由 ROD 保证；未使用 ROD 时用源端 fence 等待前操作完成。 | provider 已支持 FI_FENCE；公开模式用例同时验证 SENDMSG/WRITEMSG/ATOMICMSG 的 flags，以及 NO_MATCH 重试不被后续 fenced 操作越过。 |
-| UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | READ/WAR 及结果缓存未实现；不能用按请求顺序发送 READ 请求证明结果生命周期正确。 |
+| UE11-p0213-003 | §3.4.2.7.1.2，WAR 条件 | 使用 ROD 实现 WAR 时，保留先前 READ 的结果直到 PDS Clear 表明发起端收到；公布相应大小限制。 | 原生 STD READ 已支持 ACK-data 与反向返回，受检数据生命周期见 READ.md/CLEAR-PROCESSING.md；显式 WAR 请求的结果保留与能力大小限制仍需独立验收，不能由普通 READ 成功代替。 |
 | UE11-p0214-001 | §3.4.2.7.1.3，消息内连续性 | SOM 首 PSN 与 offset0；后包 PSN 连续、offset=(N−1)×Payload MTU；最后包 EOM；同 PDC 两条消息不交错。 | native FIFO producer、PDC PSN 及大消息分片已有回归；M5 多消息/重启格式仍需各自测试。 |
 | UE11-p0214-002 | §3.4.2.7.1.3，线端顺序 | ROD 按 PSN 顺序发往线端；RUD 可任意顺序。 | 初始 FIFO、GoBackN 顺序和回绕已测试；不同 NACK 延迟、NIC 背压与重传组合仍须持续覆盖。 |
-| UE11-p0215-001 | §3.4.2.7.3，READ 响应顺序 | 同 PDC 上 ROD/RODL 的带数据 READ 响应按请求接收顺序生成。 | M5/M8 缺失；异步 SES 必须显式维护顺序，不能依赖当前同步 WRITE 实现的回调顺序。 |
+| UE11-p0215-001 | §3.4.2.7.3，READ 响应顺序 | 同 PDC 上 ROD/RODL 的带数据 READ 响应按请求接收顺序生成。 | 原生 STD READ 在 ROD 的同一 PDC 内共用既有队列与返回方向；优化 READ 的同连接测试正在补齐。RODL 与完整异步响应排序范围仍待验收，不能只凭同步回调顺序通过。 |
 | UE11-p0216-001 | §3.4.2.11，Payload MTU 能力/默认 | 支持 4096；1024/2048/8192 为 SHOULD；规范默认 4096。 | native 可配置并测试 4096/8192；现有入口默认 1024、研究测试还使用非标准小片段，需明确配置策略及后续 Profile 严格模式。 |
 | UE11-p0216-002 | §3.4.2.11，分包/路径限制 | 每个非末包恰好 Payload MTU；包适配全路径 Ethernet MTU；IPv4 DF=1；FEP 不再分片。 | codec DF、原生分片及场景 MTU 校验已有覆盖；动态管理路径变化与所有扩展头的容量校验仍需补全。 |
 | UE11-p0217-001 | §3.4.2.14，message ID | READ 请求携 ID；其他单包有字段时可用有效 ID 或0；DGRAM=0；同目标 PDC 的在途消息 ID 唯一。 | native ID lease、迟到/复用、DGRAM0 和 READ 原/响应 ID 已有回归；READ 提前确认、失败连接退休有独立策略测试，紧凑无 ID 格式另验。 |
@@ -273,7 +273,7 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0229-003 | §3.4.3.3，压缩地址依赖 | 首头 ac=0；后续 ac=1 时，地址相对紧邻前一条，扩展大小继承前一个 ac=0 的消息。 | M8 缺失；地址基准与扩展格式基准是两个不同的状态。 |
 | UE11-p0232-001 | §3.4.3.5，原子扩展/错误长度 | 每包带原子扩展，不与 rendezvous 扩展组合；元素数按长度/类型宽度；不整倍数长度执行零字节。 | native 对 request_length/packet count/offset 的整倍数检查在原子访问前执行；完整实际线端 malformed-message 与多包错误联合验收仍需补全。 |
 | UE11-p0232-002 | §3.4.3.5，fetch 单单位 | fetching 不操作多于一个所选类型元素，并保留旧值用于响应。 | fetching 未实现；非取回 bulk 不受此单单位限制。 |
-| UE11-p0233-001 | §3.4.3.6，同步完成类型 | completing SYNC_WRITE 设置 hd；SYNC_ATOMIC 长度至多8、hd=0，只用允许的非取回操作/至多8字节类型，排除 READ/MSWAP/CSWAP。 | M5 缺失；按 opcode、datatype、长度、hd 分别验证，不能直接复用任意普通原子组合。 |
+| UE11-p0233-001 | §3.4.3.6，同步完成类型 | completing SYNC_WRITE 设置 hd；SYNC_ATOMIC 长度至多8、hd=0，只用允许的非取回操作/至多8字节类型，排除 READ/MSWAP/CSWAP。 | 原生 SYNC_WRITE/SYNC_ATOMIC 已逐项检查 hd、类型、操作和总长≤8，源端组事务与目标计数/延迟动作有回归；组完成后额外成员/合法复用分类仍部分，见 SYNCHRONIZED-TRANSACTIONS.md。 |
 | UE11-p0233-002 | §3.4.3.6，同步 scope/count | 目标按源 IP+sync_group 查状态；完成操作携包括自身的总消息数，非完成 write 为0。 | M5 缺失；正文“所有 sync write 为0”的宽泛用语需与表 3-15 completing 分支一起解释，不能让 completing write 丢失计数。 |
 | UE11-p0233-003 | 表 3-15，字段编码续文 | group/count 各16位；非 completing count=0，completing count=整组消息数。 | 已阅读下一页续表；M5 缺失，还需零/最大计数与重复完成消息回归。 |
 | UE11-p0235-001 | §3.4.3.7，带数据响应选择 | 请求长度大于 Payload MTU 时使用完整带数据响应；optimized request 不用此完整格式。 | 完整数据响应头已用于原生多包 READ、ACK/反向请求两种 carrier，响应关联经真实 PDS 测试；optimized 请求/响应仍缺失。 |

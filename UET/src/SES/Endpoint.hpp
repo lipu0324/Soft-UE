@@ -108,6 +108,7 @@ struct EndpointCapabilities {
     bool optimized_small_write=true,optimized_medium_write=true,optimized_medium_send=true;
     bool optimized_small_atomic=true,optimized_medium_atomic=true;
     bool optimized_small_fetching_atomic=true,optimized_medium_fetching_atomic=true;
+    bool optimized_small_read=true,optimized_medium_read=true;
     bool datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
@@ -151,6 +152,7 @@ public:
         capabilities_.optimized_small_write=capabilities_.optimized_medium_write=capabilities_.optimized_medium_send=host_.services().standard_wire;
         capabilities_.optimized_small_atomic=capabilities_.optimized_medium_atomic=host_.services().standard_wire;
         capabilities_.optimized_small_fetching_atomic=capabilities_.optimized_medium_fetching_atomic=host_.services().standard_wire;
+        capabilities_.optimized_small_read=capabilities_.optimized_medium_read=host_.services().standard_wire;
         capabilities_.rudi_write=capabilities_.rudi_read=host_.services().standard_wire;
         host_.configure_semantic_payload_mtu(static_cast<uint32_t>(mtu_));
         host_.set_receive_admission(
@@ -270,10 +272,11 @@ private:
             const bool atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
             const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
             if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
-                (operation.type!=OperationType::Noop && !write && !atomic && !(medium && send)) || (write && operation.immediate_data)) {
+                (is_read && operation.read_length>mtu_) ||
+                (operation.type!=OperationType::Noop && !write && !atomic && !is_read && !(medium && send)) || (write && operation.immediate_data)) {
                 complete_local(CompletionStatus::Unsupported); return 0;
             }
-            if (small && (write || atomic)) {
+            if (small && (write || atomic || is_read)) {
                 try { MemoryKeyFormat::validate(operation.remote_key,KeyAssignment::Provider); }
                 catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return 0; }
                 if (!(operation.remote_key&MemoryKeyFormat::Optimized)) { complete_local(CompletionStatus::InvalidRequest); return 0; }
@@ -1788,7 +1791,7 @@ private:
                     optimized_header.initiator=standard.initiator; optimized_header.match_bits=standard.match_bits;
                 } else {
                     auto& optimized_header=request.pkt.bth_header.Optimized_Header; fill(optimized_header);
-                    if (standard.opcode==1 || standard.opcode==3 || standard.opcode==4)
+                    if (standard.opcode==1 || standard.opcode==2 || standard.opcode==3 || standard.opcode==4)
                         optimized_header.resource_index=operation.remote_key&0xfff;
                 }
                 // pkt_len includes the operation extension as well as the
@@ -2202,6 +2205,31 @@ private:
         feed_submissions();
     }
     void receive_return_data(const PDC_SES_req& request) {
+        if (request.request_wire_format==Optimized_Response_with_Data_Header) {
+            // Reverse packets have their own sequence space. The original
+            // READ PSN, plus this exact PDC incarnation/FEP/Job, selects the
+            // single pending no-MID request. Never treat it as a local MID.
+            if (request.original_read_psn) {
+                const auto& data=request.pkt.bth_header.Semantic_Response_with_Data_Header;
+                for (const auto& [local_submission_id,operation]:pending_) {
+                    if (!operation.is_read || operation.wire_semantic_format==Standard_Header ||
+                        request.source_fep!=operation.peer || request.PDCID!=operation.local_pdc ||
+                        request.connection_start_psn!=operation.connection_start_psn || data.job_id!=operation.job ||
+                        !operation.awaiting_semantic_responses.count(*request.original_read_psn)) continue;
+                    auto projected=request.pkt;
+                    auto& header=projected.bth_header.Semantic_Response_with_Data_Header;
+                    header.read_request_msg_id=local_submission_id;
+                    header.modified_length=operation.length;
+                    place_read_result(local_submission_id,projected); break;
+                }
+            }
+            // A late/unknown result still drains the reliable reverse PDC;
+            // it cannot select a new result MR or complete another operation.
+            SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
+            response.rsp_len=12; response.rsp=UET::PDS::default_semantic_response(request.pkt);
+            if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected optimized return-data result");
+            host_.wake(); return;
+        }
         const auto& header=request.pkt.bth_header.Semantic_Response_with_Data_Header;
         const auto found=pending_.find(header.read_request_msg_id);
         if (found!=pending_.end() && found->second.is_read && request.source_fep==found->second.peer &&
@@ -2217,6 +2245,13 @@ private:
     }
     void respond(const PDC_SES_rsp& response) {
         if (response.delivery_mode==RUDI) { respond_rudi(response); return; }
+        if (response.original_request_format==Optimized_Response_with_Data_Header) {
+            if (response.PDCID<MAX_PDC || response.PDCID>=MAX_PDC*2 ||
+                response.pkt.bth_type!=Semantic_Response_Header || response.pkt.bth_header.Semantic_Response_Header.message_id) return;
+            auto projected=response;
+            projected.pkt.bth_header.Semantic_Response_Header.message_id=response.local_submission_id;
+            complete_read_return(projected); return;
+        }
         if (response.original_request_format==Optimized_Header || response.original_request_format==Small_Message_RMA_Header) {
             const auto pending=pending_.find(response.local_submission_id);
             if (pending==pending_.end() || pending->second.wire_semantic_format!=response.original_request_format) return;
@@ -2932,6 +2967,9 @@ private:
                 // never a post-transmit snapshot of the READ result.
                 SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
                 response.rsp_len=20+count; response.gtd_del=true; response.rsp=std::move(data);
+                if (request.request_wire_format==Optimized_Header || request.request_wire_format==Small_Message_RMA_Header) {
+                    compact_data_response(response.rsp,request.orig_psn); response.rsp_len=12+count;
+                }
                 if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected READ data ACK");
                 message.completed=message.end_seen && message.read_requests.bytes()==message.total;
                 trace_.record(node_,"read_ack_data",count); host_.wake();
@@ -3012,12 +3050,7 @@ private:
                 // Table3-21 mandates DATA_SMALL for SMALL fetching atomics.
                 // It carries the original PSN and one returned datatype, not
                 // an invented MID or the dual-operand request's32B length.
-                const auto full=result;
-                response.rsp.bth_type=Optimized_Response_with_Data_Header;
-                auto& compact=response.rsp.bth_header.Optimized_Response_with_Data_Header;
-                compact={}; compact.opcode=full.opcode; compact.return_code=full.return_code;
-                compact.job_id=full.job_id; compact.payload_length=full.payload_length;
-                compact.original_request_psn=request.orig_psn;
+                compact_data_response(response.rsp,request.orig_psn);
                 response.rsp_len=12+response.rsp.payload.size();
             }
             message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
@@ -3098,13 +3131,18 @@ private:
         };
         const auto& header=request.pkt.bth_header.Standard_Header;
         if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
-        if ((header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=4 && !(medium && (header.opcode==5 || header.opcode==9))) ||
+        if ((header.opcode>4 && !(medium && (header.opcode==5 || header.opcode==9))) ||
             (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
-        if (!small || (header.opcode!=1 && header.opcode!=3 && header.opcode!=4)) { receive_standard(request); return; }
+        if (!small || (header.opcode!=1 && header.opcode!=2 && header.opcode!=3 && header.opcode!=4)) { receive_standard(request); return; }
         if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
         try {
-            const auto selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
-                ResourceSpace::Rma,header.ri_generation);
+            // As on STD READ, a replay belongs to its admitted message. A
+            // changed resource generation gates new SOMs, not this message's
+            // uncached READ re-execution (§3.5.17). Live MR access below is
+            // still reauthorized, including revocation and private origins.
+            const auto selected=owner.initialized?ResourceSelection{owner.pid,owner.resource_index,owner.error_generation}:
+                resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                    ResourceSpace::Rma,header.ri_generation);
             auto projected=request;
             projected.pkt.bth_header.Standard_Header.match_bits=memory_.resolve_optimized_key(header.job_id,selected.absolute_pid,
                 header.resource_index,header.rel);

@@ -128,3 +128,14 @@ Table3-10按本包payload描述该字段，§3.4.5.2另规定每请求一MTU及�
 当前真实互通使用一个多包RUDI WRITE，完成后发两个具有独立MID的READ分别检查1024和
 89字节。它通过了参考目标的放置与返回数据检查，却不证明同一多包READ与参考互通。
 原生对原生的多包READ及旧4GiB−1实验是不同范围的证据，不将它们替代该差异。
+
+## 显式优化单包格式
+
+`RequestHeaderFormat::Small/Medium` 可用于长度不超过 Payload MTU 的 READ。
+DATA_SMALL12B 没有两个 MID，而是携带原 READ PSN；ACK 和反向通道都保持各自的
+PDS 恢复、Clear 及受检 MR 放置。源结果 MR 的具体注册身份不能因同 key 重用而改变。
+SMALL 的 RI 还用于按 Job/PID 查找优化 MR，随后执行通常的 READ 权限检查。
+见 [优化头](OPTIMIZED-HEADERS.md) 的五种本地/线上身份及证据范围。
+
+这一单包格式没有 READ 续包，也没有解决上文所述参考实现对非 SOM payload_length 的
+解释差异；固定参考版本本身拒绝优化头，因此没有优化 READ 参考互通声明。
