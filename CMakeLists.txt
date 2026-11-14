@@ -20,6 +20,8 @@ endif()
 
 set(CORE ${CMAKE_CURRENT_SOURCE_DIR}/UET/src)
 add_library(softue_protocol STATIC
+  ${CORE}/SES/Endpoint.cpp
+  ${CORE}/Runtime/PdsHost.cpp
   ${CORE}/PDS/PDC/PDC.cpp
   ${CORE}/PDS/PDC/Probe.cpp
   ${CORE}/PDS/PDC/TransmitTiming.cpp
