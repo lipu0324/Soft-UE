@@ -936,7 +936,7 @@
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Native exact/wildcard/rank posting authority and shared integer kernels cover STD/MEDIUM,8–64bit nonfetching and8–128bit single-element fetching/CAS. Frozen4737e52 passes13 normal CTests6.12s and13ASan/UBSan/leak CTests39.64s, including prior standard/optimized atomics and use-once. Frozena363e23 passes9 public provider normal regressions5.42s with no compilers, including new2-provider FI_TAGGED MSG/query/inject/private-key rejection checks. Final consolidated source still requires sanitizer/public/full validation. See TAGGED-ATOMICS.md; no HPC conformance claim."
+      "evidence_note": "Native STD/MEDIUM tagged integer nonfetching8–64bit and single-element fetching/CAS8–128bit use exact/wildcard/rank posting authority and common atomic kernels; public FI_TAGGED MSG/query/inject maps tag/offset with private posting atomic rights while key-based RMA remains forbidden. Frozen5c30b3376768bef76c1175ef1e40e192637ce841 passes full166/166normal CTests139.75s and166/166ASan/UBSan/leak CTests751.49s with provider/pinned reference enabled, sequential suites and no compilers.80headergoldens,216native transactions,80negative+9zero+6unsupported scenes and public2-provider behavior are covered. No tagged-atomic/optimized reference interoperability or full HPC/Profile claim; see TAGGED-ATOMICS.md."
     },
     {
       "id": "SES-OPTIMIZED-SYNCHRONIZATION",
@@ -952,7 +952,7 @@
       "profiles": [
         "HPC"
       ],
-      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic connect to existing group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Early format validation preserves group slots, index selection and PDS/CMS length include the synchronization extension. Baseline Unsupported and then lost optimized wire-format identity were reproduced independently. The fixed38de3e4 passes17 normal CTests5.02s and17ASan/UBSan/leak CTests50.80s, including176 new transaction/cross-PDC/revocation/fault/boundary scenes and9provider regressions, no compilers during tests. Shared helper renamed deferred_receive_handle afterward; consolidated166full validation remains pending. See OPTIMIZED-SYNCHRONIZATION.md; no complete M5/Profile claim."
+      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic use original group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Early format rejection preserves group slots; index resolution and byte accounting include the synchronization extension. Independent probes reproduced baseline Unsupported and omitted wire-format identity in a deferred handle. Fixed and renamed deferred_receive_handle preserves original PSN ownership. Frozen5c30b3376768bef76c1175ef1e40e192637ce841 passes full166/166normal139.75s and166/166ASan/UBSan/leaks751.49s with provider/reference enabled and no compilers;176new transactions/cross-PDC/revocation/fault/boundary scenes are included. Complete maximum-group and legal reuse/extra-member acceptance remain open; see OPTIMIZED-SYNCHRONIZATION.md. No complete M5/Profile claim."
     }
   ]
 }
