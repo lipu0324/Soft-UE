@@ -39,6 +39,7 @@
 #include "../PeerSequenceWindow.hpp"
 #include "../NegativeAcknowledgment.hpp"
 #include "../OrderedRecovery.hpp"
+#include "../../SES/SemanticRequestFields.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
@@ -691,9 +692,10 @@ protected:
         // §3.5.17: fetching atomics always return their unique result in an
         // ACK, independent of the READ threshold. Never infer its data from
         // DEFAULT/CACK, and never use READ's uncached re-execution policy.
-        return runtime_ && runtime_->standard_wire && request!=tx_pkt_buffer.end() &&
-            request->second.PDS_type==RUOD_req_header && request->second.SESpkt.bth_type==Standard_Header &&
-            request->second.SESpkt.bth_header.Standard_Header.opcode==4;
+        if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
+            request->second.PDS_type!=RUOD_req_header) return false;
+        const auto fields=UET::SES::semantic_request_fields(request->second.SESpkt);
+        return fields && fields->header.opcode==4;
     }
     void clearReceivedPacketsThrough(uint32_t clear_through);
     void advanceCumulativeAck();
