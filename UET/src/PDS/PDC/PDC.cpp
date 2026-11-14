@@ -330,7 +330,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
             full.modified_length=request.request_length;
         } else if (fields->wire_format==Optimized_Header) return;
         const auto& result=response.bth_header.Semantic_Response_with_Data_Header;
-        const bool fetching_atomic=request.opcode==4;
+        const bool fetching_atomic=request.opcode==4 || request.opcode==0x0e;
         const uint32_t offset=fetching_atomic || request.som?0:request.diff.som_false.message_offset;
         const bool valid_offset=offset<=request.request_length;
         const auto datatype=fetching_atomic?

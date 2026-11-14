@@ -406,6 +406,47 @@ public:
             throw std::invalid_argument("zero-byte atomic is put/get only");
         if (zero_length && (!operand.empty() || !compare_or_mask.empty())) throw std::invalid_argument("zero-byte atomic has operands");
         const auto& region=authorize(job,pid,key,offset,zero_length?0:width,Access::Atomic,resource_index,relative_addressing,MemoryAccessOrigin::RemoteRequest,owner);
+        return execute_fetch_atomic(region,offset,operation,datatype,operand,compare_or_mask,zero_length,width);
+    }
+    std::vector<uint8_t> fetch_atomic_registration_element(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operand,const std::vector<uint8_t>& compare_or_mask={},
+                         std::optional<uint16_t> resource_index={},bool zero_length=false) {
+        const auto width=integer_atomic_width(datatype);
+        if (offset%width) throw MemoryAccessError(MemoryError::Alignment);
+        if (zero_length && (operation!=IntegerAtomicOperation::Read && operation!=IntegerAtomicOperation::Write))
+            throw std::invalid_argument("zero-byte atomic is put/get only");
+        if (zero_length && (!operand.empty() || !compare_or_mask.empty())) throw std::invalid_argument("zero-byte atomic has operands");
+        const auto& region=authorize_registration(registration,job,pid,offset,zero_length?0:width,Access::Atomic,resource_index);
+        return execute_fetch_atomic(region,offset,operation,datatype,operand,compare_or_mask,zero_length,width);
+    }
+    void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={},bool relative_addressing=true,
+                         const RmaMessageOwnerToken& owner={}) {
+        const auto element_width=integer_atomic_width(datatype);
+        if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
+        if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
+        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index,relative_addressing,MemoryAccessOrigin::RemoteRequest,owner);
+        execute_atomic_elements(region,offset,operation,datatype,operands,element_width);
+    }
+    void atomic_registration_elements(const Region& registration,uint32_t job,uint16_t pid,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={}) {
+        const auto element_width=integer_atomic_width(datatype);
+        if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
+        if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
+        const auto& region=authorize_registration(registration,job,pid,offset,operands.size(),Access::Atomic,resource_index);
+        execute_atomic_elements(region,offset,operation,datatype,operands,element_width);
+    }
+private:
+    // Both wire-key RMA and locally posted tagged buffers execute the same
+    // indivisible integer storage operations. Their authority selection differs:
+    // a peer's tag never becomes a memory key (§3.4.2.5.4).
+    static std::vector<uint8_t> execute_fetch_atomic(const Region& region,uint64_t offset,
+                         IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
+                         const std::vector<uint8_t>& operand,const std::vector<uint8_t>& compare_or_mask,
+                         bool zero_length,size_t width) {
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
         if (zero_length) {
             // §3.4.2.12 requires an actual zero-byte read at the selected
@@ -422,14 +463,10 @@ public:
         if (operation!=IntegerAtomicOperation::Read) region.storage->write(offset,next.data(),width);
         return previous;
     }
-    void atomic_elements(uint32_t job,uint16_t pid,uint64_t key,uint64_t offset,
+    static void execute_atomic_elements(const Region& region,uint64_t offset,
                          IntegerAtomicOperation operation,IntegerAtomicDatatype datatype,
-                         const std::vector<uint8_t>& operands,std::optional<uint16_t> resource_index={},bool relative_addressing=true,
-                         const RmaMessageOwnerToken& owner={}) {
-        const auto element_width=integer_atomic_width(datatype);
-        if (offset%element_width) throw MemoryAccessError(MemoryError::Alignment);
-        if (operands.size()%element_width) throw std::invalid_argument("incomplete atomic element");
-        const auto& region=authorize(job,pid,key,offset,operands.size(),Access::Atomic,resource_index,relative_addressing,MemoryAccessOrigin::RemoteRequest,owner);
+                         const std::vector<uint8_t>& operands,size_t element_width) {
+        if (element_width>8) throw std::invalid_argument("non-fetching integer elements exceed supported width");
         // §3.4.7.3: atomics need both read and write permission in addition
         // to the explicit atomic capability of this simulator's MR model.
         if ((region.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
@@ -446,7 +483,6 @@ public:
             region.storage->write(offset+position,target_bytes.data(),element_width);
         }
     }
-private:
     const Region& select_registration(uint32_t job,uint16_t pid,uint64_t key,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index,
                             bool relative_addressing,MemoryAccessOrigin origin,

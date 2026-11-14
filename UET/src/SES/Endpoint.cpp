@@ -121,9 +121,10 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
     const bool is_rendezvous=rendezvous_owner!=0;
     const bool is_restart=restart_owner!=0;
     const bool is_datagram=operation.type==OperationType::DatagramSend;
-    const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic;
+    const bool is_fetching_atomic=operation.type==OperationType::FetchingAtomic || operation.type==OperationType::TaggedFetchingAtomic;
+    const bool is_tagged_atomic=operation.type==OperationType::TaggedAtomic || operation.type==OperationType::TaggedFetchingAtomic;
     const bool is_synchronized_write=operation.type==OperationType::SynchronizedWrite;
-    const bool is_atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || is_fetching_atomic;
+    const bool is_atomic=operation.type==OperationType::Atomic || operation.type==OperationType::TaggedAtomic || operation.type==OperationType::SynchronizedAtomic || is_fetching_atomic;
     const bool is_read=operation.type==OperationType::Read;
     const bool is_rudi=operation.delivery_mode==RUDI;
     if (is_rudi && (!capabilities_.rudi_write || (operation.type!=OperationType::Write && !is_read) || operation.immediate_data ||
@@ -147,10 +148,10 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
         const bool small=operation.header_format==RequestHeaderFormat::Small;
         const bool medium=operation.header_format==RequestHeaderFormat::Medium;
         const bool write=operation.type==OperationType::Write;
-        const bool atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
+        const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::TaggedAtomic || is_fetching_atomic;
         const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
         if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
-            (is_read && operation.read_length>mtu_) ||
+            (is_read && operation.read_length>mtu_) || (is_tagged_atomic && (!medium || operation.remote_offset)) ||
             (operation.type!=OperationType::Noop && !write && !atomic && !is_read && !(medium && send)) || (write && operation.immediate_data)) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
@@ -210,7 +211,7 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
         }
         atomic_width=integer_atomic_width(operation.atomic_datatype);
         if ((!is_fetching_atomic && ((!payload_length && operation.atomic_operation!=IntegerAtomicOperation::Write) || payload_length%atomic_width)) ||
-            operation.remote_offset%atomic_width || mtu_<atomic_width) {
+            (!is_tagged_atomic && operation.remote_offset%atomic_width) || mtu_<atomic_width) {
             complete_local(CompletionStatus::InvalidRequest); return 0;
         }
     }
@@ -241,7 +242,7 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
     }
     if (!operation.peer || (!memory_.has_job(operation.job) && !authorized_foreign_rendezvous_job) || operation.source_pid>0xfff || operation.target_pid>0xfff || operation.target_resource>0xfff ||
         payload_length>UINT32_MAX || (is_datagram && payload_length>mtu_) ||
-        (operation.immediate_data && operation.type!=OperationType::Write && !is_synchronized_write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && !is_datagram && !is_deferrable && !is_rendezvous) ||
+        (operation.immediate_data && operation.type!=OperationType::Write && !is_synchronized_write && operation.type!=OperationType::Send && operation.type!=OperationType::TaggedSend && operation.type!=OperationType::TaggedAtomic && !is_datagram && !is_deferrable && !is_rendezvous) ||
         (operation.type==OperationType::Noop && payload_length)) {
         complete_local(CompletionStatus::InvalidRequest); return 0;
     }
@@ -1451,8 +1452,9 @@ auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
             if (transfer.started && !rendezvous->first_response_received) break;
         }
         const bool datagram=operation.type==OperationType::DatagramSend;
-        const bool fetching_atomic=operation.type==OperationType::FetchingAtomic;
-        const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || fetching_atomic;
+        const bool fetching_atomic=operation.type==OperationType::FetchingAtomic || operation.type==OperationType::TaggedFetchingAtomic;
+        const bool tagged_atomic=operation.type==OperationType::TaggedAtomic || operation.type==OperationType::TaggedFetchingAtomic;
+        const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || tagged_atomic || fetching_atomic;
         const bool restart=transfer.restart_owner!=0;
         const bool read=operation.type==OperationType::Read && !transfer.aborting;
         if (read && pending_.at(message).read_requests_awaiting_data.size()>=read_result_window_) break;
@@ -1483,7 +1485,7 @@ auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
         // has released its source, so a reserved target can retire too.
         header.buffer_offset=transfer.deferrable_token?transfer.restart_tokens:operation.remote_offset;
         header.initiator=operation.initiator_id.value_or(node_);
-        header.match_bits=(operation.type==OperationType::TaggedSend || operation.type==OperationType::DeferrableTaggedSend || operation.type==OperationType::RendezvousTaggedSend)?operation.tag:operation.remote_key;
+        header.match_bits=(operation.type==OperationType::TaggedSend || operation.type==OperationType::DeferrableTaggedSend || operation.type==OperationType::RendezvousTaggedSend || tagged_atomic)?operation.tag:operation.remote_key;
         header.request_length=transfer.rendezvous_owner?transfer.rendezvous_total:transfer.length;
         if (transfer.rendezvous_owner && !transfer.aborting) {
             request.pkt.eth_type=Rendezvous_Extension_Header;
@@ -2190,7 +2192,7 @@ auto Endpoint::nondeferring_send_opcode(uint8_t opcode) -> uint8_t {
 }
 
 auto Endpoint::message_space(uint8_t opcode) -> ResourceSpace {
-    return opcode==5?ResourceSpace::Send:opcode==9?ResourceSpace::Tagged:ResourceSpace::Rma;
+    return opcode==5?ResourceSpace::Send:(opcode==9 || opcode==0x0d || opcode==0x0e)?ResourceSpace::Tagged:ResourceSpace::Rma;
 }
 
 auto Endpoint::posting_matches(const Posted& receive,uint32_t job,uint16_t pid,uint16_t resource_index,
@@ -2224,7 +2226,8 @@ auto Endpoint::post_buffer(uint32_t job,uint16_t pid,uint64_t key,uint64_t offse
 }
 
 auto Endpoint::received_tag(const Incoming& message) -> std::optional<uint64_t> {
-    return message.opcode==9?std::optional<uint64_t>{message.tag}:std::nullopt;
+    return message.opcode==9 || message.opcode==0x0d || message.opcode==0x0e?
+        std::optional<uint64_t>{message.tag}:std::nullopt;
 }
 
 auto Endpoint::retire_rma_registration(Incoming& message) -> void {
@@ -2261,9 +2264,18 @@ auto Endpoint::match_unexpected() -> void {
         auto& message=found->second;
         auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
             return posting_matches(receive,std::get<2>(key),message.pid,message.resource_index,
-                message.relative_addressing,message.opcode==9,message.tag,std::get<3>(key));
+                message.relative_addressing,received_tag(message).has_value(),message.tag,std::get<3>(key));
         });
         if (posted==posted_.end()) continue;
+        if (message.opcode==0x0e) {
+            if (!message.deferred_response) throw std::logic_error("buffered tagged fetch lost its response handle");
+            const auto request=*message.deferred_response;
+            message.deferred_response.reset(); release_unexpected(message);
+            // Re-enter the shared fetching path with its original live RX
+            // handle. The posting is consumed there, and PDS caches its
+            // unique result exactly as for a memory-key fetching atomic.
+            receive_fetching_atomic(request); continue;
+        }
         const auto receive=*posted; posted_.erase(posted);
         message.key=receive.key; message.base=receive.offset; message.context=receive.context;
         message.receive_registration=receive.registration;
@@ -2279,14 +2291,26 @@ auto Endpoint::match_unexpected() -> void {
                 message.deferred_response.reset();
             }
         };
-        if (receive.capacity<message.total) { fail(SemanticReturnCode::UnsupportedSize,CompletionStatus::Truncated); continue; }
+        const bool tagged_atomic=message.opcode==0x0d;
+        const auto buffer_offset=tagged_atomic?message.tagged_buffer_offset:0;
+        if (buffer_offset>receive.capacity || message.total>receive.capacity-buffer_offset) {
+            fail(SemanticReturnCode::UnsupportedSize,CompletionStatus::Truncated); continue;
+        }
+        message.base+=buffer_offset;
         try {
-            memory_.authorize_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base,message.total,
-                Access::Write,message.resource_index);
+            const auto& registration=memory_.authorize_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base,message.total,
+                tagged_atomic?Access::Atomic:Access::Write,message.resource_index);
+            if (tagged_atomic && (registration.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
             for (const auto& interval:message.segments) {
                 std::vector<uint8_t> bytes(interval.second);
                 buffered->read(interval.first,bytes.data(),bytes.size());
-                memory_.write_registration(*message.receive_registration,std::get<2>(key),message.pid,message.base+interval.first,bytes,message.resource_index);
+                if (tagged_atomic) {
+                    convert_integer_atomic_byte_order(bytes,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
+                    memory_.atomic_registration_elements(*message.receive_registration,std::get<2>(key),message.pid,message.base+interval.first,
+                        static_cast<IntegerAtomicOperation>(message.atomic_operation),static_cast<IntegerAtomicDatatype>(message.atomic_datatype),
+                        bytes,message.resource_index);
+                } else memory_.write_registration(*message.receive_registration,std::get<2>(key),message.pid,
+                    message.base+interval.first,bytes,message.resource_index);
             }
             if (message.end_seen && message.received==message.total) {
                 message.completed=true; message.completion_reported=true;
@@ -2306,7 +2330,7 @@ auto Endpoint::report_receive_error(Incoming& message) -> void {
     // SEND still needs a matched receive to identify its completion. Its
     // header data must not create a separate unsolicited RMA notification.
     const bool has_header_data=message.has_immediate && message.immediate_data.has_value();
-    const bool unsolicited_completion=message.opcode!=static_cast<uint8_t>(OperationType::Send) && message.opcode!=9 && has_header_data;
+    const bool unsolicited_completion=message.opcode!=static_cast<uint8_t>(OperationType::Send) && !received_tag(message) && has_header_data;
     if (!message.matched_receive && !unsolicited_completion) return;
     Completion completion{0,message.context,message.target_error,static_cast<uint32_t>(message.received),
         static_cast<uint8_t>(*message.first_error),true,
@@ -2787,8 +2811,46 @@ auto Endpoint::receive_read(const PDC_SES_req& request) -> void {
     } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
 }
 
+auto Endpoint::bind_tagged_atomic_buffer(const PDC_SES_req& request,Incoming& message,
+                                         const ResourceSelection& selected,uint32_t target_length) -> bool {
+    const auto& header=request.pkt.bth_header.Standard_Header;
+    message.tagged_buffer_offset=header.buffer_offset;
+    const auto posting=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
+        return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
+            header.rel,true,header.match_bits,header.initiator);
+    });
+    if (posting==posted_.end()) {
+        if (request.delivery_mode==RUD) { reject_message(request,message,SemanticReturnCode::NoMatch); return false; }
+        if (message.total>unexpected_limit_-unexpected_bytes_) {
+            const auto generation=resources_.disable_for_exhaustion(selected.absolute_pid,selected.resource_index,ResourceSpace::Tagged);
+            disabled_generations_[{selected.absolute_pid,selected.resource_index,ResourceSpace::Tagged}]=generation;
+            reject_message(request,message,SemanticReturnCode::DisabledGeneration,generation); return false;
+        }
+        message.response_list=1;
+        message.unexpected=std::make_shared<SparseMemory>(message.total);
+        message.receive_order=++next_receive_order_;
+        unexpected_order_.emplace(message.receive_order,receive_message_key(request)); unexpected_bytes_+=message.total;
+        return true;
+    }
+    const auto receive=*posting; posted_.erase(posting);
+    message.receive_registration=receive.registration; message.key=receive.key;
+    message.base=receive.offset; message.context=receive.context; message.matched_receive=true;
+    // STD supports an offset within the tagged receive. MEDIUM cannot carry
+    // that offset for tagged atomics (Table3-21), checked at format admission.
+    if (header.buffer_offset>receive.capacity || target_length>receive.capacity-header.buffer_offset) {
+        message.target_error=CompletionStatus::Truncated;
+        reject_message(request,message,SemanticReturnCode::UnsupportedSize); return false;
+    }
+    message.base+=header.buffer_offset; // The checked posting span proves this addition fits.
+    const auto& registration=memory_.authorize_registration(receive.registration,header.job_id,receive.pid,
+        message.base,target_length,Access::Atomic,selected.resource_index);
+    if ((registration.permissions&3u)!=3u) throw MemoryAccessError(MemoryError::Permission);
+    return true;
+}
+
 auto Endpoint::receive_fetching_atomic(const PDC_SES_req& request) -> void {
     const auto& header=request.pkt.bth_header.Standard_Header;
+    const bool tagged_fetch=header.opcode==0x0e;
     const auto found=incoming_.find(receive_message_key(request));
     if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved fetching atomic");
     auto& message=found->second;
@@ -2821,20 +2883,35 @@ auto Endpoint::receive_fetching_atomic(const PDC_SES_req& request) -> void {
         (operation==IntegerAtomicOperation::Read || operation==IntegerAtomicOperation::Write);
     if ((!zero_length && header.request_length!=(dual_operand_atomic(operation)?32:width)) ||
         request.pkt.payload.size()!=header.request_length) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
-    if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
+    if (!tagged_fetch && header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
     ResourceSelection selected{};
     try {
-        selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
-            ResourceSpace::Rma,header.ri_generation);
+        selected=message.initialized?ResourceSelection{message.pid,message.resource_index,message.error_generation}:
+            resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                tagged_fetch?ResourceSpace::Tagged:ResourceSpace::Rma,header.ri_generation);
     } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
     try {
         const auto operands=zero_length?FetchingAtomicOperands{}:decode_fetching_atomic_operands(request.pkt.payload,operation,datatype);
-        message.rma_owner=std::make_shared<const RmaMessageOwner>();
-        message.rma_registration=memory_.claim_rma_registration(header.job_id,selected.absolute_pid,header.match_bits,
-            header.buffer_offset,zero_length?0:width,Access::Atomic,selected.resource_index,header.rel,message.rma_owner);
-        auto previous=memory_.fetch_atomic_element(header.job_id,selected.absolute_pid,header.match_bits,
-            header.buffer_offset,operation,datatype,operands.operand,operands.compare_or_mask,
-            selected.resource_index,header.rel,zero_length,message.rma_owner);
+        std::vector<uint8_t> previous;
+        if (tagged_fetch) {
+            message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
+            message.wire_pid=header.PIDonFEP; message.relative_addressing=header.rel;
+            if (!bind_tagged_atomic_buffer(request,message,selected,zero_length?0:width)) return;
+            if (message.unexpected) {
+                message.unexpected->write(0,request.pkt.payload.data(),request.pkt.payload.size());
+                message.deferred_response=request; message.initialized=true;
+                return; // The real EOM RX handle waits for a matching posting.
+            }
+            previous=memory_.fetch_atomic_registration_element(*message.receive_registration,header.job_id,message.pid,
+                message.base,operation,datatype,operands.operand,operands.compare_or_mask,selected.resource_index,zero_length);
+        } else {
+            message.rma_owner=std::make_shared<const RmaMessageOwner>();
+            message.rma_registration=memory_.claim_rma_registration(header.job_id,selected.absolute_pid,header.match_bits,
+                header.buffer_offset,zero_length?0:width,Access::Atomic,selected.resource_index,header.rel,message.rma_owner);
+            previous=memory_.fetch_atomic_element(header.job_id,selected.absolute_pid,header.match_bits,
+                header.buffer_offset,operation,datatype,operands.operand,operands.compare_or_mask,
+                selected.resource_index,header.rel,zero_length,message.rma_owner);
+        }
         convert_integer_atomic_byte_order(previous,datatype);
         SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
         response.rsp_len=20+previous.size(); response.gtd_del=true;
@@ -2852,7 +2929,16 @@ auto Endpoint::receive_fetching_atomic(const PDC_SES_req& request) -> void {
         }
         message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
         message.initialized=true; message.completed=true; message.completion_reported=true;
-        message.received=header.request_length; message.segments.emplace(0,header.request_length);
+        message.received=tagged_fetch?(zero_length?0:width):header.request_length;
+        message.segments.emplace(0,header.request_length);
+        if (tagged_fetch) {
+            // Dual-operand requests carry32B but touch only one datatype.
+            // Target completion reports that span and preserves wire length
+            // separately; source completion retains the request length.
+            Completion completion{0,message.context,CompletionStatus::Success,static_cast<uint32_t>(message.received),
+                1,true,{},0,0,message.tag};
+            completion.original_length=header.request_length; completions_.push_back(completion);
+        }
         // PDS retains the old value until Clear, including when the MR is
         // changed or revoked after execution. SES retains no second copy.
         if (!host_.manager().pushSESResponse(response)) throw std::runtime_error("PDS rejected fetching atomic result");
@@ -2927,7 +3013,8 @@ auto Endpoint::receive(const PDC_SES_req& request) -> void {
     };
     const auto& header=request.pkt.bth_header.Standard_Header;
     if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
-    if ((header.opcode>4 && !(medium && (header.opcode==5 || header.opcode==9))) ||
+    if ((header.opcode>4 && !(medium && (header.opcode==5 || header.opcode==9 || header.opcode==0x0d || header.opcode==0x0e))) ||
+        (medium && (header.opcode==0x0d || header.opcode==0x0e) && header.buffer_offset) ||
         (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
     if (!small || (header.opcode!=1 && header.opcode!=2 && header.opcode!=3 && header.opcode!=4)) { receive_standard(request); return; }
     if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
@@ -2963,7 +3050,7 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
     if (incoming!=incoming_.end() && incoming->second.rendezvous_eager) { receive_rendezvous(request); return; }
     if (receive_deferrable_target(request)) return;
     if (request.pkt.bth_header.Standard_Header.opcode==2) { receive_read(request); return; }
-    if (request.pkt.bth_header.Standard_Header.opcode==4) { receive_fetching_atomic(request); return; }
+    if (request.pkt.bth_header.Standard_Header.opcode==4 || request.pkt.bth_header.Standard_Header.opcode==0x0e) { receive_fetching_atomic(request); return; }
     auto interpreted_header=request.pkt.bth_header.Standard_Header;
     // §3.3.5 / §3.4.4.6.1: a non-deferring target treats deferrable
     // SEND/TSEND as their ordinary forms. Interpret a copy: restart tokens
@@ -2978,6 +3065,8 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
         if (interpreted_header.som) trace_.record(node_,"deferrable_as_send",interpreted_header.msg_id);
     }
     const auto& header=interpreted_header;
+    const bool tagged_atomic=header.opcode==0x0d;
+    const bool atomic_payload=header.opcode==3 || tagged_atomic;
     const auto key=receive_message_key(request);
     auto found=incoming_.find(key);
     if (found==incoming_.end()) throw std::logic_error("PDS forwarded an unreserved standard SES message");
@@ -3029,8 +3118,8 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
                 message_space(original_opcode),header.ri_generation);
         }
     } catch (const AddressingError& error) { reject(error.code,error.generation); return; }
-    if (header.version || (header.hd && header.opcode!=1 && header.opcode!=5 && header.opcode!=9 && !message_error) ||
-        (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && header.opcode!=9 && !message_error) ||
+    if (header.version || (header.hd && header.opcode!=1 && header.opcode!=5 && header.opcode!=9 && !tagged_atomic && !message_error) ||
+        (header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=5 && header.opcode!=9 && !tagged_atomic && !message_error) ||
         (message_error && !header.eom)) {
         reject(SemanticReturnCode::UnsupportedOperation); return;
     }
@@ -3038,13 +3127,13 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
     const auto count=request.pkt.payload.size();
     const auto& atomic_extension=synchronized_atomic?request.pkt.eth_header.Synchronized_Atomic_Extension_Headers.atomic:
         request.pkt.eth_header.Atomic_Operation_Extension_Header;
-    if (header.opcode==3 && !poisoned) {
+    if (atomic_payload && !poisoned) {
         if (atomic_extension.atomic_datatype>7) { reject(SemanticReturnCode::AtomicUnsupportedDatatype); return; }
         if (atomic_extension.atomic_opcode>12 || atomic_extension.atomic_opcode==11 ||
             atomic_extension.semantic_contol || atomic_extension.rsvd) { reject(SemanticReturnCode::AtomicUnsupportedOperation); return; }
         const auto width=integer_atomic_width(static_cast<IntegerAtomicDatatype>(atomic_extension.atomic_datatype));
         if (header.request_length%width || count%width || offset%width) { reject(SemanticReturnCode::AtomicUnsupportedSize); return; }
-        if (header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
+        if (!tagged_atomic && header.buffer_offset%width) { reject(SemanticReturnCode::AtomicUnaligned); return; }
         if (synchronized_atomic && (header.hd || header.request_length>8)) {
             reject(SemanticReturnCode::AtomicUnsupportedSize); return;
         }
@@ -3065,14 +3154,16 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
                     header.buffer_offset,header.request_length,header.opcode==1?Access::Write:Access::Atomic,
                     selected.resource_index,header.rel,message.rma_owner);
             }
-            if (header.opcode==3 && !poisoned) {
-                const auto& region=*message.rma_registration;
+            if (atomic_payload && !poisoned) {
                 if (synchronized_atomic) {
-                    message.synchronization_registration=region;
+                    message.synchronization_registration=message.rma_registration;
                     message.synchronization_operands.resize(message.total);
                 }
                 message.atomic_operation=atomic_extension.atomic_opcode;
                 message.atomic_datatype=atomic_extension.atomic_datatype;
+            }
+            if (tagged_atomic && !poisoned) {
+                if (!bind_tagged_atomic_buffer(request,message,selected,message.total)) return;
             } else if (header.opcode==5 || header.opcode==9) {
                 auto posted=std::find_if(posted_.begin(),posted_.end(),[&](const Posted& receive) {
                     return posting_matches(receive,header.job_id,selected.absolute_pid,selected.resource_index,
@@ -3123,10 +3214,11 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
             (message.key!=header.match_bits || message.base!=header.buffer_offset || message.has_immediate!=bool(header.hd))) {
             reject(SemanticReturnCode::OperationViolation); return;
         }
-        if (header.opcode==9 && (message.tag!=header.match_bits || message.has_immediate!=bool(header.hd))) {
+        if ((header.opcode==9 || tagged_atomic) && (message.tag!=header.match_bits || message.has_immediate!=bool(header.hd) ||
+            (tagged_atomic && message.tagged_buffer_offset!=header.buffer_offset))) {
             reject(SemanticReturnCode::OperationViolation); return;
         }
-        if (header.opcode==3 && (message.atomic_operation!=atomic_extension.atomic_opcode ||
+        if (atomic_payload && (message.atomic_operation!=atomic_extension.atomic_opcode ||
             message.atomic_datatype!=atomic_extension.atomic_datatype)) { reject(SemanticReturnCode::OperationViolation); return; }
         if (message.completed) { reply(request,SemanticReturnCode::Ok,message.total); return; }
         auto position=message.segments.lower_bound(offset);
@@ -3136,7 +3228,7 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
             reject(SemanticReturnCode::OperationViolation); return;
         }
         if (message.unexpected) message.unexpected->write(offset,request.pkt.payload.data(),count);
-        else if (header.opcode==3) {
+        else if (atomic_payload) {
             auto operands=request.pkt.payload;
             convert_integer_atomic_byte_order(operands,static_cast<IntegerAtomicDatatype>(message.atomic_datatype));
             if (synchronized_atomic) {
@@ -3148,6 +3240,9 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
                     message.synchronization_responses.push_back(rendezvous_response_handle(request));
                 }
             }
+            else if (tagged_atomic) memory_.atomic_registration_elements(*message.receive_registration,header.job_id,message.pid,
+                Runtime::add_time(message.base,offset),static_cast<IntegerAtomicOperation>(message.atomic_operation),
+                static_cast<IntegerAtomicDatatype>(message.atomic_datatype),operands,message.resource_index);
             else {
                 memory_.authorize_registration(*message.rma_registration,header.job_id,message.pid,
                     Runtime::add_time(message.base,offset),operands.size(),Access::Atomic,message.resource_index,
@@ -3197,7 +3292,7 @@ auto Endpoint::receive_standard(const PDC_SES_req& request) -> void {
             // Buffered atomic operands are not a finished wire message:
             // its real final response still belongs to the group action.
             message.completed=!synchronized_atomic; message.completion_reported=true;
-            if (header.opcode==5 || header.opcode==9) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
+            if (header.opcode==5 || header.opcode==9 || tagged_atomic) completions_.push_back({0,message.context,CompletionStatus::Success,message.total,1,true,message.immediate_data,0,0,received_tag(message)});
             if (header.opcode==1 && message.immediate_data && !message.synchronization_member)
                 completions_.push_back({0,0,CompletionStatus::Success,message.total,1,true,message.immediate_data});
             if (message.reserved_restart) retire_deferred_target(message.reserved_restart);

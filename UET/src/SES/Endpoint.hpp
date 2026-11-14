@@ -15,7 +15,7 @@
 
 namespace UET::SES {
 
-enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11, SynchronizedWrite=16, SynchronizedAtomic=17 };
+enum class OperationType : uint8_t { Noop=0, Write=1, Read=2, Atomic=3, FetchingAtomic=4, Send=5, RendezvousSend=6, DatagramSend=7, DeferrableSend=8, TaggedSend=9, RendezvousTaggedSend=10, DeferrableTaggedSend=11, TaggedAtomic=13, TaggedFetchingAtomic=14, SynchronizedWrite=16, SynchronizedAtomic=17 };
 enum class CompletionStatus { Success, LocalSuccess, LocalError, Unsupported, InvalidRequest, RemoteError, Timeout, Cancelled, ResourceExhausted, Truncated };
 // A local registered destination for returned READ/atomic data. This descriptor never goes
 // on the wire; the peer supplies only checked data, never a local host pointer.
@@ -300,6 +300,7 @@ private:
         CompletionStatus target_error=CompletionStatus::RemoteError;
         std::shared_ptr<SparseMemory> unexpected;
         uint64_t receive_order=0,tag=0;
+        uint64_t tagged_buffer_offset=0; // STD tagged atomic offset within the selected posting, never an MR key.
         std::optional<PDC_SES_req> deferred_response;
         std::optional<Region> receive_registration;
         // Pin both the registration incarnation and the logical RMA owner.
@@ -576,6 +577,7 @@ private:
 
     void receive_read(const PDC_SES_req& request);
     void receive_fetching_atomic(const PDC_SES_req& request);
+    bool bind_tagged_atomic_buffer(const PDC_SES_req& request,Incoming& message,const ResourceSelection& selected,uint32_t target_length);
     // §3.4.2.13 / §3.5.23: inspect and place each packet independently.
     // Duplicates repeat the idempotent access. There is no Incoming record,
     // message assembly, recovery cache, target CQ, or Clear lifetime here.
