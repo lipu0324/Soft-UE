@@ -1,5 +1,6 @@
 #pragma once
 #include "PdcEvents.hpp"
+#include "RetiredSemanticMessages.hpp"
 #include "RetryTiming.hpp"
 #include "../PDS/ReceiveDiagnostics.hpp"
 #include "../PDS/PsnRangeConfiguration.hpp"
@@ -107,6 +108,11 @@ struct Services {
     // Exhaust the 32-bit wire space rather than aliasing a delayed response.
     uint64_t next_rudi_packet_id=0;
     size_t rudi_packet_limit=4096; // Initiator storage policy; target has no recovery state.
+    // This host has one active native SES adapter. Its MID cursor and retired
+    // leases outlive that adapter, including optimized local TX cookies.
+    std::weak_ptr<int> active_semantic_endpoint;
+    uint16_t semantic_message_cursor=0;
+    RetiredSemanticMessages retired_semantic_messages;
 
 };
 

@@ -149,6 +149,9 @@ public:
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ ||
             !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
+        if (!host_.services().active_semantic_endpoint.expired())
+            throw std::logic_error("PDS host already has an active native Endpoint");
+        host_.services().active_semantic_endpoint=lifetime_;
         capabilities_.optimized_small_write=capabilities_.optimized_medium_write=capabilities_.optimized_medium_send=host_.services().standard_wire;
         capabilities_.optimized_small_atomic=capabilities_.optimized_medium_atomic=host_.services().standard_wire;
         capabilities_.optimized_small_fetching_atomic=capabilities_.optimized_medium_fetching_atomic=host_.services().standard_wire;
@@ -369,8 +372,10 @@ private:
         }
         uint16_t message=0;
         for (size_t i=0; i<UINT16_MAX; ++i) {
-            if (++next_message_==0) ++next_message_;
-            if (!pending_.count(next_message_) && !message_leases_.count(next_message_)) { message=next_message_; break; }
+            auto& cursor=host_.services().semantic_message_cursor;
+            if (++cursor==0) ++cursor;
+            if (!pending_.count(cursor) && !message_leases_.count(cursor) &&
+                !host_.services().retired_semantic_messages.contains(cursor)) { message=cursor; break; }
         }
         if (!message) { complete_local(CompletionStatus::ResourceExhausted); return 0; }
         const uint32_t transfer_length=(is_read || is_restart)?operation.read_length:static_cast<uint32_t>(payload_length);
@@ -520,6 +525,18 @@ public:
     size_t leased_message_ids() const { return message_leases_.size(); }
     void close() {
         if (closed_) return;
+        // Host/PDS work may run after this object's lifetime ends. Transfer
+        // its identity leases before clearing callbacks; a replacement SES
+        // must neither adopt old upcalls nor reuse their still-live wire MIDs.
+        auto& retired=host_.services().retired_semantic_messages;
+        for (const auto& [message,operation]:pending_) if (!operation.is_rudi)
+            retired.retain(message,{operation.peer,operation.job,operation.local_pdc,operation.connection_start_psn,
+                operation.last_transmitted_psn,operation.end_of_message_transmitted,operation.is_datagram,
+                operation.is_read && operation.read_results.bytes()<operation.length});
+        for (const auto& [message,lease]:message_leases_)
+            retired.retain(message,{std::get<0>(lease.connection),{},std::get<1>(lease.connection),std::get<2>(lease.connection),
+                lease.last_psn,lease.end_of_message_transmitted,false,lease.requires_connection_retirement,lease.connection_close_requested});
+        retired.request_read_retirement([this](uint16_t local_pdc) { return host_.request_connection_close(local_pdc); });
         closed_=true; lifetime_.reset();
         host_.set_receive_admission({},{});
         host_.set_request_handler({}); host_.set_response_handler({});
@@ -750,7 +767,6 @@ private:
     std::map<uint32_t,std::shared_ptr<DeferredSource>> deferred_sources_;
     size_t deferred_source_limit_=64;
     uint64_t next_operation_=0;
-    uint16_t next_message_=0;
     std::map<uint16_t,Pending> pending_;
     std::map<uint16_t,MessageLease> message_leases_;
     std::map<ConnectionKey,uint32_t> transmit_clear_frontiers_;
