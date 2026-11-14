@@ -142,6 +142,7 @@ public:
              size_t receive_message_limit=4096,size_t unexpected_buffer_bytes=256*1024,size_t read_response_limit=8,
              size_t read_result_window=8)
         : node_(node), host_(host), loop_(loop), trace_(trace), mtu_(payload_mtu), timeout_(timeout),
+          private_memory_(host.services().semantic_memory_keys),
           memory_(domain_memory?*domain_memory:private_memory_),submission_window_(submission_window),receive_message_limit_(receive_message_limit),
           unexpected_limit_(unexpected_buffer_bytes),read_response_limit_(read_response_limit),read_result_window_(read_result_window),
           synchronization_ids_(host.services().next_synchronization_group_id),

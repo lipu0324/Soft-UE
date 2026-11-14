@@ -226,3 +226,31 @@ reference-wire 作业成功；构建失败的两个作业没有进入 CTest。�
 上述修正后的七项普通定向回归全部通过（0.45s），见
 `/tmp/softue-receive-close-final-normal-tests.log`。同时已通过直接包含 PdsHost 的
 RealtimeLateProgressTest 构建；其模拟时钟测试将与后续检查单独记录。
+
+## 私有 MR 的自动 key 分配历史
+
+`/tmp/softue-private-key-before-tests.log` 用真实 WRITE 复现：关闭旧目标、在同一 Host
+创建新的私有 MR 后，自动 key 重新从1开始，旧数字 key 会选择新存储。这是独立于
+接收 MID 的问题；新操作和新 MID 也能触发，因此只保留旧消息身份并不足够。
+
+`MemoryKeyAllocator` 现在单独保存 provider-assigned 48位 RKEY 后缀的分配历史。
+原生 Endpoint 的私有 registry 共享 Host 的分配器；注册、存储和本地 registry authority
+仍各自独立。外部 domain registry 继续管理自己的分配器，显式 application key 的
+语义保持原样。删除 Job、注销 MR 或替换 Endpoint 都不会退回自动游标；到达最大值
+后明确报耗尽，不把48位字段回绕到旧 key。这是本仿真的分配策略，不是 TSS 密钥管理。
+
+16个真实 STD/MEDIUM、RUD/ROD、NSCC、幂等属性组合通过初始 probe，日志
+`/tmp/softue-private-key-after-tests.log`：旧 key 返回 BadMemoryKey，新存储不变，新 key
+随后可正常 WRITE，旧存储也未改变。该 probe 链接已冻结的同一 PDS 内核；本轮完整
+CMake 构建与全量回归另行记录，不用这个 probe 替代完整版本结果。
+`memory_key_allocator_test` 使用实际 registry 检查共享历史、独立 authority、显式 key、
+Job 重建、注销、最后一个合法 key 和耗尽后不回绕；普通和 ASan/UBSan/泄漏 CTest
+均通过（0.01s、0.02s），见 `/tmp/softue-private-keys-normal-allocator-tests.log`、
+`/tmp/softue-private-keys-asan-allocator-tests.log`。
+
+以上范围是存续 Host 内的 Endpoint 替换。完整管理平面的 FEP/PID 重配置和重启代次、
+失效 PDC 队列等仍需进一步验收，不能据此宣告整个 M1 或任何 Profile 完成。
+
+前一源码 `aa9312b` 的七项 ASan/UBSan/泄漏定向回归全部通过（4.93s），
+日志 `/tmp/softue-receive-close-final-asan-tests.log`；不把它标记为本节自动 key 改动的
+sanitizer 事务验证。
