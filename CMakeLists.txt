@@ -291,6 +291,12 @@ if(BUILD_TESTING)
     add_dependencies(libfabric_atomic_return_test softue_fabric)
     set_tests_properties(libfabric_atomic_return_test PROPERTIES TIMEOUT 120
       ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
+    softue_test(libfabric_tagged_atomic_test LibfabricTaggedAtomicTest.cpp)
+    target_include_directories(libfabric_tagged_atomic_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
+    target_link_libraries(libfabric_tagged_atomic_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})
+    add_dependencies(libfabric_tagged_atomic_test softue_fabric)
+    set_tests_properties(libfabric_tagged_atomic_test PROPERTIES TIMEOUT 60
+      ENVIRONMENT "FI_PROVIDER=softue;FI_PROVIDER_PATH=$<TARGET_FILE_DIR:softue_fabric>")
     softue_test(libfabric_read_test LibfabricReadTest.cpp)
     target_include_directories(libfabric_read_test PRIVATE ${SOFTUE_FABRIC_INCLUDE})
     target_link_libraries(libfabric_read_test PRIVATE ${SOFTUE_FABRIC_LIBRARY})

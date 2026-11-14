@@ -116,6 +116,8 @@ struct EndpointCapabilities {
     bool read=true, atomic=true, libfabric=false, write_immediate=true;
     bool rendezvous_send=true,rendezvous_tagged_send=true; // Native registered-buffer transactions; no Profile claim.
     bool fetching_atomic=true, compare_atomic=true, tagged_send=true, directed_receive=true;
+    bool tagged_integer_atomic=true,tagged_fetching_integer_atomic=true;
+    bool optimized_medium_tagged_atomic=true,optimized_medium_tagged_fetching_atomic=true;
     bool synchronized_write=true,synchronized_integer_atomic=true; // Native bounded groups; no Profile claim.
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
