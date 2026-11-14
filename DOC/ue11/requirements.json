@@ -40,6 +40,18 @@
       "profiles": []
     },
     {
+      "id": "SIM-SES-LIFETIME",
+      "reference": "M1 design; §3.5.13 Clear lifecycle",
+      "summary": "关闭SES对象后的Host消息身份与真实传输退休",
+      "status": "partial",
+      "tests": [
+        "retired_semantic_messages_test",
+        "endpoint_replacement_test"
+      ],
+      "profiles": [],
+      "evidence_note": "A queued old RUD request could adopt a replacement Endpoint MID and make a delivered new WRITE time out. Host-owned cursor and retired lease tracking isolate source MIDs/local optimized cookies until real Clear/Close or datagram local completion; one active native Endpoint per Host is enforced before callback replacement. Seven normal CTests pass, including prior MID reuse, resource, RUDI and synchronization lifecycles. All seven ASan/UBSan/leak CTests also pass. The expanded14-case replacement fixture passes normal and sanitizer, including forced16bit cursor wrap and fully exhausted retained-ID namespace without PDC allocation. Target replacement/response tokens and incomplete fragmented close tails remain open; no complete M1 claim. See ENDPOINT-LIFETIME.md."
+    },
+    {
       "id": "SIM-64",
       "reference": "M1 design",
       "summary": "64 端点运行与确定性输出",

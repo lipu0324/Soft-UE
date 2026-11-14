@@ -284,6 +284,9 @@ private:
             // reuse an identifier cleared by the same PDS progress step.
             while (!context_events_.empty()) {
                 const auto event=context_events_.front(); context_events_.pop_front();
+                services_.retired_semantic_messages.observe(event,MAX_PDC);
+                services_.retired_semantic_messages.request_read_retirement(
+                    [this](uint16_t local_pdc) { return request_connection_close(local_pdc); });
                 if (context_event_handler_) context_event_handler_(event);
                 if (stopped_) return;
                 worked=true;
@@ -376,8 +379,10 @@ private:
                     transmit_notifications_.push_back({*transmitted.identity,loop_.now(),TransmitOutcome::Started});
                     wake(); // Adapters without NIC timing expose local acceptance as their documented boundary.
                 }
-                if (transmitted.is_datagram && datagram_transmit_handler_)
-                    datagram_transmit_handler_(transmitted.local_tx_handle,result);
+                if (transmitted.is_datagram) {
+                    services_.retired_semantic_messages.datagram_completed(transmitted.local_tx_handle);
+                    if (datagram_transmit_handler_) datagram_transmit_handler_(transmitted.local_tx_handle,result);
+                }
                 if (stopped_) return;
             }
             if (request_handler_) {

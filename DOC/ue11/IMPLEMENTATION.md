@@ -431,3 +431,8 @@ increment does not copy the reference implementation's cryptographic keys,
 algorithms or test-vector files into Soft-UE.
 
 See [ACK-data READ](READ-ACK-DATA.md) for the current READ limit, registered result buffers and re-execution after a lost data ACK.
+
+Native Endpoint replacement keeps its source MID cursor and retired identity leases
+in the Host, with Clear/Close-based reclamation and exclusive live SES binding.
+This protects late queued PDS upcalls across object replacement; target replacement
+and incomplete fragmented close remain separate open work. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).
