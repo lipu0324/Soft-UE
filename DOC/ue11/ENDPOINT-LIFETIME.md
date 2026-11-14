@@ -86,3 +86,9 @@ Endpoint 替换、RUDI、同步组、rendezvous 与流式 payload 生命周期�
 `/tmp/softue-close-tail-fault-normal-tests.log`、`/tmp/softue-close-tail-fault-asan-tests.log`。
 检查真实重传、零次额外 reader 调用、没有重复放置、后续消息成功及租约/目标槽正常回收。
 这仍是定向功能证据；构建负载下的耗时不作为网络或实现性能结果。
+
+固定、干净的 `fbbe071c763be9252d52a15222a9d535b17e4b86` 已完成140/140普通
+（137.52s）与140/140 ASan/UBSan/泄漏（709.98s）完整本地回归，启用 provider 与参考实现，
+停止全部编译后按普通→sanitizer顺序执行。报告 `/tmp/softue-ownership-clean-full-report.json`，
+日志 `/tmp/softue-ownership-clean-normal-tests.log`、`/tmp/softue-ownership-clean-asan-tests.log`。
+该版本含优化 READ/原子与源端身份退休，尚不含后续关闭分片收尾及目标端替换改动。
