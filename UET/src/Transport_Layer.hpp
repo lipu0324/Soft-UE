@@ -144,6 +144,13 @@ enum PDS_type {
     ROD_CC_REQ      // Congestion control ROD request
 };
 
+inline bool is_reliable_unordered_request(PDS_type type) {
+    return type==RUD_REQ || type==RUD_CC_REQ;
+}
+inline bool is_reliable_ordered_request(PDS_type type) {
+    return type==ROD_REQ || type==ROD_CC_REQ;
+}
+
 /**
  * @brief PDS next header type enumeration
  * @details Identifies encoding of UET semantic types

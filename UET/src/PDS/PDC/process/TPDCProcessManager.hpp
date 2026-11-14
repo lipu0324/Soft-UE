@@ -75,7 +75,7 @@ public:
         // Each queued return packet owns its own response token. It does not
         // start another application request/message in the forward direction.
         request.som=request.eom=true;
-        context.tx_req_q.push(std::move(request));
+        context.enqueueRequest(std::move(request));
         return true;
     }
     std::optional<std::pair<uint32_t,uint32_t>> receiveSequenceSnapshot(uint16_t pdcid) {
@@ -390,7 +390,7 @@ public:
         }
         
         // Use instance member queue
-        process_info->tpdc_instance->tx_req_q.push(req);
+        process_info->tpdc_instance->enqueueRequest(req);
         if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }

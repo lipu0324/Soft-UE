@@ -22,6 +22,7 @@ set(CORE ${CMAKE_CURRENT_SOURCE_DIR}/UET/src)
 add_library(softue_protocol STATIC
   ${CORE}/SES/Endpoint.cpp
   ${CORE}/Runtime/PdsHost.cpp
+  ${CORE}/CMS/TfcEngine.cpp
   ${CORE}/PDS/PDC/PDC.cpp
   ${CORE}/PDS/PDC/Probe.cpp
   ${CORE}/PDS/PDC/TransmitTiming.cpp
@@ -113,6 +114,10 @@ if(BUILD_TESTING)
   softue_test(unreliable_admission_test UnreliableAdmissionTest.cpp)
   softue_test(tfc_credit_test TfcCreditTest.cpp Threads::Threads)
   softue_test(tfc_destination_credit_test TfcDestinationCreditTest.cpp Threads::Threads)
+  softue_test(tfc_context_test TfcContextTest.cpp)
+  softue_test(tfc_integration_test TfcIntegrationTest.cpp)
+  softue_test(tfc_bidirectional_test TfcBidirectionalTest.cpp)
+  softue_test(tfc_receive_pressure_test TfcReceivePressureTest.cpp)
   softue_test(credit_header_test CreditHeaderTest.cpp softue_message)
   softue_test(credit_admission_test CreditAdmissionTest.cpp)
   softue_test(receive_handle_lifetime_test ReceiveHandleLifetimeTest.cpp)

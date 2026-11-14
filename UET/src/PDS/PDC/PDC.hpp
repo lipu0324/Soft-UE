@@ -461,14 +461,26 @@ public:
     }
 
     bool hasPendingWork() const {
+        updateCreditActivity();
         const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
                             (!tx_req_q.empty() && !pause_pdc && newDataAllowed() && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
-                            !tx_rsp_q.empty() || admissionRetryReady() || probe_due_ || needsWindowProbe();
+                            !tx_rsp_q.empty() || admissionRetryReady() || probe_due_ || needsWindowProbe() || creditControlReady();
         if (state == CLOSED) return queued;
         return gen_cm != NONE || close_error ||
             (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
     }
     bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    virtual bool creditQuiescing() const {
+        return closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT;
+    }
+    // Keep posted-demand accounting at the queue ownership boundary, before
+    // admission can block. Returning READ data uses this same queue and CCC.
+    void enqueueRequest(PDS_PDC_req request) {
+        const auto payload_bytes=request.pkt.payload.size();
+        tx_req_q.push(std::move(request));
+        if (runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->work_posted(congestionConnection(),payload_bytes);
+    }
     bool requestProbe(uint32_t selective_base);
     bool probePending() const { return outstanding_probe_.has_value(); }
     bool notifyTransmit(const UET::Runtime::TransmitNotification& notification);
@@ -568,9 +580,14 @@ protected:
     }
     bool congestionReady(bool retransmission=false) const {
         if (!runtime_ || !runtime_->congestion_control) return true;
+        updateCreditActivity();
         congestion_engaged_=true;
         return runtime_->congestion_control->can_send_attempt(congestionConnection(),retransmission);
     }
+    void updateCreditActivity() const;
+    bool creditControlReady() const;
+    void sendCreditControl();
+    void receiveCreditControl(const PDStoNET_pkt& packet);
     std::optional<uint32_t> nextAdmittedRetry() const {
         std::optional<uint32_t> selected;
         for (const auto& deferred:admission_deferred_retries_) {

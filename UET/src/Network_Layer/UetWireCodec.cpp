@@ -565,11 +565,11 @@ DecodedPacket UetWireCodec::decode(const uint8_t* bytes, size_t size, bool crc_e
         const auto* pds=bytes+start+transport;
         const auto type=get(pds,2)>>11;
         if (!type || type>=16) throw PdsDecodeError(PdsDecodeError::Reason::UnknownType,type);
-        if (type==2 || type==3) {
+        if (type==2 || type==3 || type==13 || type==14) {
             if (size<start+transport+12) throw std::invalid_argument("incomplete trimmed PDS request");
             packet.PDS_type=RUOD_req_header;
             auto& header=packet.PDS_header.RUOD_req_header;
-            header.type=type==2?RUD_REQ:ROD_REQ; header.next_hdr=UET_HDR_NONE;
+            header.type=static_cast<PDS_type>(type); header.next_hdr=UET_HDR_NONE;
             const auto flags=get(pds,2)&0x7f;
             header.flags.syn=(flags>>2)&1; header.flags.retx=(flags>>4)&1; header.flags.ar=(flags>>3)&1;
             header.clear_psn_off=static_cast<int16_t>(get(pds+2,2)); header.psn=get(pds+4,4); header.spdcid=get(pds+8,2);

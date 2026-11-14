@@ -57,6 +57,7 @@ private:
     bool bad_psn;    /**< Bad PSN flag  */
     bool close_cmd;   /**< Close command flag  */
     bool req_closing; /**< Request closing flag  */
+    bool creditQuiescing() const override { return req_closing || PDC::creditQuiescing(); }
     void establishContext(uint16_t remote_pdc,uint32_t initial_sequence,pdc_mode delivery_mode);
 
 public:

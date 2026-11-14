@@ -5,6 +5,7 @@
 #include "../Network_Layer/UetWireCodec.hpp"
 #include "../PDS/DefaultSemanticResponse.hpp"
 #include "../CMS/NsccEngine.hpp"
+#include "../CMS/TfcEngine.hpp"
 #include "../SES/SemanticReturnCode.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
 #include <deque>
@@ -39,6 +40,10 @@ public:
     void configure_initial_sequence_seed(uint64_t scenario_seed);
     void enable_nscc(const CMS::NsccConfig& config);
     const CMS::NsccEngine* nscc() const;
+    // Experimental transport-credit policy. Configure optional NSCC first;
+    // this adapter currently uses the host's one data traffic class (TC 0).
+    void enable_tfc(const CMS::TfcEngineConfig& config);
+    const CMS::TfcEngine* tfc() const;
     void configure_psn_ranges(const PDS::PsnRangeConfiguration& configured,uint32_t zero_override=0);
     void configure_pdc_mapping(const PDS::PdcMappingConfiguration& configured);
     void configure_read_ack_data(uint32_t maximum_bytes);
@@ -73,6 +78,7 @@ private:
     IPacketPort& port_;
     Services services_;
     std::unique_ptr<CMS::NsccEngine> congestion_; // Outlives every PDC in manager_.
+    std::unique_ptr<CMS::TfcEngine> flow_control_; // Destroyed before optional underlying NSCC.
     PDSProcessManager manager_;
     std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
     TimerId pending_ = 0;

@@ -58,6 +58,7 @@ private:
    
 public:
     bool close_req;      /**< Close request flag */
+    bool creditQuiescing() const override { return close_req || PDC::creditQuiescing(); }
     bool hasPendingWork() const {
         return (close_req && open_msg==0) || PDC::hasPendingWork();
     }

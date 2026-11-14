@@ -48,14 +48,19 @@ public:
         target_counter_=next_counter;
     }
 
-    BufferLease accept_new_packet(uint64_t payload_bytes) {
+    bool can_accept_new_packet(uint64_t payload_bytes) const {
         const auto consumed_bytes=cost_model_.packet_credit_bytes(payload_bytes);
         const auto remaining_credit=promised_credit_bytes_-consumed_bytes;
         // Requests may arrive in a different order from transmission. Test
         // aggregate entitlement rather than requiring the receive-side
         // balance to be positive for each particular arriving packet.
-        if (consumed_bytes>capacity_bytes_-buffered_bytes_ ||
-            remaining_credit<=-static_cast<int64_t>(maximum_packet_bytes_))
+        return consumed_bytes<=capacity_bytes_-buffered_bytes_ &&
+            remaining_credit>-static_cast<int64_t>(maximum_packet_bytes_);
+    }
+
+    BufferLease accept_new_packet(uint64_t payload_bytes) {
+        const auto consumed_bytes=cost_model_.packet_credit_bytes(payload_bytes);
+        if (!can_accept_new_packet(payload_bytes))
             throw std::length_error("packet exceeds the CCC's allocated TFC buffer entitlement");
         if (next_buffer_lease_==std::numeric_limits<BufferLease>::max())
             throw std::overflow_error("TFC buffer lease namespace exhausted");
@@ -65,7 +70,7 @@ public:
         buffers_.emplace(lease,consumed_bytes);
         ++next_buffer_lease_;
         buffered_bytes_+=consumed_bytes;
-        promised_credit_bytes_=remaining_credit;
+        promised_credit_bytes_-=consumed_bytes;
         return lease;
     }
 

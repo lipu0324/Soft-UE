@@ -1,8 +1,8 @@
 # TFC 源信用计算与接入边界
 
-`CMS/TfcCredit.hpp` 目前只实现 §3.6.15 的源端数值规则，尚未接入 PDS 发送准入、
-目的缓冲分配、Credit CP/ACK、信用请求定时器或 CCC 生命周期。没有 Endpoint 宣告
-TFC 支持；不能把这个单元当作完整 TFC 或 M5 的验收。
+`CMS/TfcCredit.hpp`、目的预算、信用线格式和 PDS 发送准入桥已有分范围验证。
+本分支新增 `TfcEngine` 接入草稿，正在验证真实 PDS 信用反馈、缓冲池、定时器和
+CCC 生命周期。没有 Endpoint 宣告 TFC/Profile 支持；不能把组件单测当作 M5 验收。
 
 ## 显式的单位
 
@@ -101,3 +101,88 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验。固定源版本 `49cf6545be20f09d3aaecd1d1833ceada072932b`
 的源/目的两个数值单元 CTest 通过：普通构建0.08秒，ASan/UBSan/leak 构建0.25秒。
 日志为 `/tmp/softue-tfc-destination-{normal,asan}-tests.log`。
+
+## 原 PDS 接入草稿与验证边界
+
+`PdsHost::enable_tfc` 在创建连接前启用；可先启用 NSCC，再将 TFC 与其组合。
+配置区分 outgoing（对端目的缓冲几何）和 incoming（本机目的缓冲几何），允许
+双向 cell/overhead 不同。Host 当前共用一个 Payload MTU，实验适配器仅支持数据
+TC 0，其他 TC 的提交显式拒绝。RUDI/UUD 继续走不受 UET CCC 控制的路径。
+
+原 PDS 队列登记累计需求，原 TX cache 提供可信重传身份，原 receive admission
+在 SES 资源预约前检查目的 CCC 预算。成功接受后取得 transport buffer lease；
+Host 完成有效 SES upcall 后释放这块 transport buffer。SES 可能保留的 unexpected
+消息存储属于另一个资源域。未成功进入 PDS 的 PSN 不消耗新 buffer lease。
+
+源 RUD 可配置共享 CCC，ROD 默认独立；8位 CCC_ID 在一个 peer 的活动源上下文中
+唯一。最后成员进入 QUIESCE/关闭流程后，旧 CCC 从新绑定查询中移除，但保留旧成员
+的重传与关闭状态。目的按 peer+CCC_ID 共享独占缓冲预算，最后成员 Close 后退回
+主机总池；无可用预算时拒绝，不向另一个 CCC 借出已经承诺的空间。
+
+未组合 NSCC 时，ACK_CC/CC_CREDIT 携带累计授权；组合 NSCC 时保留 NSCC ACK，
+用 Credit CP 携带 TFC 信用。重复/重排反馈不重复授权。Credit/Credit Request CP
+使用原 PDS 已建立的连接发送，PSN、AR、SYN 均为0，不另建 PDC 或数据重传栈。
+
+§3.6.15.4（PDF 第508页）描述“有未发送工作、没有信用”时启动当前 RTO 信用定时器，
+随后伪代码却以 `ccc.state != READY` 返回；§3.6.8 将这种受阻状态定义为 ACTIVE。
+其注释还要求排除无工作、已有信用、已有数据包 RTO 的情形。当前实验适配器按这些
+明确恢复条件执行：有信用受阻的新包、没有未确认数据、且存在仍可用的已建立 PDC
+时计时；到期重发累计 target。规范 READY 条件的矛盾仍是正式符合性复核项。
+
+`tfc_context_test` 检查共享/最后 QUIESCE、新 CCC_ID、256 ID 耗尽与恢复、目的共享池
+和关闭回收。`tfc_integration_test` 的48个原 SES/PDS 事务覆盖 STD/MEDIUM、RUD/ROD、
+NSCC 开关、IPv4 UDP/IPv6 native、首包丢失、只有信用字段丢失而数据已经确认的恢复。
+初始接入版本 `d670a2e71f9ff28a52501438c8e13b2ccb91588d` 的两个构建都在编译阶段
+发现公共 PDC 读取了发起端专有 close_req，未运行新测试。修正后使用两类 PDC 的
+关闭状态查询，并在 QUIESCE/关闭转换时立即通知 CMS。新增原生双 Job 事务，在旧
+PDC 仍受65毫秒 SYN 关闭保护时，检查新 RUD PDC 取得不同 CCC_ID。
+`03a2b82fcc48e5dba15fa0ea50239bd53046e90d` 已完成两个构建。首次两个普通
+CTest 中，context 测试通过，但首个集成事务超时；诊断轨迹显示只有256字节授权、
+没有 SES handoff 后的缓冲返还。原因是目标处理 SYN 前的调度查询缓存了旧/未建立的
+CCC 身份。现在等待目标 establishContext 后再查询 CCC；失败日志保留于
+`/tmp/softue-tfc-runtime-03a-initial-tests.log` 与
+`/tmp/softue-tfc-integration-03a-debug-tests.log`。故障夹具也改为在源发出 Credit Request
+之前屏蔽所有信用载体，保留普通 PDS/SES 确认，避免另一个 CP 掩盖定时器路径。
+`ebff7c802966dd8bb60ec0ff55d4727acea6fb02` 的普通11项范围回归为10通过、
+集成夹具1失败：STD 初始场景已越过原停顿，但 MEDIUM 夹具把512字节请求放在
+Payload MTU=64 的单包格式上，原生 API 正确返回 Unsupported。独立诊断日志为
+`/tmp/softue-tfc-integration-ebf-debug-tests.log`。夹具现改成8个合法64字节 MEDIUM
+WRITE（STD 保持一个8分片消息），共48场景、216个源操作，另有双 Job QUIESCE 回归。
+固定源版本 `bc9865067941eedd674e8b110f8db842af740237` 的11项范围回归已通过：
+普通构建0.78秒，ASan/UBSan/leak 构建7.75秒；日志为
+`/tmp/softue-tfc-runtime-medium-{normal,asan}-tests.log`。这是范围证明，不是完整174项回归。
+
+新增 `tfc_bidirectional_test` 的96个场景覆盖 STD/SMALL/MEDIUM、RUD/ROD、NSCC开关、
+ACK-data READ 与反向数据 READ、fetch-add/CAS，以及首次结果丢失后修改远端内存。
+短 READ 按规范允许重新读取新内容；反向 PDS 数据及原子结果必须保持已缓存内容。
+每个操作后排队一个 NO_OP，以验证双向数据与新消息信用共同进展。固定源版本
+`444e206a004c745e24ab8f46ae58b570529465e0` 的该项 CTest 通过：普通构建0.17秒、
+ASan/UBSan/leak 构建1.94秒；日志为 `/tmp/softue-tfc-bidirectional-{normal,asan}-tests.log`。
+
+`tfc_receive_pressure_test` 新增4个三 Host 场景：RUD/ROD、NSCC开关，目的池只够
+一个 CCC；第二个发送方必须收到 NO_CCC 且不改变内存，第一 CCC 完成真实65毫秒
+SYN保护的 Close 后，第二发送方通过原 PDS 重试成功，预算始终不超过预留上限。
+固定源版本 `0a72faef5bad7bc264043727aed8e92041bf72bf` 的该项 CTest 已通过：
+普通构建0.02秒、ASan/UBSan/leak 构建0.12秒；日志为
+`/tmp/softue-tfc-pressure-{normal,asan}-tests.log`。随后补上 RUD 独立 CCC 配置回归，
+并在 group key 中显式保留 RUD/ROD 模式。新的整合版本尚待范围与全量编译验证。
+完整资源拒绝故障组合、
+其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。
+
+
+## 完整整合回归中的 CQ 夹具问题
+
+固定源 `6f4115d818d65eb75213ba1364df5a359ab76fde` 完成全部176项构建，普通回归
+176/176通过（132.50秒）。ASan/UBSan/leak 为175/176通过（716.59秒），失败项为
+`libfabric_rendezvous_recovery_processes`。完整现场保留于
+`build/libfabric-process-failure-3xvgsu3n`，全量日志为
+`/tmp/softue-tfc-full-{normal,asan}-tests.log`。同源单项重跑通过（9.74秒），不能用此
+覆盖全量失败。首次 CHECK 退出后产生的清理泄漏报告不应掩盖先发生的 CQ 断言。
+
+夹具把第一个接收 CQ 当作 context11的大消息、第二个当作 context12的小消息。
+但 provider 显式报告 `rx_attr.comp_order=FI_ORDER_NONE`；libfabric 2.0 的
+`fi_endpoint(3)` 明确区分 `msg_order` 与 `comp_order`。小 eager 消息可先完成，
+而早先匹配的 rendezvous READ 仍在进行。修正后以真实 op_context 校验对应长度、
+每个 context 恰好一次，并保留两个缓冲的完整字节检查；不再断言未提供的 CQ 顺序。
+这只修改公共 API 测试夹具，没有更改 TFC 或 provider 协议逻辑。修正版本的范围及
+完整回归仍待验证，尚不将完整176项 Sanitizer 声明为通过。

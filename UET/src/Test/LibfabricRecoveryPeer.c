@@ -37,6 +37,7 @@ int main(int argc,char** argv) {
     hints->tx_attr->msg_order=hints->rx_attr->msg_order=ordered?FI_ORDER_SAS:FI_ORDER_NONE;
     SUCCESS(fi_getinfo(FI_VERSION(2,0),"127.0.0.1","0",FI_SOURCE,hints,&info));
     CHECK(info->tx_attr->msg_order==hints->tx_attr->msg_order);
+    CHECK(info->rx_attr->comp_order==FI_ORDER_NONE);
     struct fid_fabric *fabric; struct fid_domain *domain; struct fid_ep *endpoint;
     struct fid_cq *queue; struct fid_av *addresses; struct fid_mr *control_region;
     SUCCESS(fi_fabric(info->fabric_attr,&fabric,NULL)); SUCCESS(fi_domain(fabric,info,&domain,NULL));
@@ -66,6 +67,7 @@ int main(int argc,char** argv) {
         SUCCESS(fi_send(endpoint,small_buffer,sizeof(small_buffer),NULL,peer,(void*)2));
     }
     size_t sends=0,receives=0,errors=0;
+    unsigned int completed_receive_contexts=0;
     int posted=0,replied=0,failure_started=0,done_started=0,done_received=0;
     const double started=monotonic_seconds();
     int finished=0;
@@ -98,8 +100,19 @@ int main(int argc,char** argv) {
                 CHECK(!memcmp(control_buffer,"done",4)); done_received=1;
             } else if (entry->flags&FI_RECV) {
                 if (server) {
-                    CHECK(entry->op_context==(receives?(void*)12:(void*)11));
-                    CHECK(entry->len==(receives?sizeof(small_buffer):LARGE_BYTES));
+                    /* FI_ORDER_SAS orders message processing, not CQ entries.
+                     * This provider advertises FI_ORDER_NONE completion order
+                     * (libfabric 2.0 fi_endpoint(3), rx_attr.comp_order). A
+                     * small eager receive may complete while an earlier large
+                     * rendezvous READ is still in progress. Keep matching,
+                     * lengths and exactly-once completions strict by context.
+                     */
+                    const int large_receive=entry->op_context==(void*)11;
+                    CHECK(large_receive || entry->op_context==(void*)12);
+                    const unsigned int context_bit=large_receive?1u:2u;
+                    CHECK(!(completed_receive_contexts&context_bit));
+                    CHECK(entry->len==(large_receive?LARGE_BYTES:sizeof(small_buffer)));
+                    completed_receive_contexts|=context_bit;
                 } else CHECK(entry->op_context==(void*)20 && entry->len==5 && !memcmp(reply_buffer,"reply",5));
                 ++receives;
             } else ++sends;
@@ -125,6 +138,7 @@ int main(int argc,char** argv) {
     }
     if (!finished) fprintf(stderr,"recovery incomplete server=%d sends=%zu receives=%zu errors=%zu posted=%d\n",server,sends,receives,errors,posted);
     CHECK(finished);
+    if (server) CHECK(completed_receive_contexts==3);
     SUCCESS(fi_close(&endpoint->fid)); SUCCESS(fi_close(&control_region->fid));
     SUCCESS(fi_close(&addresses->fid)); SUCCESS(fi_close(&queue->fid)); SUCCESS(fi_close(&domain->fid)); SUCCESS(fi_close(&fabric->fid));
     fi_freeinfo(info); fi_freeinfo(hints); free(large_buffer);

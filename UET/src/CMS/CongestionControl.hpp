@@ -15,6 +15,11 @@ struct Connection {
     bool operator<(const Connection& other) const { return identity()<other.identity(); }
 };
 
+struct CreditControlMessage {
+    PDS_ctl_type subtype=Credit;
+    uint32_t payload=0;
+};
+
 // PDS owns packet ordering, retries and duplicate suppression. CMS owns sending
 // admission, nominal-byte accounting and feedback. All callbacks execute on the
 // owning injected runtime; implementations must not synchronously re-enter PDS.
@@ -36,6 +41,17 @@ public:
     virtual uint32_t transmitted_attempt(const Connection& connection,PDStoNET_pkt& packet,bool retransmission) {
         return transmitted(connection,packet);
     }
+    // Optional RCCC/TFC bridge. Defaults leave NSCC and disabled CMS paths
+    // unchanged. PDS retains all packet/connection identity validation.
+    virtual bool accepts_credit_requests() const { return false; }
+    virtual void work_posted(const Connection&,uint64_t payload_bytes) {}
+    virtual std::optional<PDS_Nack_Codes> admit_receive(const Connection&,const PDStoNET_pkt&) { return {}; }
+    virtual void handed_to_semantics(const Connection&,uint32_t psn) {}
+    virtual void update_activity(const Connection&,bool established,bool unsent_data,
+                                 bool unacknowledged_data,bool quiescing,uint64_t rto_ns) {}
+    virtual bool has_credit_control(const Connection&) const { return false; }
+    virtual std::optional<CreditControlMessage> take_credit_control(const Connection&) { return {}; }
+    virtual void received_credit_control(const Connection&,const PDStoNET_pkt&) {}
     // Select the forward control path without charging data admission/bytes.
     virtual void decorate_control(const Connection& connection,PDStoNET_pkt& packet)=0;
     virtual void acknowledged(const Connection& connection,const PDStoNET_pkt& packet,

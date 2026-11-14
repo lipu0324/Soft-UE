@@ -166,7 +166,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     if (!secure_psn)
     {
         const auto& header=pkt->PDS_header.RUOD_req_header;
-        establishContext(header.spdcid,header.psn-header.psn_off,header.type==RUD_REQ?RUD:ROD);
+        establishContext(header.spdcid,header.psn-header.psn_off,is_reliable_unordered_request(header.type)?RUD:ROD);
         if (mode==ROD && header.psn_off) {
             // §3.5.8.2 step 3.e: the first ROD arrival may be any later
             // SYN packet. Retain the new context and request Start_PSN,
@@ -185,7 +185,7 @@ void T_PDC::processOpen2(PDStoNET_pkt *pkt)
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
+            ((is_reliable_unordered_request(header.type))!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
     if (error_chk == OPEN)
@@ -292,6 +292,7 @@ void T_PDC::openChk()
                 netRxCm(&p); // Handle control packet / Process control packet
             }
         }
+        else if(creditControlReady()) { sendCreditControl(); }
         else if(probe_due_ || needsWindowProbe()) { progressProbe(); }
     else if(admissionRetryReady()) { retryAdmissionDeferred(); }
         else if(!rto_pkt_q.empty()){
@@ -344,6 +345,7 @@ void T_PDC::reqClose()
 {
     if (req_closing || state!=ESTABLISHED) return;
     req_closing=true;
+    updateCreditActivity();
     sendCloseReq(); // Schedule once; ordinary PDS timers own its retransmits.
 }
 
@@ -352,6 +354,7 @@ void T_PDC::beginClose()
     diagnostics() << getCurrentTimestamp() << "[PDCID:" << SPDCID << "] begin close" << std::endl;
     closing = true;        // Set closing flag
     state = ACK_WAIT;      // Wait for ACK state
+    updateCreditActivity();
 }
 
 void T_PDC::close()
@@ -573,7 +576,7 @@ void T_PDC::rxReq(PDStoNET_pkt *pkt)
     if (error_chk==INV_SYN) {
         const auto& header=pkt->PDS_header.RUOD_req_header;
         sendNack(header.flags.retx,header.psn,
-            ((header.type==RUD_REQ)!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
+            ((is_reliable_unordered_request(header.type))!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
         return;
     }
 
@@ -727,6 +730,10 @@ void T_PDC::rxCtrl(PDStoNET_pkt *pkt)
             break;
         case Probe:
             receiveProbe(*pkt);
+            break;
+        case Credit:
+        case Credit_req:
+            receiveCreditControl(*pkt);
             break;
         case ACK_req:
             rxCtrlAckReq(pkt);
