@@ -1,4 +1,5 @@
 #include "Endpoint.hpp"
+#include <iterator>
 
 namespace UET::SES {
 
@@ -286,6 +287,7 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
         operation.payload_source.reset();
         sources_.emplace(message,SourceMessage{std::move(operation),std::move(source),
             transfer_length,0,0,false});
+        ++producer_messages_by_traffic_class_[sources_.at(message).operation.traffic_class];
         sources_.at(message).deferrable_token=deferrable_token;
         sources_.at(message).restart_owner=restart_owner;
         if (synchronization_owner) synchronized_sources_.at(synchronization_owner)->active_message=message;
@@ -528,6 +530,8 @@ auto Endpoint::close() -> void {
     host_.set_datagram_transmit_handler({});
     host_.set_context_event_handler({});
     sources_.clear(); submission_order_.clear(); queued_fragments_=0;
+    queued_fragments_by_traffic_class_.fill(0);
+    producer_messages_by_traffic_class_.fill(0);
     while (!pending_.empty()) finish(pending_.begin()->first,CompletionStatus::Cancelled,0,0);
     while (!deferred_sources_.empty()) complete_deferrable_source(deferred_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
     while (!rendezvous_sources_.empty()) complete_rendezvous_source(rendezvous_sources_.begin()->first,CompletionStatus::Cancelled,0,0);
@@ -1461,10 +1465,54 @@ auto Endpoint::handle_deferrable_result(uint16_t message,const SES_Semantic_Resp
         finish(message,CompletionStatus::Success,transaction->deferred?0:transaction->length,1,still_pending->second.returned_generation);
 }
 
+auto Endpoint::producer_message_ready(uint16_t message,const SourceMessage& source) const -> bool {
+    if (source.deferrable_token && !source.aborting && source.started &&
+        !deferred_sources_.at(source.deferrable_token)->first_response_seen) return false;
+    if (source.rendezvous_owner && !source.aborting && source.started &&
+        !rendezvous_sources_.at(source.rendezvous_owner)->first_response_received) return false;
+    return source.operation.type!=OperationType::Read || source.aborting ||
+        pending_.at(message).read_requests_awaiting_data.size()<read_result_window_;
+}
+
+auto Endpoint::select_producer_traffic_class() -> bool {
+    const auto active_classes=static_cast<size_t>(std::count_if(producer_messages_by_traffic_class_.begin(),
+        producer_messages_by_traffic_class_.end(),[](size_t messages) { return messages!=0; }));
+    if (active_classes<=1) return true; // Preserve the original single-TC FIFO path exactly.
+    const auto per_class_limit=std::max<size_t>(1,(submission_window_+active_classes-1)/active_classes);
+    std::array<bool,8> visited{};
+    auto selected=submission_order_.end();
+    size_t selected_queued=SIZE_MAX;
+    uint8_t selected_class=0;
+    for (auto candidate=submission_order_.begin(); candidate!=submission_order_.end(); ++candidate) {
+        const auto source=sources_.find(*candidate);
+        if (source==sources_.end()) continue;
+        const auto traffic_class=source->second.operation.traffic_class;
+        if (visited[traffic_class]) continue;
+        visited[traffic_class]=true; // Never skip an earlier message within the same TC.
+        const auto queued=queued_fragments_by_traffic_class_[traffic_class];
+        if (queued>=per_class_limit || !producer_message_ready(*candidate,source->second)) continue;
+        if (selected==submission_order_.end() || queued<selected_queued ||
+            (queued==selected_queued && selected_class==last_producer_traffic_class_ &&
+             traffic_class!=last_producer_traffic_class_)) {
+            selected=candidate;
+            selected_queued=queued;
+            selected_class=traffic_class;
+        }
+    }
+    if (selected==submission_order_.end()) return false;
+    // §3.6.8 leaves source scheduling implementation-specific. Simulator
+    // policy: fairly share the finite copy budget among active data TCs,
+    // preferring the least occupied class and rotating ties. Moving only a
+    // class's first pending message preserves submission order within that TC.
+    std::rotate(submission_order_.begin(),selected,std::next(selected));
+    return true;
+}
+
 auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
     // Close tails bypass only the local payload-producer bound. The
     // original PDS window, CMS admission and recovery still own sending.
     while (!closed_ && (drain_abort_tails || queued_fragments_<submission_window_) && !submission_order_.empty()) {
+        if (!drain_abort_tails && !select_producer_traffic_class()) break;
         const auto message=submission_order_.front();
         auto found=sources_.find(message);
         if (found==sources_.end()) { submission_order_.pop_front(); continue; }
@@ -1617,6 +1665,8 @@ auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
         transfer.started=true;
         if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
         ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
+        ++queued_fragments_by_traffic_class_[operation.traffic_class];
+        last_producer_traffic_class_=operation.traffic_class;
         if (end_of_message) { transfer.all_submitted=true; submission_order_.pop_front(); }
         if (read_failed) finish(message,CompletionStatus::LocalError,0,static_cast<uint8_t>(SemanticReturnCode::InitiatorError));
     }
@@ -1626,14 +1676,23 @@ auto Endpoint::fragment_transmitted(uint16_t message) -> void {
     const auto found=sources_.find(message);
     if (found==sources_.end() || !found->second.queued) return;
     --found->second.queued; --queued_fragments_;
-    if (found->second.all_submitted && !found->second.queued) sources_.erase(found);
+    const auto traffic_class=found->second.operation.traffic_class;
+    --queued_fragments_by_traffic_class_[traffic_class];
+    if (found->second.all_submitted && !found->second.queued) {
+        --producer_messages_by_traffic_class_[traffic_class];
+        sources_.erase(found);
+    }
     feed_submissions();
 }
 
 auto Endpoint::discard_source(uint16_t message) -> void {
     if (auto found=sources_.find(message);found!=sources_.end()) {
         host_.cancel_queued_message(found->second.operation.peer,found->second.operation.job,message);
-        queued_fragments_-=found->second.queued; sources_.erase(found);
+        const auto traffic_class=found->second.operation.traffic_class;
+        queued_fragments_-=found->second.queued;
+        queued_fragments_by_traffic_class_[traffic_class]-=found->second.queued;
+        --producer_messages_by_traffic_class_[traffic_class];
+        sources_.erase(found);
     }
     submission_order_.erase(std::remove(submission_order_.begin(),submission_order_.end(),message),submission_order_.end());
 }

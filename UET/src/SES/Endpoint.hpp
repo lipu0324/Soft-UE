@@ -420,12 +420,19 @@ private:
     std::map<MessageKey,Incoming> incoming_;
     std::deque<Completion> completions_;
     size_t submission_window_,queued_fragments_=0;
+    // The payload-copy bound is host-local resource policy, independent of
+    // PDS reliability windows and each TC's congestion/credit gate.
+    std::array<size_t,8> queued_fragments_by_traffic_class_{};
+    std::array<size_t,8> producer_messages_by_traffic_class_{};
+    uint8_t last_producer_traffic_class_=0;
     size_t receive_message_limit_;
     uint64_t unexpected_limit_,unexpected_bytes_=0,next_receive_order_=0;
     std::map<uint64_t,MessageKey> unexpected_order_;
     std::map<std::tuple<uint16_t,uint16_t,ResourceSpace>,uint8_t> disabled_generations_;
     std::map<uint16_t,SourceMessage> sources_;
     std::deque<uint16_t> submission_order_;
+    bool select_producer_traffic_class();
+    bool producer_message_ready(uint16_t message,const SourceMessage& source) const;
     // A bounded target packet budget is independent of whole-message slots.
     // Holding each original READ ACK until its return packet completes keeps
     // PDS payload storage and response tokens bounded (§3.5.20.2.2).

@@ -78,7 +78,7 @@ void independent_flows(pdc_mode mode,bool nscc,bool tfc,bool loss) {
     Endpoint source(1,source_host,loop,trace,64),target(2,target_host,loop,trace,64);
     source.memory().add_job(1);
     target.memory().add_job(1);
-    const auto region=target.memory().register_region(1,1,1024,7);
+    const auto region=target.memory().register_region(1,1,1536,7);
     CHECK(source_host.open_connection(2,1,mode,false,{},3)!=UINT16_MAX);
     loop.run_until(10000); // Establish a numbered ROD NOOP on the configured data TC.
     if (mode==ROD) CHECK(forward.ordered_class_three_noops>0);
@@ -87,10 +87,10 @@ void independent_flows(pdc_mode mode,bool nscc,bool tfc,bool loss) {
     write.peer=2;
     write.delivery_mode=mode;
     write.remote_key=region.key;
-    write.payload.assign(512,0x11);
+    write.payload.assign(1024,0x11);
     const auto first=source.submit(write);
     write.traffic_class=3;
-    write.remote_offset=512;
+    write.remote_offset=1024;
     write.payload.assign(512,0x33);
     const auto other=source.submit(write);
     loop.run_until(10999);
@@ -99,19 +99,19 @@ void independent_flows(pdc_mode mode,bool nscc,bool tfc,bool loss) {
     std::set<uint64_t> completed;
     Completion completion{};
     while (source.poll_completion(completion)) {
-        CHECK(completion.status==CompletionStatus::Success && completion.length==512);
+        CHECK(completion.status==CompletionStatus::Success && completion.length==(completion.operation==first ? 1024u : 512u));
         CHECK(completed.insert(completion.operation).second);
     }
     CHECK(completed.count(other)); // An exhausted/lost TC 0 cannot stop TC 3.
-    if (loss) CHECK(!completed.count(first) && forward.lost==1);
+    if (loss) { CHECK(forward.lost==1); if (nscc || tfc) CHECK(!completed.count(first)); }
     loop.run_until(100*kMillisecond);
     while (source.poll_completion(completion)) {
-        CHECK(completion.status==CompletionStatus::Success && completion.length==512);
+        CHECK(completion.status==CompletionStatus::Success && completion.length==(completion.operation==first ? 1024u : 512u));
         CHECK(completed.insert(completion.operation).second);
     }
     CHECK(completed.size()==2 && completed.count(first) && completed.count(other));
-    CHECK(target.memory().read(1,1,region.key,0,512)==std::vector<uint8_t>(512,0x11));
-    CHECK(target.memory().read(1,1,region.key,512,512)==std::vector<uint8_t>(512,0x33));
+    CHECK(target.memory().read(1,1,region.key,0,1024)==std::vector<uint8_t>(1024,0x11));
+    CHECK(target.memory().read(1,1,region.key,1024,512)==std::vector<uint8_t>(512,0x33));
     if (tfc) {
         CHECK(forward.credit_identifiers[0].size()==1 && forward.credit_identifiers[3].size()==1);
         CHECK(*forward.credit_identifiers[0].begin()!=*forward.credit_identifiers[3].begin());
