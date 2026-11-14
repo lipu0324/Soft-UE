@@ -19,7 +19,7 @@ SEStoPDS_pkt synchronized_packet(bool atomic=false) {
     packet.payload={1,2,3,4}; return packet;
 }
 void check_metadata(const PDC_SES_req& request,bool atomic) {
-    CHECK(request.rx_pkt_handle==UINT16_MAX && request.pkt.payload.empty());
+    CHECK(request.rx_pkt_handle==UET::Runtime::kInvalidReceivePacketHandle && request.pkt.payload.empty());
     CHECK(request.pkt.eth_type==(atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header));
     const auto& synchronization=atomic?request.pkt.eth_header.Synchronized_Atomic_Extension_Headers.synchronization:
         request.pkt.eth_header.Synchronized_Operation_Extension_Header;

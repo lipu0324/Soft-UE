@@ -35,7 +35,7 @@ template<class Receiver> void kernel_admission(pdc_mode mode) {
         ++checks;
         CHECK(descriptor.PDCID==local && descriptor.orig_pdcid==remote && descriptor.orig_psn==1000);
         CHECK(descriptor.source_fep==receiver.dst_fep && descriptor.connection_start_psn==1000);
-        CHECK(descriptor.rx_pkt_handle==UINT16_MAX && descriptor.pkt.payload.empty());
+        CHECK(descriptor.rx_pkt_handle==UET::Runtime::kInvalidReceivePacketHandle && descriptor.pkt.payload.empty());
         CHECK(descriptor.pkt.bth_header.Standard_Header.request_length==4);
         return available?SemanticAdmission::ReservedMessage:SemanticAdmission::Rejected;
     };
