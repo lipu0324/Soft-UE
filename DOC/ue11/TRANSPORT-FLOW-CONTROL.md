@@ -56,3 +56,17 @@ TFC 支持；不能把这个单元当作完整 TFC 或 M5 的验收。
 固定源版本 `64c796abaf156ad1dfbd73cc5b218843eb2bfbe8` 的该项 CTest 已通过：
 普通 Debug 构建0.01秒，ASan/UBSan/leak 构建0.03秒。日志为
 `/tmp/softue-tfc-credit-{normal,asan}-tests.log`。仅验证数值单元，不扩大为接入证明。
+
+## 信用线格式接入
+
+编解码器新增 RUD_CC_REQ / ROD_CC_REQ 的4字节 `req_cc_state`，其中 CCC_ID 为8位、
+累计 credit target 为24位。类型13/14仍保留独立身份；尚未启用 TFC 的 PDS 仍拒绝
+这些请求，不会把它们悄悄转换成普通 RUD/ROD。信用控制包已有32位 payload 外壳，
+Credit 使用高24位与低8位保留，Credit Request 使用 CCC_ID 与24位 target。
+
+ACK_CC 的 `CC_CREDIT=1` 使用独立 `credit_units` 字段。实际 PDF 第464页图3-129
+规定信用位于8字节 CC_STATE 的最前24位，随后24位保留，再跟16位 ooo_count；
+它的位置与 NSCC 的 `received_byte_units` 不同。NSCC 的 service_time、窗口罚值
+和字节遥测不能被写入或读作信用。NIC 的 service_time stamping 也不改信用 ACK。
+`credit_header_test` 使用手写黄金字节验证40个格式/封装组合，并覆盖截断、保留位
+和24位范围。此线格式增量尚待编译验证；不代表真实信用发送/接收已经启用。
