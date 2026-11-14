@@ -155,7 +155,8 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
 uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
 {
     RX_pkt_meta meta = {};
-    meta.is_read=pkt->SESpkt.bth_type==Standard_Header && pkt->SESpkt.bth_header.Standard_Header.opcode==2;
+    const auto request_fields=UET::SES::semantic_request_fields(pkt->SESpkt);
+    meta.is_read=request_fields && request_fields->header.opcode==2;
     meta.wire_entropy=pkt->wire_entropy;
     meta.congestion_marked=pkt->network_ecn==3;
     meta.arrival_time_ns=pkt->receive_time_ns;
@@ -170,9 +171,9 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
     if (pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header) {
         meta.som=true;
         meta.payload_len=pkt->SESpkt.bth_header.Semantic_Response_with_Data_Header.payload_length;
-    } else {
-        meta.som=pkt->SESpkt.bth_header.Standard_Header.som;
-        meta.payload_len=meta.som?0:pkt->SESpkt.bth_header.Standard_Header.diff.som_false.payload_length;
+    } else if (request_fields) {
+        meta.som=request_fields->header.som;
+        meta.payload_len=meta.som?0:request_fields->header.diff.som_false.payload_length;
     }
 
     uint16_t handle = setRXhandle(meta.psn, meta.spdcid);
@@ -344,7 +345,7 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     }
     for (const auto& cached:tx_pkt_buffer) {
         if (cached.second.PDS_type!=RUOD_req_header ||
-            (cached.second.SESpkt.bth_type!=Standard_Header && cached.second.SESpkt.bth_type!=Semantic_Response_with_Data_Header) ||
+            (!UET::SES::semantic_request_fields(cached.second.SESpkt) && cached.second.SESpkt.bth_type!=Semantic_Response_with_Data_Header) ||
             semantic_completed_tx_.count(cached.first) || requiresDataAcknowledgment(cached.first)) continue;
         const uint32_t advance=acknowledgment.cack_psn-cached.first;
         // §3.5.13: equality is insufficient. SACK bits never enter this test.
@@ -514,7 +515,7 @@ void PDC::updateTxPsnTracker(uint32_t psn, uint8_t ack_req_flag, uint32_t cumula
              (valid_cumulative && distance <= cumulative_distance))) {
             const auto sequence = it->first;
             if (runtime_ && runtime_->standard_wire && it->second.PDS_type==RUOD_req_header &&
-                (it->second.SESpkt.bth_type==Standard_Header || it->second.SESpkt.bth_type==Semantic_Response_with_Data_Header) &&
+                (UET::SES::semantic_request_fields(it->second.SESpkt).has_value() || it->second.SESpkt.bth_type==Semantic_Response_with_Data_Header) &&
                 !semantic_completed_tx_.count(sequence)) {
                 ++it; continue;
             }
@@ -846,11 +847,12 @@ void PDC::freePDC()
     std::set<std::pair<uint32_t,uint16_t>> rejected_messages;
     while (!tx_req_q.empty()) {
         const auto& queued=tx_req_q.front();
-        if (queued.pkt.bth_type==Standard_Header) {
-            const auto& semantic=queued.pkt.bth_header.Standard_Header;
-            const std::pair<uint32_t,uint16_t> message{semantic.job_id,semantic.msg_id};
+        if (const auto fields=UET::SES::semantic_request_fields(queued.pkt)) {
+            const auto& semantic=fields->header;
+            const auto message_id=fields->has_message_id?semantic.msg_id:queued.tx_pkt_handle;
+            const std::pair<uint32_t,uint16_t> message{semantic.job_id,message_id};
             if (rejected_messages.insert(message).second)
-                emitPdcEvent(UET::Runtime::PdcEventKind::RequestRejected,tx_cur_psn,semantic.job_id,semantic.msg_id);
+                emitPdcEvent(UET::Runtime::PdcEventKind::RequestRejected,tx_cur_psn,semantic.job_id,message_id);
         } else if (queued.pkt.bth_type==Semantic_Response_with_Data_Header) {
             const auto& semantic=queued.pkt.bth_header.Semantic_Response_with_Data_Header;
             const std::pair<uint32_t,uint16_t> message{semantic.job_id,semantic.response_message_id};
@@ -1031,6 +1033,10 @@ void PDC::fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt)
     req.PDCID = SPDCID;                     
     req.rx_pkt_handle = handle;
     req.pkt = *pkt;
+    req.request_wire_format=pkt->bth_type;
+    if (const auto fields=UET::SES::semantic_request_fields(*pkt);fields && !fields->has_message_id) {
+        req.pkt.bth_type=Standard_Header; req.pkt.bth_header.Standard_Header=fields->header;
+    }
     req.pkt_len = meta.payload_len;
     req.next_hdr = meta.next_hdr;
     req.orig_psn = meta.psn;
@@ -1059,6 +1065,11 @@ void PDC::fwdRsp2SES(SEStoPDS_pkt *pkt,uint32_t original_sequence)
     LOG_DEBUG(__FUNCTION__, formatLogMessage("Forward response to SES layer"));
     PDC_SES_rsp rsp;
     rsp.delivery_mode=mode; // Preserve RUD/ROD identity alongside the explicit RUDI upcall path.
+    if (const auto original=tx_pkt_buffer.find(original_sequence);original!=tx_pkt_buffer.end()) {
+        rsp.original_request_format=original->second.SESpkt.bth_type;
+        if (const auto metadata=tx_pkt_map.find(original_sequence);metadata!=tx_pkt_map.end())
+            rsp.local_submission_id=metadata->second.tx_pkt_handle;
+    }
     rsp.original_sequence=original_sequence; rsp.connection_start_psn=start_psn;
     rsp.PDCID = SPDCID;                     
     rsp.rx_pkt_handle = pkt->bth_header.Semantic_Response_Header.job_id;
@@ -1559,10 +1570,9 @@ void PDC::sendReq(PDS_next_hdr next_hdr,uint8_t retx,uint8_t ar,uint32_t psn,uin
         metadata.congestion_inflight=true;
         metadata.last_transmit_time=runtime_->clock.now();
     }
-    if (pkt->bth_type==Standard_Header)
-        emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
-            pkt->bth_header.Standard_Header.job_id,pkt->bth_header.Standard_Header.msg_id,
-            pkt->bth_header.Standard_Header.eom);
+    if (const auto fields=UET::SES::semantic_request_fields(*pkt))
+        emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,fields->header.job_id,
+            fields->has_message_id?fields->header.msg_id:tx_pkt_map.at(psn).tx_pkt_handle,fields->header.eom);
     else if (pkt->bth_type==Semantic_Response_with_Data_Header)
         emitPdcEvent(UET::Runtime::PdcEventKind::RequestTransmitted,psn,
             pkt->bth_header.Semantic_Response_with_Data_Header.job_id,

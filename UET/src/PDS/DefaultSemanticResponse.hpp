@@ -1,5 +1,6 @@
 #pragma once
 #include "../Transport_Layer.hpp"
+#include "../SES/SemanticRequestFields.hpp"
 
 namespace UET::PDS {
 // UE 1.1 §3.5.13, Table 3-69: reconstruct only the default result. A
@@ -16,7 +17,9 @@ inline SEStoPDS_pkt default_semantic_response(const SEStoPDS_pkt& original_reque
         semantic.message_id=request.response_message_id; semantic.job_id=request.job_id;
         semantic.modified_length=request.modified_length;
     } else {
-        const auto& request=original_request.bth_header.Standard_Header;
+        const auto fields=UET::SES::semantic_request_fields(original_request);
+        if (!fields) return response; // Not an SES request with reconstructible DEFAULT fields.
+        const auto& request=fields->header;
         semantic.message_id=request.msg_id; semantic.job_id=request.job_id;
         semantic.ri_generation=request.ri_generation; semantic.modified_length=request.request_length;
     }

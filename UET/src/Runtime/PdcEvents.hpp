@@ -17,7 +17,7 @@ struct PdcEvent {
     uint32_t connection_start_psn;
     uint32_t sequence;
     uint32_t job=0;
-    uint16_t message_id=0;
+    uint16_t message_id=0; // Wire MID when present; trusted local TX handle for optimized no-MID requests.
     PdcFailureReason failure=PdcFailureReason::None;
     bool end_of_message=false;
 };

@@ -1,6 +1,6 @@
 # Scale-out优化语义头
 
-本轮先实现线格式，事务能力保持关闭。§3.4.3.2的SMALL/MEDIUM适用于单包消息，
+本轮接通显式选择的原生单包事务。§3.4.3.2的SMALL/MEDIUM适用于单包消息，
 均用14位request_length替代标准头中的MID；数据返回还可以用Table3-18的优化格式，
 通过original_request_psn关联原请求。它们不等同于M8的Unified Local压缩头或消息打包。
 
@@ -22,23 +22,59 @@ MEDIUM的union只表达同一个槽的两种名字，不授权任何内存访问
 仍按各自规范次序紧跟基础头。原有RNDV/同步/RUDI/legacy codec回归核对该整理没有
 改变既有报文；不将“能够编码扩展”当作该操作的优化事务能力。
 
-## 安全的接入边界
+## 请求、响应与内存授权
 
-当前PDS入口在分配PDC、学习对端和调用SES准入之前丢弃这三类未接通的优化格式。
-不能把它们的union当作Standard_Header读取：请求没有MID，且字段位置不同。六个
-直接PDS回归覆盖RUD/ROD及三种格式，核对没有PDC、SES请求、响应、网络回复或timer变化。
-完成真实PSN关联及MR授权后才能删除该围栏，原生能力目前不宣告支持优化事务。
+`Operation::header_format` 默认 `Standard`，可显式选择 `Small` 或 `Medium`。
+当前选择范围如下；能力字段逐项公布，四种 Profile 仍未通过完整验收。
 
-下一步需分别处理：
+| 原生格式 | 已接通操作 | 约束 |
+|---|---|---|
+| SMALL | NOOP、WRITE | WRITE key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
+| MEDIUM | NOOP、WRITE、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
+| 两者 | RUD、ROD；NSCC 开或关 | SOM=EOM=1，消息不超过配置的 Payload MTU（最大8192） |
 
-- 本地应用operation ID、仅用于本地跟踪的MID与线上原请求PSN的不同身份。
-- Table2-14规定的优化MR key/index放入ses.resource_index，以及Table2-47的Job/PID作用域。
-- SMALL/MEDIUM的单包SOM/EOM、header data共享槽、有效操作与MTU约束。
-- DEFAULT、显式错误和优化数据响应的关联、保证交付、反向READ、重试及Clear所有权。
-- 原生API、provider格式选择、配置发现及完整Profile矩阵。
+RMA 立即数、READ、atomic/fetch、Sync Group、RUDI/UUD 优化请求及优化数据响应尚未接通。
+源端拒绝不支持的组合；接收端独立验证格式和操作，不能依赖可信源端的 API 检查。
+Table2-14/15 的 RMA 选择条件排除 FI_REMOTE_CQ_DATA，而 §3.4.3.2 正文还讨论立即数；
+当前保守关闭该组合，MEDIUM SEND 的 header data 共用槽则实际验证。
+Legacy SUP1 端点不公布这些标准格式能力，也不公布标准 RUDI 能力。
 
-Table2-14/15的RMA优化选择条件排除FI_REMOTE_CQ_DATA，而§3.4.3.2正文还讨论带立即数
-的用法。共享槽的具体操作约束仍需在事务接入时逐项复核，不能仅凭字段存在而宣告支持。
+一次事务有三种不同身份：
+
+1. 应用 operation ID：关联应用上下文和一次完成事件。
+2. 源端本地提交句柄：保存在 PDS 发包元数据中，在线上不存在。PDC 在确切 PSN 的
+   ACK 路径上把它带回 SES；线上语义响应 MID 必须为0，不能把本地句柄写进报文。
+3. 原请求 PSN：区分目标端同一连接上的多个无 MID 单包消息。目标 SES 的消息键包含
+   对端、本地 PDC、Job、initiator、标记后的完整32位 PSN 和连接起始 PSN，避免与 STD MID0 混淆。
+
+`SemanticRequestFields` 是固定字段的内部视图，不是另一套线格式。PDS 准入及上交 SES
+时投影字段并保留原格式；原始编码、扩展和 payload 所有权仍走已有协议内核。
+源端完成适配只在本地补回提交句柄，再由现有逻辑检查 FEP、PDC incarnation、Job、未完成 PSN。
+DEFAULT 推断、重传、恰好一次放置和 Clear 回收继续由现有 PDS 负责。
+
+SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 Job/PID/index
+作用域查找实际注册 key，再用原有 WRITE 授权路径检查权限、存活注册、资源代次及区间。
+索引解析不授予访问权限；绝对寻址不能借 Job 在多个相同索引间任意选一个。
+应用可注册 OPTIMIZED key，显式 RI 必须等于 key 索引；自动分配优化 key 尚未实现。
+收到的地址始终是经过 MR 检查的偏移，不能成为宿主指针。
+
+例如，注册 `MemoryKeyFormat::Optimized | 3`，配置 PID1/RMA RI3 后，SMALL WRITE
+可以向该区域写入一个不超过 MTU 的消息。MEDIUM WRITE 则携带完整 key，按通常资源选择规则访问。
+
+## 事务回归范围
+
+- `optimized_transaction_test`：88组零长度、1/73/MTU长度、两种模式、NSCC、idempotent 元数据、
+  完成上下文、SEND 立即数及 tagged rank/tag；捕获真实线包核对请求无 MID、响应 MID0。
+- `optimized_fault_test`：96组请求/响应丢失、重复、乱序、Clear 丢失，每组同连接8个事务；
+  计数实际 MR 写入，核对数据与每次唯一完成。乱序延迟发生在实际 MAC 发出之后。
+- `optimized_safety_test`：62组 Job/PID/索引、代次、权限、私有注册、撤销、绝对歧义，
+  Job/PID/index零及index4095、UINT64_MAX区域末端、8192B与源端拒绝、legacy能力。
+- `optimized_malformed_test`：28组绕过 Endpoint 的缺 SOM/EOM、超 MTU、未支持 READ、
+  initiator error、长度不符，以及本地 payload reader 抛错后的单次失败和回收。
+- `optimized_admission_test`：6组 RUD/ROD 的真实无 MID 准入资源拒绝，以及优化数据响应入口围栏。
+
+源端本地 reader 失败仍用既有 STD MSG_ERROR 终止路径，避免生成半个优化消息。
+这些检查不构成通用 Endpoint 替换/关闭安全的全部证据；该生命周期范围需单独验收。
 
 ## 证据与参考限制
 
@@ -47,9 +83,14 @@ Table2-14/15的RMA优化选择条件排除FI_REMOTE_CQ_DATA，而§3.4.3.2正文
 另检查0/8192/14位最大值的字段保存、非法编码、保留位、版本及逐字节截断。14位字段
 能保存16383不代表原生接口接受超过8192的Payload MTU；语义准入是另外的工作。
 
-七项普通检查全部通过（1.30s），七项ASan/UBSan/泄漏检查全部通过（2.45s），日志为
+线格式阶段七项普通检查全部通过（1.30s），七项ASan/UBSan/泄漏检查全部通过（2.45s），日志为
 `/tmp/softue-optimized-wire-tests2.log` 与 `/tmp/softue-optimized-wire-asan-tests.log`。
 检查期间另有完整版本构建，因此这里只作为功能证据，不作性能或实时调度结论。
+
+新增事务/故障/权限/准入四项检查普通全部通过（0.53s），ASan/UBSan/泄漏全部通过（3.65s），
+日志为 `/tmp/softue-optimized-expanded-normal-tests2.log`、`/tmp/softue-optimized-expanded-asan-tests2.log`。
+其后增加的畸形/reader失败28场景普通通过（0.02s），见 `/tmp/softue-optimized-malformed-tests.log`。
+这些是开发树的定向证据，提交后的完整普通和 sanitizer 集成检查另行记录。
 
 固定5b4e049的 `util/uet_util.c` 在解析next_hdr时，把REQ_SMALL、REQ_MEDIUM和
 RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来扩大对照范围。

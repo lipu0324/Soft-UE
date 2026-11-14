@@ -189,8 +189,11 @@ public:
         if (options.requested_key) {
             key=*options.requested_key | (options.idempotent_safe?kIdempotentSafe:0);
             MemoryKeyFormat::validate(key,KeyAssignment::Application);
-            if (key&MemoryKeyFormat::Optimized) throw std::invalid_argument("optimized-key headers are not implemented");
-            if (!resource_index) resource_index=1; // Default native RMA resource, not a wildcard.
+            if (key&MemoryKeyFormat::Optimized) {
+                const auto index=static_cast<uint16_t>(key&0xfff);
+                if (resource_index && *resource_index!=index) throw std::invalid_argument("optimized key and resource index differ");
+                resource_index=index; // Table2-14: this field is the MR index for optimized RMA.
+            } else if (!resource_index) resource_index=1; // Default native RMA resource, not a wildcard.
         } else {
             if (next_key_>kRkeyMask) throw std::overflow_error("memory keys exhausted");
             key=kProviderSpace | next_key_++ | (options.idempotent_safe?kIdempotentSafe:0);
@@ -237,6 +240,37 @@ public:
         });
         if (entry==entries.end()) return false;
         entries.erase(entry); if (entries.empty()) regions_.erase(found); return true;
+    }
+    // Table2-47: optimized indices are scoped by Job/PID, or PID alone for
+    // absolute lookup. SMALL omits the key's idempotent metadata. Resolving a
+    // numeric key here grants no rights: the caller still uses ordinary MR
+    // authorization for direction, private origins and the requested span.
+    uint64_t resolve_optimized_key(uint32_t job,uint16_t pid,uint16_t index,bool relative=true) const {
+        if (index>0xfff) throw MemoryAccessError(MemoryError::InvalidKey);
+        const Region* selected=nullptr;
+        bool job_found=false,pid_found=false,ambiguous=false;
+        unsigned specificity=0;
+        for (bool idempotent:{false,true}) {
+            const auto key=MemoryKeyFormat::Optimized|index|(idempotent?kIdempotentSafe:0);
+            const auto bucket=regions_.find(key); if (bucket==regions_.end()) continue;
+            for (const auto& region:bucket->second) {
+                if (relative && (job>0xffffff || (!region.allow_any_job && (!has_job(job) || region.job!=job)))) continue;
+                job_found=true;
+                if (region.pid_scope && *region.pid_scope!=pid) continue;
+                pid_found=true;
+                const unsigned score=(relative && !region.allow_any_job?4u:0u)+(region.pid_scope?2u:0u);
+                if (!selected || score>specificity) { selected=&region; specificity=score; ambiguous=false; }
+                else if (score==specificity) ambiguous=true;
+            }
+        }
+        if (!job_found) {
+            const auto base=MemoryKeyFormat::Optimized|index;
+            if (!regions_.count(base) && !regions_.count(base|kIdempotentSafe)) throw MemoryAccessError(MemoryError::InvalidKey);
+            throw MemoryAccessError(MemoryError::WrongJob);
+        }
+        if (!pid_found) throw MemoryAccessError(MemoryError::WrongEndpoint);
+        if (!selected || ambiguous) throw MemoryAccessError(MemoryError::InvalidKey);
+        return selected->key;
     }
     const Region& authorize(uint32_t job,uint16_t pid,uint64_t key,
                             uint64_t offset,uint64_t length,Access access,std::optional<uint16_t> resource_index={},

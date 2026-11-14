@@ -51,6 +51,7 @@ private:
     uint32_t peer_,job_;
     std::weak_ptr<int> authority_;
 };
+enum class RequestHeaderFormat { Standard, Small, Medium };
 struct Operation {
     OperationType type = OperationType::Send;
     pdc_mode delivery_mode = ROD; // Reliable ordered by default; RUD permits packet reordering.
@@ -80,6 +81,9 @@ struct Operation {
     uint32_t rendezvous_eager_length=0;
     bool zero_length_atomic=false; // §3.4.2.12: explicit zero-byte put/get, distinct from READ's ignored input operand.
     std::shared_ptr<const SynchronizedGroup> synchronization;
+    // §3.4.3.2: explicit single-packet format selection. Standard stays the
+    // default; selecting a format does not expand its supported operations.
+    RequestHeaderFormat header_format=RequestHeaderFormat::Standard;
 };
 // Ignore bits apply to the tag only. An omitted initiator matches any source;
 // a specified rank is interpreted inside the posting's JobID, even with absolute addressing.
@@ -101,6 +105,7 @@ struct Completion {
 };
 struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
+    bool optimized_small_write=true,optimized_medium_write=true,optimized_medium_send=true;
     bool datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
@@ -141,6 +146,8 @@ public:
         if (!mtu_ || mtu_>8192 || !timeout_ || !submission_window_ || !receive_message_limit_ ||
             !read_response_limit_ || read_response_limit_>UINT16_MAX || !read_result_window_ || read_result_window_>32640)
             throw std::invalid_argument("invalid SES configuration");
+        capabilities_.optimized_small_write=capabilities_.optimized_medium_write=capabilities_.optimized_medium_send=host_.services().standard_wire;
+        capabilities_.rudi_write=capabilities_.rudi_read=host_.services().standard_wire;
         host_.configure_semantic_payload_mtu(static_cast<uint32_t>(mtu_));
         host_.set_receive_admission(
             [this](const PDC_SES_req& request) { return reserve_receive_message(request); },
@@ -235,7 +242,7 @@ private:
         const bool is_atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || is_fetching_atomic;
         const bool is_read=operation.type==OperationType::Read;
         const bool is_rudi=operation.delivery_mode==RUDI;
-        if (is_rudi && ((operation.type!=OperationType::Write && !is_read) || operation.immediate_data ||
+        if (is_rudi && (!capabilities_.rudi_write || (operation.type!=OperationType::Write && !is_read) || operation.immediate_data ||
             synchronization_owner || rendezvous_read_owner || !(operation.remote_key&MemoryRegistry::kIdempotentSafe))) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
@@ -251,6 +258,22 @@ private:
             complete_local(CompletionStatus::InvalidRequest); return 0;
         }
         uint64_t payload_length=operation.payload_source?operation.payload_source->size():operation.payload.size();
+        const bool optimized=operation.header_format!=RequestHeaderFormat::Standard;
+        if (optimized) {
+            const bool small=operation.header_format==RequestHeaderFormat::Small;
+            const bool medium=operation.header_format==RequestHeaderFormat::Medium;
+            const bool write=operation.type==OperationType::Write;
+            const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
+            if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
+                (operation.type!=OperationType::Noop && !write && !(medium && send)) || (write && operation.immediate_data)) {
+                complete_local(CompletionStatus::Unsupported); return 0;
+            }
+            if (small && write) {
+                try { MemoryKeyFormat::validate(operation.remote_key,KeyAssignment::Provider); }
+                catch (const std::invalid_argument&) { complete_local(CompletionStatus::InvalidRequest); return 0; }
+                if (!(operation.remote_key&MemoryKeyFormat::Optimized)) { complete_local(CompletionStatus::InvalidRequest); return 0; }
+            }
+        }
         if (operation.zero_length_atomic && (!is_atomic || payload_length || operation.payload_source ||
             (operation.atomic_operation!=IntegerAtomicOperation::Read && operation.atomic_operation!=IntegerAtomicOperation::Write))) {
             complete_local(CompletionStatus::InvalidRequest); return 0;
@@ -351,6 +374,8 @@ private:
         pending.restart_owner=restart_owner; pending.rendezvous_owner=rendezvous_owner;
         pending.rendezvous_read_owner=rendezvous_read_owner;
         pending.synchronization_owner=synchronization_owner;
+        pending.wire_semantic_format=operation.header_format==RequestHeaderFormat::Small?Optimized_Header:
+            operation.header_format==RequestHeaderFormat::Medium?Small_Message_RMA_Header:Standard_Header;
         pending.is_datagram=is_datagram;
         pending.is_rudi=is_rudi;
         pending.is_read=is_read; pending.read_result=operation.read_result;
@@ -527,6 +552,7 @@ private:
         uint64_t id,context; uint32_t length; Runtime::TimerId timer; uint32_t peer,job;
         uint16_t local_pdc=UINT16_MAX;
         uint32_t connection_start_psn=0,last_transmitted_psn=0;
+        SES_BTH_header_type wire_semantic_format=Standard_Header;
         bool is_datagram=false;
         bool is_rudi=false,rudi_all_submitted=false;
         std::set<uint32_t> awaiting_rudi_responses; // Locally unique packet IDs, not PSNs.
@@ -644,7 +670,10 @@ private:
     std::map<uint64_t,uint32_t> deferred_order_;
     size_t deferred_header_limit_=0;
     uint32_t target_restart_initiator_=0; // Configured local Job rank; default node proxy is simulator policy.
-    using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint16_t,uint32_t>;
+    // Peer, local PDC, Job, initiator rank, message identity, PDC incarnation.
+    // The identity slot holds either a 16-bit MID or a marked 32-bit PSN.
+    using MessageKey=std::tuple<uint32_t,uint16_t,uint32_t,uint32_t,uint64_t,uint32_t>;
+    static constexpr uint64_t kPacketMessageIdentity=uint64_t{1}<<32;
     // A rejected eager continuation may precede SOM. Preserve only its one
     // receive CQ until header data arrives; the owning Incoming bounds this
     // state and retires it on Clear/Close (§3.4.6.4.1).
@@ -1733,6 +1762,31 @@ private:
                 convert_integer_atomic_byte_order(request.pkt.payload,operation.atomic_datatype);
             request.pkt_len=static_cast<uint16_t>(44+((atomic && !transfer.aborting)?4:(transfer.rendezvous_owner && !transfer.aborting)?24:0)+
                 ((operation.synchronization && !transfer.aborting)?4:0)+request.pkt.payload.size());
+            const bool end_of_message=header.eom;
+            if (!read_failed && operation.header_format!=RequestHeaderFormat::Standard) {
+                const auto standard=header;
+                const bool medium=operation.header_format==RequestHeaderFormat::Medium;
+                const auto fill=[&](auto& optimized_header) {
+                    optimized_header={}; optimized_header.opcode=standard.opcode; optimized_header.dc=standard.dc;
+                    optimized_header.ie=standard.ie; optimized_header.rel=standard.rel;
+                    optimized_header.som=standard.som; optimized_header.eom=standard.eom;
+                    optimized_header.request_length=standard.request_length; optimized_header.ri_generation=standard.ri_generation;
+                    optimized_header.job_id=standard.job_id; optimized_header.PIDonFEP=standard.PIDonFEP;
+                    optimized_header.resource_index=standard.resource_index; optimized_header.buffer_offset=standard.buffer_offset;
+                };
+                request.next_hdr=medium?UET_HDR_REQUEST_MEDIUM:UET_HDR_REQUEST_SMALL;
+                request.pkt.bth_type=medium?Small_Message_RMA_Header:Optimized_Header;
+                if (medium) {
+                    auto& optimized_header=request.pkt.bth_header.Small_Message_RMA_Header; fill(optimized_header);
+                    optimized_header.hd=standard.hd;
+                    if (standard.hd) optimized_header.header_data=standard.diff.som_true.header_data;
+                    optimized_header.initiator=standard.initiator; optimized_header.match_bits=standard.match_bits;
+                } else {
+                    auto& optimized_header=request.pkt.bth_header.Optimized_Header; fill(optimized_header);
+                    if (standard.opcode==1) optimized_header.resource_index=operation.remote_key&0xfff;
+                }
+                request.pkt_len=static_cast<uint16_t>((medium?32:20)+request.pkt.payload.size());
+            }
             const bool rudi=operation.delivery_mode==RUDI;
             if (rudi && read_failed) {
                 // A stateless peer has no message to terminate with MSG_ERROR.
@@ -1742,12 +1796,12 @@ private:
                 const auto packet_id=host_.submit_rudi(request);
                 if (!packet_id) { finish(message,CompletionStatus::ResourceExhausted,0,0); return; }
                 pending_.at(message).awaiting_rudi_responses.insert(*packet_id);
-                pending_.at(message).rudi_all_submitted=header.eom;
+                pending_.at(message).rudi_all_submitted=end_of_message;
             } else if (!host_.submit(request)) throw std::runtime_error("PDS rejected operation fragment");
             transfer.started=true;
             if (read) pending_.at(message).read_requests_awaiting_data.insert(static_cast<uint32_t>(transfer.offset));
             ++queued_fragments_; ++transfer.queued; transfer.offset+=count;
-            if (header.eom) { transfer.all_submitted=true; submission_order_.pop_front(); }
+            if (end_of_message) { transfer.all_submitted=true; submission_order_.pop_front(); }
             if (read_failed) finish(message,CompletionStatus::LocalError,0,static_cast<uint8_t>(SemanticReturnCode::InitiatorError));
         }
     }
@@ -2154,6 +2208,16 @@ private:
     }
     void respond(const PDC_SES_rsp& response) {
         if (response.delivery_mode==RUDI) { respond_rudi(response); return; }
+        if (response.original_request_format==Optimized_Header || response.original_request_format==Small_Message_RMA_Header) {
+            const auto pending=pending_.find(response.local_submission_id);
+            if (pending==pending_.end() || pending->second.wire_semantic_format!=response.original_request_format ||
+                response.pkt.bth_type!=Semantic_Response_Header || response.pkt.bth_header.Semantic_Response_Header.message_id) return;
+            auto projected=response; projected.original_request_format=Standard_Header;
+            projected.pkt.bth_header.Semantic_Response_Header.message_id=response.local_submission_id;
+            // This projection never reaches the encoder. The ordinary engine
+            // still verifies FEP, PDC incarnation, Job and outstanding PSN.
+            respond(projected); return;
+        }
         if (response.PDCID>=MAX_PDC && response.PDCID<MAX_PDC*2) { complete_read_return(response); return; }
         if (response.pkt.bth_type==Semantic_Response_with_Data_Header) {
             const auto& header=response.pkt.bth_header.Semantic_Response_with_Data_Header;
@@ -2457,7 +2521,11 @@ private:
     }
     static MessageKey receive_message_key(const PDC_SES_req& request) {
         const auto& header=request.pkt.bth_header.Standard_Header;
-        return {request.source_fep,request.PDCID,header.job_id,header.initiator,header.msg_id,request.connection_start_psn};
+        const bool no_mid=request.request_wire_format==Optimized_Header || request.request_wire_format==Small_Message_RMA_Header;
+        // Optimized messages contain exactly one packet. Mark its full PSN so
+        // PSN0 cannot alias STD MID0 on a shared RUD/ROD connection.
+        const uint64_t identity=no_mid?kPacketMessageIdentity|request.orig_psn:header.msg_id;
+        return {request.source_fep,request.PDCID,header.job_id,header.initiator,identity,request.connection_start_psn};
     }
     Runtime::SemanticAdmission reserve_receive_message(const PDC_SES_req& request) {
         if (request.delivery_mode==UUD || request.pkt.bth_type!=Standard_Header)
@@ -2486,7 +2554,7 @@ private:
             message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
             message.rendezvous_eager=header.opcode==6 || header.opcode==10;
             if (message.rendezvous_eager) message.completion_reported=true; // The transaction owns the single receive CQ.
-            if (header.opcode==0x10 || header.opcode==0x11) {
+            if (request.request_wire_format==Standard_Header && (header.opcode==0x10 || header.opcode==0x11)) {
                 const bool atomic=header.opcode==0x11;
                 if (request.pkt.eth_type!=(atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
                     message.synchronization_admission_error=SemanticReturnCode::OperationViolation;
@@ -2992,6 +3060,39 @@ private:
         } catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
     }
     void receive(const PDC_SES_req& request) {
+        const bool small=request.request_wire_format==Optimized_Header;
+        const bool medium=request.request_wire_format==Small_Message_RMA_Header;
+        if (!small && !medium) { receive_standard(request); return; }
+        const auto found=incoming_.find(receive_message_key(request));
+        if (found==incoming_.end()) throw std::logic_error("optimized request lacks admitted owner");
+        auto& owner=found->second;
+        const auto reject=[&](SemanticReturnCode code,std::optional<uint8_t> generation={}) {
+            owner.end_seen=true; owner.end_of_message_psn=request.orig_psn;
+            reject_message(request,owner,code,generation);
+        };
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
+        if ((header.opcode!=0 && header.opcode!=1 && !(medium && (header.opcode==5 || header.opcode==9))) ||
+            (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
+        if (!small || header.opcode!=1) { receive_standard(request); return; }
+        if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
+        try {
+            const auto selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
+                ResourceSpace::Rma,header.ri_generation);
+            auto projected=request;
+            projected.pkt.bth_header.Standard_Header.match_bits=memory_.resolve_optimized_key(header.job_id,selected.absolute_pid,
+                header.resource_index,header.rel);
+            // Admission could reserve only the elided index, not the key's
+            // region metadata. Bind that placeholder once to the resolved key
+            // before the ordinary WRITE consistency and permission checks.
+            if (!owner.initialized) owner.key=projected.pkt.bth_header.Standard_Header.match_bits;
+            // Resolving an index is not access authorization. The existing
+            // WRITE path below still checks live MR rights, scope and bounds.
+            receive_standard(projected);
+        } catch (const AddressingError& error) { reject(error.code,error.generation); }
+        catch (const MemoryAccessError& error) { reject(memory_code(error.code)); }
+    }
+    void receive_standard(const PDC_SES_req& request) {
         if (request.delivery_mode==RUDI) { receive_rudi(request); return; }
         if (request.delivery_mode==UUD) { receive_datagram(request); return; }
         if (request.pkt.bth_type==Semantic_Response_with_Data_Header) { receive_return_data(request); return; }

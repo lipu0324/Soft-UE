@@ -72,8 +72,9 @@ public:
     void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
         if (rudi_initiator_) rudi_initiator_->cancel_message(peer,job,message_id);
         const auto matches=[&](const SES_PDS_req& request) {
-            const auto& header=request.pkt.bth_header.Standard_Header;
-            return request.dst_fep==peer && header.job_id==job && header.msg_id==message_id;
+            const auto fields=UET::SES::semantic_request_fields(request.pkt);
+            return fields && request.dst_fep==peer && fields->header.job_id==job &&
+                UET::SES::local_submission_message(request)==message_id;
         };
         std::queue<SES_PDS_req> remaining;
         while (!SES_tx_req_q.empty()) {
@@ -275,15 +276,19 @@ private:
         });
     }
     void rejectPendingMessage(const SES_PDS_req& request) {
-        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+        if (!fields) return;
+        const auto& header=fields->header;
+        const auto message=UET::SES::local_submission_message(request);
         if (runtime_ && runtime_->pdc_event)
             runtime_->pdc_event({UET::Runtime::PdcEventKind::RequestRejected,UINT16_MAX,
-                request.dst_fep,0,0,header.job_id,header.msg_id,UET::Runtime::PdcFailureReason::ResourcesUnavailable});
+                request.dst_fep,0,0,header.job_id,message,UET::Runtime::PdcFailureReason::ResourcesUnavailable});
         // A fragmented operation is one application request. Remove all of its
         // unsent fragments before SES is allowed to release its message ID.
         const auto same_message=[&](const SES_PDS_req& queued) {
-            const auto& other=queued.pkt.bth_header.Standard_Header;
-            return queued.dst_fep==request.dst_fep && other.job_id==header.job_id && other.msg_id==header.msg_id;
+            const auto other=UET::SES::semantic_request_fields(queued.pkt);
+            return other && queued.dst_fep==request.dst_fep && other->header.job_id==header.job_id &&
+                UET::SES::local_submission_message(queued)==message;
         };
         std::queue<pend_node> retained;
         while (!pend_q.empty()) {
@@ -356,13 +361,13 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
-        // Optimized wire decoding is available to parsers/oracles before its
-        // PSN-based SES association is enabled. Do not reinterpret that union
-        // as Standard_Header, allocate a PDC, or acknowledge an unsupported
-        // semantic request/response. Native capability discovery stays false.
-        if (!received_packet.trimmed && (received_packet.SESpkt.bth_type==Optimized_Header ||
-            received_packet.SESpkt.bth_type==Small_Message_RMA_Header ||
-            received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header)) { ++event_cnt; return; }
+        // Request-only optimized formats now have an explicit SES projection.
+        // Optimized data responses and non-RUD/ROD uses remain unsupported;
+        // reject them before any PDC mutation, never cast their union as STD.
+        const bool optimized_request=received_packet.SESpkt.bth_type==Optimized_Header ||
+            received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
+        if (!received_packet.trimmed && (received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header ||
+            (optimized_request && received_packet.PDS_type!=RUOD_req_header))) { ++event_cnt; return; }
 
         if (received_packet.PDS_type==RUDI_header) {
             const auto& transport=received_packet.PDS_header.RUDI_header;
@@ -446,7 +451,7 @@ public:
             // direction; READ/atomic response data uses only the return
             // direction. Drop an illegal combination before allocation or
             // peer-ID learning (local malformed-direction policy).
-            if (received_packet.SESpkt.bth_type!=Standard_Header) {
+            if (!UET::SES::semantic_request_fields(received_packet.SESpkt)) {
                 ++event_cnt; return;
             }
         }
@@ -545,7 +550,7 @@ public:
             // first (§3.5.8.2). Only an existing, correctly addressed PDC tells
             // us which local direction this request would use.
             const bool forward=local_pdc_id>=MAX_PDC;
-            if ((forward && received_packet.SESpkt.bth_type!=Standard_Header) ||
+            if ((forward && !UET::SES::semantic_request_fields(received_packet.SESpkt)) ||
                 (!forward && received_packet.SESpkt.bth_type!=Semantic_Response_with_Data_Header)) {
                 ++event_cnt; return;
             }
@@ -704,13 +709,16 @@ public:
     // Allocation and resource retry use exactly the same path. An established
     // context remains usable even when every other ID in its pool is occupied.
     bool tryForwardRequest(SES_PDS_req& request) {
-        const auto& semantic=request.pkt.bth_header.Standard_Header;
+        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+        if (!fields) return false;
+        const auto& semantic=fields->header;
+        const auto message_id=UET::SES::local_submission_message(request);
         uint16_t local_pdc;
         const UET::PDS::PdcMappingIdentity identity{request.source_pid,
             static_cast<uint16_t>(semantic.PIDonFEP),static_cast<uint16_t>(semantic.resource_index)};
-        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id,
+        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,message_id,
                        &local_pdc,request.src_fep,identity)) return false;
-        const OutgoingMessage message{semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id};
+        const OutgoingMessage message{semantic.job_id,request.dst_fep,request.tc,request.mode,message_id};
         if (quiesced_messages_.count(message) ||
             (semantic.som && IPDC_Processmanager.isConnectionClosing(local_pdc))) {
             // §3.5.8.3: finish existing messages before starting a new context.
@@ -888,8 +896,9 @@ public:
         req.tx_pkt_handle = pkt->tx_pkt_handle;
         req.pkt = pkt->pkt;
         req.pkt_len = pkt->pkt_len;
-        req.som = (pkt->pkt.bth_header.Standard_Header.som != 0);
-        req.eom = (pkt->pkt.bth_header.Standard_Header.eom != 0);
+        const auto fields=UET::SES::semantic_request_fields(pkt->pkt);
+        req.som=fields?bool(fields->header.som):true;
+        req.eom=fields?bool(fields->header.eom):true;
         // Send request to PDC
         if (pdc_id < MAX_PDC)
         {
@@ -1196,8 +1205,9 @@ public:
                 IPDC_Processmanager.stopIPDCProcess(pdc_id);
                 if (auto deferred=deferred_close_requests_.find(pdc_id);deferred!=deferred_close_requests_.end()) {
                     for (auto& request:deferred->second) {
-                        const auto& semantic=request.pkt.bth_header.Standard_Header;
-                        quiesced_messages_.erase({semantic.job_id,request.dst_fep,request.tc,request.mode,semantic.msg_id});
+                        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+                        if (fields) quiesced_messages_.erase({fields->header.job_id,request.dst_fep,request.tc,request.mode,
+                            UET::SES::local_submission_message(request)});
                         SES_tx_req_q.push(std::move(request));
                     }
                     deferred_close_requests_.erase(deferred);

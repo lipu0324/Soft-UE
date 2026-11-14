@@ -73,6 +73,7 @@ void key_format_and_scopes() {
     const auto zero_job=registry.register_region(0,0,8,7,options);
     registry.write(0,0,0,0,{7},0); CHECK(registry.read(0,0,zero_job.key,0,1,0)[0]==7);
     options.requested_key=MemoryKeyFormat::Optimized|1;
+    // The existing resource_index0 cannot bind optimized MR index1.
     check_throws<std::invalid_argument>([&] { registry.register_region(2,7,8,7,options); });
 }
 
