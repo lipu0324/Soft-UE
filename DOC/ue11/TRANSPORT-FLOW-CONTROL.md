@@ -81,3 +81,19 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 `credit_admission_test` 是8个原 PDS 事务的隔离验证：RUD/ROD、首包丢失和三次 NIC
 背压组合。目的没有 TFC，信用由测试显式注入，以验证桥接边界；它不是信用线端
 互通或完整 TFC 实现。该桥接增量尚待固定版本编译验证。
+
+## 目的缓冲计算单元
+
+`TfcDestinationCredit` 管理一个 CCC 的独占 transport buffer 预算，尚未接入 PDS。
+创建者必须先从主机总池预留这块容量；单元不能凭空承诺其他 CCC 的缓冲。
+初始信用之外，始终保留一个最大 packet cell 成本，覆盖正信用允许的 MTU 超出。
+例如4096字节 payload、512字节 cell、256字节 overhead 的最大成本为4608字节；
+初始256字节时，该 CCC 的最低保留容量为4864字节。
+
+新包取得不可复用的本地 buffer lease，交给下一层后才能释放。累计请求、已授予信用、
+正负承诺余额和实际占用分别记账；重排释放和重复释放不会重复返还。目的 eager grant
+策略只满足已观察到的累计需求，且不借出仍占用的 storage 或 MTU 保留量。信用以
+256字节粒度分配；CCC 总预留低于24位信用计数的半空间。这个上限是当前仿真的
+资源策略，不是规范规定的最大配置。调用者仍负责原 PDS 的去重、CCC 身份与生命周期。
+`tfc_destination_credit_test` 包含独立数值例子、缓冲占满/延迟释放、target 回绕、
+越界不改状态，以及576种 MTU/cell/overhead 几何的双向计数实验；尚待编译验证。
