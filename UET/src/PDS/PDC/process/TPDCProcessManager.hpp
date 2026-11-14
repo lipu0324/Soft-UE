@@ -553,6 +553,12 @@ public:
         return it != tpdc_processes.end() && it->second->tpdc_instance &&
                it->second->tpdc_instance->state.load() == ESTABLISHED;
     }
+    bool ownsReceiveExecution(const PDC_SES_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(request.PDCID);
+        return found!=tpdc_processes.end() && found->second->tpdc_instance &&
+            found->second->tpdc_instance->ownsReceiveExecution(request);
+    }
 
     bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
         std::lock_guard<std::mutex> lock(manager_mutex);

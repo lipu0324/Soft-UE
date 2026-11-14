@@ -543,7 +543,7 @@ public:
         // must neither adopt old upcalls nor reuse their still-live wire MIDs.
         if (!host_.closed()) {
             auto& retired=host_.services().retired_semantic_messages;
-            std::set<std::tuple<uint16_t,uint32_t,uint16_t,uint32_t>> answered_handles;
+            std::set<std::tuple<uint16_t,uint32_t,Runtime::ReceivePacketHandle,uint32_t>> answered_handles;
             const auto terminate_receive=[this,&answered_handles](const PDC_SES_req& request,bool unplaced_payload=false) {
                 const auto identity=std::make_tuple(request.PDCID,request.connection_start_psn,request.rx_pkt_handle,request.orig_psn);
                 if (!answered_handles.insert(identity).second) return;

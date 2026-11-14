@@ -36,6 +36,7 @@
 #include <string>
 #include <optional>
 #include "Runtime/TransmitEvents.hpp"
+#include "Runtime/ReceiveHandles.hpp"
 
 //=============================================================================
 // Cross-platform structure packing macro definitions
@@ -629,7 +630,7 @@ struct PDC_SES_req
 {
     SES_BTH_header_type request_wire_format=Standard_Header; // Before the local SES field projection.
     uint16_t PDCID;          /**< SPDC identifier */
-    uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, never encoded. */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
     PDS_next_hdr next_hdr;        /**< Next header type */
@@ -660,7 +661,7 @@ struct PDC_SES_rsp
     bool rudi_timed_out=false;
     uint32_t original_sequence=0,connection_start_psn=0; // Local response association, never wire fields.
     uint16_t PDCID;          /**< SPDC identifier */
-    uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, never encoded. */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
     uint32_t source_fep = 0; /**< Peer identity from the PDC */
@@ -675,7 +676,7 @@ struct PDC_SES_rsp
 //
 struct SES_PDC_rsp
 {
-    uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, corresponding to original request. */
     bool gtd_del;           /**< Guaranteed delivery flag */
     bool ses_nack;          /**< SES layer NACK flag */
     NackPayload nack_payload; /**< NACK information payload */
@@ -801,7 +802,7 @@ struct SES_PDS_rsp
     uint16_t PDCID;         /**< SPDC identifier */
     uint32_t src_fep;       // Source FEP
     uint32_t dst_fep;       // Destination FEP
-    uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, corresponding to original request. */
     bool gtd_del;           /**< Guaranteed delivery flag */
     bool ses_nack;          /**< SES layer NACK flag */
     SEStoPDS_pkt rsp;       /**< Response packet data */
@@ -862,7 +863,7 @@ enum PDS_SES_Error_Type{
  */
 struct PDS_SES_error{
     PDS_SES_Error_Type pds_error;  // Error type
-    uint16_t pkt_handle;             // Error packet handle
+    UET::Runtime::ReceivePacketHandle pkt_handle; // Local RX or TX handle, never a wire field.
 };
 
 // MSVC needs to restore default packing settings at end of file

@@ -135,6 +135,11 @@ PDC::~PDC()
  */
 bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
 {
+    if (!receiveHandleAllocator().available()) {
+        const auto& header=packet.PDS_header.RUOD_req_header;
+        sendNack(header.flags.retx,header.psn,UET_NO_PKT_BUFFER,rx_cur_psn+1,nullptr,&packet);
+        return false; // Refuse before SES reserves a message or PDS accepts its PSN.
+    }
     if (!runtime_ || !runtime_->semantic_admission) return true;
     const auto& header=packet.PDS_header.RUOD_req_header;
     // Process a validated piggyback Clear even when SES has no new message
@@ -152,7 +157,7 @@ bool PDC::admitSemanticRequest(const PDStoNET_pkt& packet)
 
 // Allocate packet metadata only after message admission succeeds. The returned
 // RX handle binds the eventual SES response to this accepted packet.
-uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
+UET::Runtime::ReceivePacketHandle PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
 {
     RX_pkt_meta meta = {};
     const auto request_fields=UET::SES::semantic_request_fields(pkt->SESpkt);
@@ -179,7 +184,7 @@ uint16_t PDC::processRxReq(PDStoNET_pkt *pkt,bool duplicate)
         meta.payload_len=meta.som?0:request_fields->header.diff.som_false.payload_length;
     }
 
-    uint16_t handle = setRXhandle(meta.psn, meta.spdcid);
+    const auto handle=receiveHandleAllocator().allocate();
     rx_pkt_map.insert({handle, meta});
     if (runtime_ && runtime_->congestion_control) {
         congestion_engaged_=true;
@@ -1039,7 +1044,7 @@ void PDC::txCtrl(){
  * @param meta Packet metadata
  * @param pkt Packet data
  */
-void PDC::fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt)
+void PDC::fwdReq2SES(UET::Runtime::ReceivePacketHandle handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt)
 {
     if(!pkt) {
         LOG_ERROR(__FUNCTION__, formatLogMessage("SES packet pointer is null"));

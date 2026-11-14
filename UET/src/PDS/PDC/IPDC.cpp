@@ -371,7 +371,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         if (!admitSemanticRequest(*pkt)) return;
         diagnostics() << getCurrentTimestamp() << "I_PDC packet received normally, start processing" << std::endl;
     
-        uint16_t handle = processRxReq(pkt);
+        const auto handle=processRxReq(pkt);
         RX_pkt_meta meta = rx_pkt_map.at(handle);
         updateRxPsnTracker(&meta);
     

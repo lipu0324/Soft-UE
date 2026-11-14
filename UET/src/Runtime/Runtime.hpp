@@ -2,6 +2,7 @@
 #include "PdcEvents.hpp"
 #include "RetiredSemanticMessages.hpp"
 #include "RetiredSemanticReceives.hpp"
+#include "ReceiveHandles.hpp"
 #include "RetryTiming.hpp"
 #include "../PDS/ReceiveDiagnostics.hpp"
 #include "../PDS/PsnRangeConfiguration.hpp"
@@ -123,6 +124,7 @@ struct Services {
     // Native private registries share only allocation history across SES
     // replacement. Registrations and their local authority remain separate.
     std::shared_ptr<SES::MemoryKeyAllocator> semantic_memory_keys=std::make_shared<SES::MemoryKeyAllocator>();
+    ReceiveHandleAllocator receive_handle_allocator; // Shared across every PDC incarnation on this Host.
 
 };
 

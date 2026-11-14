@@ -5,6 +5,12 @@
 应用 operation ID 属于该对象的 CQ；16位线 MID（Message Identifier，消息标识；或优化请求的本地提交 cookie）则必须
 在它所属的传输生命周期内保持唯一，不能因为 C++ 对象被替换而重新分配。
 
+当前实现由 Host 保留源 MID/本地 cookie、目标 READ 响应 token、关闭接收消息的终止状态，
+以及自动私有 MR key 和本地 RX 执行句柄的分配历史。关闭路径保留真实已放置字节，
+终止仍持有的 RX handle，并让原 PDS 继续负责重传、Clear 与 Close。
+详细身份关系见[接收句柄](RECEIVE-HANDLES.md)。以下按修复阶段记录证据；最新定向验证在文末，
+完整管理重启代次与其他适用要求仍待验收，M1 和四种 Profile 均未声明完成。
+
 ## 可复现的问题
 
 先提交 RUD WRITE，在 Host 运行之前关闭源 Endpoint，然后在同一 Host 创建新的 Endpoint。
@@ -264,3 +270,20 @@ reference-wire 作业成功。固定 `e81265a` 的本地两项普通 probe 也�
 `/tmp/softue-empty-bind-wake-rendezvous-after-tests.log`、
 `/tmp/softue-empty-bind-wake-read-after-tests.log`；完整修复版结果仍需后续核对。
 旧 `e81265a` 的 sanitizer 全量构建在确认此回归后主动中断，不把它记录为全量通过。
+
+接收执行身份的后续负向 probe 又复现了同 PSN READ 重执行和失效 PDC 上行队列的
+两个问题。新的 Host 本地 RX 标识与交付前归属检查见
+[接收句柄](RECEIVE-HANDLES.md)；其中的宽本地类型不改变 UE 报文。
+
+固定源码 `8f4bccb156c1c124f5885aadc95c8db36c36c52b` 的29项普通（83.15s）与
+29项 ASan/UBSan/泄漏（420.22s）定向回归全部通过。两套构建和宽 Clear 用例重建
+完成、停止全部编译后，依次执行普通和 sanitizer；报告
+`/tmp/softue-receive-handles-lifetime-report.json`，日志
+`/tmp/softue-receive-handles-lifetime-normal-tests.log`、
+`/tmp/softue-receive-handles-lifetime-asan-tests.log`。这仍是29项定向集合。
+
+更早的修复版 `8a715cf5e5ca147587357612076211cee0eb3a82` 已通过 GitHub Actions
+run198（ID43559703125）全部三项作业：simulation OFF、simulation ON（sanitizer）、
+reference-wire。它已包含条件唤醒与私有 MR key 修复，尚不含上述宽 RX 身份改动。
+旧 `e81265a` 的完整本地普通回归为150/152（119.16s），两项失败与 CI196 相同，
+见 `/tmp/softue-private-keys-full-report.json`；不能把其余通过结果或后续修复追写成旧版全绿。
