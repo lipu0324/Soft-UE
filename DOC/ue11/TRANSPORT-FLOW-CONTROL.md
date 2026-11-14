@@ -143,5 +143,10 @@ CCC 身份。现在等待目标 establishContext 后再查询 CCC；失败日志
 `/tmp/softue-tfc-runtime-03a-initial-tests.log` 与
 `/tmp/softue-tfc-integration-03a-debug-tests.log`。故障夹具也改为在源发出 Credit Request
 之前屏蔽所有信用载体，保留普通 PDS/SES 确认，避免另一个 CP 掩盖定时器路径。
-这些修正尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
+`ebff7c802966dd8bb60ec0ff55d4727acea6fb02` 的普通11项范围回归为10通过、
+集成夹具1失败：STD 初始场景已越过原停顿，但 MEDIUM 夹具把512字节请求放在
+Payload MTU=64 的单包格式上，原生 API 正确返回 Unsupported。独立诊断日志为
+`/tmp/softue-tfc-integration-ebf-debug-tests.log`。夹具现改成8个合法64字节 MEDIUM
+WRITE（STD 保持一个8分片消息），共48场景、216个源操作，另有双 Job QUIESCE 回归。
+这个夹具修正尚待固定版本编译；完整双向 READ/原子、资源拒绝故障组合、
 其他 TC 和正式规范歧义复核仍需继续，不能宣告完整 TFC 或 Profile。

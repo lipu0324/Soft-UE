@@ -120,23 +120,35 @@ void transaction(bool ordered,bool nscc,Fault fault,RequestHeaderFormat format,b
     write.remote_key=region.key;
     write.payload.resize(512);
     for (size_t byte=0; byte<write.payload.size(); ++byte) write.payload[byte]=static_cast<uint8_t>(byte*17+3);
-    source.submit(write);
+    const auto expected_payload=write.payload;
+    const size_t operation_count=format==RequestHeaderFormat::Medium ? 8 : 1;
+    const size_t operation_bytes=expected_payload.size()/operation_count;
+    // MEDIUM describes one packet, not a multi-packet message. Eight legal
+    // single-packet writes still queue enough work to exhaust their shared
+    // PDC/CCC credit; STD exercises the eight fragments of one message.
+    for (size_t operation=0; operation<operation_count; ++operation) {
+        write.remote_offset=operation*operation_bytes;
+        write.payload.assign(expected_payload.begin()+write.remote_offset,
+            expected_payload.begin()+write.remote_offset+operation_bytes);
+        source.submit(write);
+    }
     loop.run_until(999);
     CHECK(forward.data_packets==1); // No reverse feedback can have returned.
     loop.run_until(100*kMillisecond);
     Completion completion{};
-    const bool completed=source.poll_completion(completion);
-    if (!completed || completion.status!=CompletionStatus::Success || completion.length!=512) {
-        std::cerr << "completed=" << completed << " status=" << int(completion.status) << " length=" << completion.length << '\n';
-        std::cerr << "TFC incomplete ordered=" << ordered << " nscc=" << nscc << " fault=" << int(fault)
-                  << " format=" << int(format) << " ipv6=" << ipv6_native << '\n';
-        for (const auto& event:trace.events())
-            std::cerr << event.time << ' ' << event.node << ' ' << event.event << ' ' << event.value << '\n';
-        throw std::runtime_error("TFC transaction did not complete");
+    for (size_t operation=0; operation<operation_count; ++operation) {
+        const bool completed=source.poll_completion(completion);
+        if (!completed || completion.status!=CompletionStatus::Success || completion.length!=operation_bytes) {
+            std::cerr << "completed=" << completed << " status=" << int(completion.status) << " length=" << completion.length << '\n';
+            std::cerr << "TFC incomplete ordered=" << ordered << " nscc=" << nscc << " fault=" << int(fault)
+                      << " format=" << int(format) << " ipv6=" << ipv6_native << '\n';
+            for (const auto& event:trace.events())
+                std::cerr << event.time << ' ' << event.node << ' ' << event.event << ' ' << event.value << '\n';
+            throw std::runtime_error("TFC transaction did not complete");
+        }
     }
-    CHECK(completion.status==CompletionStatus::Success && completion.length==512);
     CHECK(!source.poll_completion(completion));
-    CHECK(target.memory().read(1,1,region.key,0,512)==write.payload);
+    CHECK(target.memory().read(1,1,region.key,0,512)==expected_payload);
     CHECK(target_host.tfc()->reserved_receive_bytes()<=flow.receive_pool_bytes);
     CHECK(ordered ? forward.data_paths.size()==1 : forward.data_paths.size()>1);
     if (fault==Fault::FirstData) CHECK(forward.lost==1 && forward.retransmissions>0);
