@@ -134,3 +134,12 @@ RTO、同时排除无关的在途帧，严格核对关闭后timer为空。
 可用 `cmake --build build/cmake --target rudi_tests -j2` 构建五个原生回归，再运行
 `ctest --test-dir build/cmake -R '^rudi_.*_test$' --output-on-failure`。
 实时参考互测前应停止其他编译和CPU实验；墙钟耗时不是仿真网络性能。
+
+## 干净版本完整回归
+
+合入RUDI与READ重执行Clear修复的946e0ec，在干净工作树完成全量普通与消毒器构建。
+停止全部其他编译后，顺序通过126/126普通回归（120.33s）及126/126 ASan/UBSan/
+泄漏检查（541.84s），包含公开provider与独立参考进程。日志为
+`/tmp/softue-rudi-clean-normal-tests.log`、`/tmp/softue-rudi-clean-asan-tests.log`。
+同一提交的GitHub run43527771659（workflow164）普通、消毒器与参考作业全部成功。
+这些结果属于946e0ec；后续优化头基础及事务接入分别验收，不重标旧二进制。

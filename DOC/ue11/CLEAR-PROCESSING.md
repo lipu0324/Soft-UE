@@ -68,3 +68,7 @@ exit0，无消毒器报告，记录在 `/tmp/softue-sync-rendezvous-budget-probe
 修正窗口fixture的0c7be0e在GitHub run43519905515（workflow160）中，普通、消毒器及
 独立参考作业全部成功。后续READ重执行修复9f01c57及RUDI线格式626248a的完整验收另记，
 不把旧版本的二进制结果当作后续提交的证据。
+
+后续946e0ec的完整干净回归126/126普通和126/126消毒器均通过，含9f01c57的合法READ
+Clear暂存修复及新RUDI事务；详见 [RUDI完整回归](RUDI.md)。009ca6b的两项原失败和独立
+测量仍保留，未把它们覆盖为通过。
