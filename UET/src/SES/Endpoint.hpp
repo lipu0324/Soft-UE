@@ -542,6 +542,25 @@ public:
         // must neither adopt old upcalls nor reuse their still-live wire MIDs.
         if (!host_.closed()) {
             auto& retired=host_.services().retired_semantic_messages;
+            std::set<std::tuple<uint16_t,uint32_t,uint16_t,uint32_t>> answered_handles;
+            const auto terminate_receive=[this,&answered_handles](const PDC_SES_req& request,bool unexecuted_atomic=false) {
+                const auto identity=std::make_tuple(request.PDCID,request.connection_start_psn,request.rx_pkt_handle,request.orig_psn);
+                if (!answered_handles.insert(identity).second) return;
+                const auto incoming=incoming_.find(receive_message_key(request));
+                if (incoming==incoming_.end()) { reply(request,SemanticReturnCode::Undeliverable,0); return; }
+                auto& message=incoming->second;
+                if (unexecuted_atomic) message.received=0; // Operand assembly did not modify target memory.
+                if (!message.first_error) {
+                    message.first_error=SemanticReturnCode::Undeliverable;
+                    message.error_generation=request.pkt.bth_header.Standard_Header.ri_generation;
+                }
+                message.target_error=CompletionStatus::Cancelled;
+                // Cancellation must not call process_synchronized_member:
+                // marking a failed member processed could release a pending
+                // group action while this Endpoint is closing.
+                report_receive_error(message);
+                reply_error(request,message);
+            };
             const auto never_submitted=[this](uint16_t message) {
                 const auto source=sources_.find(message);
                 return source!=sources_.end() && !source->second.started;
@@ -562,9 +581,28 @@ public:
                 // The copied reverse data remains PDS-owned, but its forward
                 // READ RX handle must not lose its SES owner. Terminate that
                 // accepted request before destroying the native message map.
-                const auto incoming=incoming_.find(receive_message_key(original));
-                if (incoming!=incoming_.end()) reject_message(original,incoming->second,SemanticReturnCode::Undeliverable);
-                else reply(original,SemanticReturnCode::Undeliverable,0);
+                terminate_receive(original);
+            }
+            // §3.4.3.6: a completing atomic can retain several fragment RX
+            // handles while waiting for the other group members. Closing SES
+            // cancels that deferred action; it must never execute the operand
+            // or leave PDS permanently reporting SES_PROCESSING for its PSNs.
+            for (const auto& [owner,action]:synchronized_target_actions_) {
+                if (action.atomic) {
+                    terminate_receive(action.request,true);
+                    for (const auto& request:action.responses) terminate_receive(request,true);
+                } else {
+                    // A SYNC_WRITE already acknowledged its placement. Only
+                    // the aggregate target notification waits for the group;
+                    // do not answer its consumed RX handle a second time.
+                    completions_.push_back({0,0,CompletionStatus::Cancelled,action.length,
+                        static_cast<uint8_t>(SemanticReturnCode::Undeliverable),true,action.immediate});
+                }
+            }
+            for (const auto& [identity,message]:incoming_) {
+                // An incomplete operand has no SynchronizedTargetAction yet.
+                // Each fragment still owns a real, unanswered PDS RX handle.
+                for (const auto& request:message.synchronization_responses) terminate_receive(request,true);
             }
         }
         closed_=true; lifetime_.reset();

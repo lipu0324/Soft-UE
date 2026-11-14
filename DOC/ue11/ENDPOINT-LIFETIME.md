@@ -131,3 +131,28 @@ RUD/ROD。token 隔离场景只接管源语义回调，以便目标关闭错误�
 停止全部编译后按普通→sanitizer顺序执行。报告 `/tmp/softue-ownership-clean-full-report.json`，
 日志 `/tmp/softue-ownership-clean-normal-tests.log`、`/tmp/softue-ownership-clean-asan-tests.log`。
 该版本含优化 READ/原子与源端身份退休，尚不含后续关闭分片收尾及目标端替换改动。
+
+## 等待同步组的目标关闭
+
+独立 PDS 源先发送完成型原子操作、故意不发送其余组成员，复现了关闭后没有语义
+终态的接收句柄；负向日志 `/tmp/softue-synchronized-target-close-before-tests.log`。
+另一个 probe 只发送部分操作数，尚未产生 `SynchronizedTargetAction`，同样遗留句柄，
+见 `/tmp/softue-sync-close-boundary-before-tests.log`。测试不依赖原生源端“完成型原子最后
+发送”的协调策略，因此确实走到目标等待状态。
+
+关闭现在直接为完整 action 与部分操作数保存的每个 RX handle 排队 Undeliverable，
+按 PDC、连接代次、句柄与 PSN 去重。首个错误仍使用保证响应，其余按既有 sticky-error
+规则响应。关闭不调用正常的组成员处理函数，避免把“取消”计为已处理成员后意外释放
+组屏障。尚未执行的操作数不计为修改字节，目标内存保持不变。
+
+完成型 SYNC_WRITE 的放置已被确认，等待的是组通知。因此取消通知只产生一次本地
+Cancelled CQ，保留已写字节和 header data；不对已消费的 RX handle 再发送错误。
+`synchronized_target_close_test` 与 `synchronized_target_close_boundary_test` 合计16场景，
+覆盖 RUD/ROD、NSCC、单/多片段完整原子、部分原子及已放置 WRITE。
+六项普通定向回归通过（0.29s），包括原有目标替换、源端收尾及同步组事务/生命周期，
+日志 `/tmp/softue-target-actions-final-normal-tests2.log`。这不是全部 M1 的验收结果；
+接收端续包替换与没有活跃 SES 的排队工作仍待独立检查。
+
+同一源码提交 `9b41d7f` 的六项 ASan/UBSan/泄漏定向回归全部通过（3.03s），
+日志 `/tmp/softue-target-actions-final-asan-tests2.log`。普通与 sanitizer 构建均冻结
+Endpoint 头文件后运行；本次仅为定向功能结果，不替代完整 Profile 回归。
