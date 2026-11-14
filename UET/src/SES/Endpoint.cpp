@@ -147,12 +147,13 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
     if (optimized) {
         const bool small=operation.header_format==RequestHeaderFormat::Small;
         const bool medium=operation.header_format==RequestHeaderFormat::Medium;
-        const bool write=operation.type==OperationType::Write;
-        const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::TaggedAtomic || is_fetching_atomic;
+        const bool write=operation.type==OperationType::Write || is_synchronized_write;
+        const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || operation.type==OperationType::TaggedAtomic || is_fetching_atomic;
         const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
         if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
             (is_read && operation.read_length>mtu_) || (is_tagged_atomic && (!medium || operation.remote_offset)) ||
-            (operation.type!=OperationType::Noop && !write && !atomic && !is_read && !(medium && send)) || (write && operation.immediate_data)) {
+            (operation.type!=OperationType::Noop && !write && !atomic && !is_read && !(medium && send)) ||
+            (write && operation.immediate_data && !(is_synchronized_write && medium && !operation.remote_offset))) {
             complete_local(CompletionStatus::Unsupported); return 0;
         }
         if (small && (write || atomic || is_read)) {
@@ -565,6 +566,27 @@ auto Endpoint::start_synchronized_source(Operation operation,uint64_t applicatio
     const bool completing=operation.type==OperationType::SynchronizedAtomic || operation.immediate_data.has_value();
     const bool atomic=operation.type==OperationType::SynchronizedAtomic;
     const auto payload_size=operation.payload_source?operation.payload_source->size():operation.payload.size();
+    if (operation.header_format!=RequestHeaderFormat::Standard) {
+        const bool small=operation.header_format==RequestHeaderFormat::Small;
+        const bool medium=operation.header_format==RequestHeaderFormat::Medium;
+        // §3.4.3.6 permits the synchronization extension on every supported
+        // base header. SMALL has no HD field; MEDIUM shares its offset slot
+        // with header data. Reject unrepresentable requests before consuming
+        // a group member, so the caller can submit a supported replacement.
+        if (!host_.services().standard_wire || (!small && !medium) || payload_size>mtu_ ||
+            (operation.immediate_data && (small || operation.remote_offset))) {
+            completions_.push_back({application_operation_id,operation.context,CompletionStatus::Unsupported,0,0,false}); return;
+        }
+        if (small) {
+            try { MemoryKeyFormat::validate(operation.remote_key,KeyAssignment::Provider); }
+            catch (const std::invalid_argument&) {
+                completions_.push_back({application_operation_id,operation.context,CompletionStatus::InvalidRequest,0,0,false}); return;
+            }
+            if (!(operation.remote_key&MemoryKeyFormat::Optimized)) {
+                completions_.push_back({application_operation_id,operation.context,CompletionStatus::InvalidRequest,0,0,false}); return;
+            }
+        }
+    }
     if (!handle || handle->authority_.lock()!=lifetime_ || group==synchronized_source_groups_.end() ||
         group->second.handle!=handle || handle->peer_!=operation.peer || handle->job_!=operation.job ||
         group->second.submitted>=handle->message_count_ || (completing && group->second.completing_submitted) ||
@@ -1553,13 +1575,15 @@ auto Endpoint::feed_submissions(bool drain_abort_tails) -> void {
                 optimized_header.initiator=standard.initiator; optimized_header.match_bits=standard.match_bits;
             } else {
                 auto& optimized_header=request.pkt.bth_header.Optimized_Header; fill(optimized_header);
-                if (standard.opcode==1 || standard.opcode==2 || standard.opcode==3 || standard.opcode==4)
+                if (standard.opcode==1 || standard.opcode==2 || standard.opcode==3 || standard.opcode==4 ||
+                    standard.opcode==0x10 || standard.opcode==0x11)
                     optimized_header.resource_index=operation.remote_key&0xfff;
             }
             // pkt_len includes the operation extension as well as the
             // optimized base header. PDS/CMS must account the actual SES
             // bytes, even though the wire codec encodes fields itself.
-            request.pkt_len=static_cast<uint16_t>((medium?32:20)+(atomic?4:0)+request.pkt.payload.size());
+            request.pkt_len=static_cast<uint16_t>((medium?32:20)+(atomic?4:0)+
+                (operation.synchronization?4:0)+request.pkt.payload.size());
         }
         const bool rudi=operation.delivery_mode==RUDI;
         if (rudi && read_failed) {
@@ -2408,7 +2432,7 @@ auto Endpoint::reserve_receive_message(const PDC_SES_req& request) -> Runtime::S
         message.has_immediate=header.hd; message.error_generation=header.ri_generation; message.tag=header.match_bits;
         message.rendezvous_eager=header.opcode==6 || header.opcode==10;
         if (message.rendezvous_eager) message.completion_reported=true; // The transaction owns the single receive CQ.
-        if (request.request_wire_format==Standard_Header && (header.opcode==0x10 || header.opcode==0x11)) {
+        if (header.opcode==0x10 || header.opcode==0x11) {
             const bool atomic=header.opcode==0x11;
             if (request.pkt.eth_type!=(atomic?Synchronized_Atomic_Extension_Headers:Synchronized_Operation_Extension_Header))
                 message.synchronization_admission_error=SemanticReturnCode::OperationViolation;
@@ -3013,10 +3037,11 @@ auto Endpoint::receive(const PDC_SES_req& request) -> void {
     };
     const auto& header=request.pkt.bth_header.Standard_Header;
     if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
-    if ((header.opcode>4 && !(medium && (header.opcode==5 || header.opcode==9 || header.opcode==0x0d || header.opcode==0x0e))) ||
+    const bool synchronized=header.opcode==0x10 || header.opcode==0x11;
+    if ((header.opcode>4 && !synchronized && !(medium && (header.opcode==5 || header.opcode==9 || header.opcode==0x0d || header.opcode==0x0e))) ||
         (medium && (header.opcode==0x0d || header.opcode==0x0e) && header.buffer_offset) ||
         (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
-    if (!small || (header.opcode!=1 && header.opcode!=2 && header.opcode!=3 && header.opcode!=4)) { receive_standard(request); return; }
+    if (!small || (header.opcode!=1 && header.opcode!=2 && header.opcode!=3 && header.opcode!=4 && !synchronized)) { receive_standard(request); return; }
     if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
     try {
         // As on STD READ, a replay belongs to its admitted message. A

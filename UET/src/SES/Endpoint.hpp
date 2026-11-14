@@ -119,6 +119,8 @@ struct EndpointCapabilities {
     bool tagged_integer_atomic=true,tagged_fetching_integer_atomic=true;
     bool optimized_medium_tagged_atomic=true,optimized_medium_tagged_fetching_atomic=true;
     bool synchronized_write=true,synchronized_integer_atomic=true; // Native bounded groups; no Profile claim.
+    bool optimized_small_synchronized_write=true,optimized_medium_synchronized_write=true;
+    bool optimized_small_synchronized_integer_atomic=true,optimized_medium_synchronized_integer_atomic=true;
     uint32_t max_read_length=UINT32_MAX;
     bool send_immediate=true, datagram_immediate=true, deferrable_send_as_send=true;
     bool deferrable_send=true, deferrable_tagged_send=true,deferrable_header_capture=false;
