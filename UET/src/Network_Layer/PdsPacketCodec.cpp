@@ -67,7 +67,9 @@ uint8_t ack_flags(const PDS_RUOD_ack_header& h) {
                                 (h.flags.p << 3) | ((h.flags.req & 3) << 4));
 }
 uint8_t cp_flags(const PDS_RUOD_cp_header& h) {
-    return static_cast<uint8_t>((h.flags.isrod << 1) | (h.flags.retx << 2) |
+    // The legacy SUP1 format predates RODL and allocates only one mode bit.
+    if (h.flags.pdc_type>1) throw std::invalid_argument("legacy CP cannot represent this PDC type");
+    return static_cast<uint8_t>((h.flags.pdc_type << 1) | (h.flags.retx << 2) |
                                 (h.flags.ar << 3) | (h.flags.syn << 4));
 }
 uint8_t nack_flags(const PDS_nack_header& h) {
@@ -334,7 +336,7 @@ PDStoNET_pkt PdsPacketCodec::decode(const uint8_t* bytes, size_t size) {
     switch (packet.PDS_type) {
     case RUOD_req_header: { auto& h = packet.PDS_header.RUOD_req_header; h.type = static_cast<PDS_type>(r.u8()); h.next_hdr = static_cast<PDS_next_hdr>(r.u8()); const auto f=r.u8(); h.flags.retx=(f>>2)&1; h.flags.ar=(f>>3)&1; h.flags.syn=(f>>4)&1; h.clear_psn_off=r.u16(); h.psn=r.u32(); h.spdcid=r.u16(); h.dpdcid=r.u16(); h.pdc_info=r.u8(); h.psn_off=r.u16(); break; }
     case RUOD_ack_header: { auto& h = packet.PDS_header.RUOD_ack_header; h.type = static_cast<PDS_type>(r.u8()); h.next_hdr = static_cast<PDS_next_hdr>(r.u8()); const auto f=r.u8(); h.flags.m=(f>>1)&1; h.flags.retx=(f>>2)&1; h.flags.p=(f>>3)&1; h.flags.req=(f>>4)&3; h.ack_psn_off=static_cast<int16_t>(r.u16()); h.cack_psn=r.u32(); h.spdcid=r.u16(); h.dpdcid=r.u16(); break; }
-    case RUOD_cp_header: { auto& h = packet.PDS_header.RUOD_cp_header; h.type = static_cast<PDS_type>(r.u8()); h.ctl_type=r.u8(); const auto f=r.u8(); h.flags.isrod=(f>>1)&1; h.flags.retx=(f>>2)&1; h.flags.ar=(f>>3)&1; h.flags.syn=(f>>4)&1; h.probe_opaque=r.u16(); h.psn=r.u32(); h.spdcid=r.u16(); h.dpdcid=r.u16(); h.pdc_info=r.u8(); h.psn_off=r.u16(); h.payload=r.u32(); break; }
+    case RUOD_cp_header: { auto& h = packet.PDS_header.RUOD_cp_header; h.type = static_cast<PDS_type>(r.u8()); h.ctl_type=r.u8(); const auto f=r.u8(); h.flags.pdc_type=(f>>1)&1; h.flags.retx=(f>>2)&1; h.flags.ar=(f>>3)&1; h.flags.syn=(f>>4)&1; h.probe_opaque=r.u16(); h.psn=r.u32(); h.spdcid=r.u16(); h.dpdcid=r.u16(); h.pdc_info=r.u8(); h.psn_off=r.u16(); h.payload=r.u32(); break; }
     case nack_header: { auto& h = packet.PDS_header.nack_header; h.type = static_cast<PDS_type>(r.u8()); h.next_hdr=static_cast<PDS_next_hdr>(r.u8()); const auto f=r.u8(); h.flags.m=(f>>1)&1; h.flags.retx=(f>>2)&1; h.flags.nt=(f>>3)&1; h.nack_code=static_cast<PDS_Nack_Codes>(r.u8()); h.vendor_code=r.u8(); h.nack_psn=r.u32(); h.spdcid=r.u16(); h.dpdcid=r.u16(); h.payload=r.u32(); break; }
     default: throw std::invalid_argument("unsupported PDS header type");
     }

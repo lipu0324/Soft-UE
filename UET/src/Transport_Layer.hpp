@@ -34,6 +34,9 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <optional>
+#include "Runtime/TransmitEvents.hpp"
+#include "Runtime/ReceiveHandles.hpp"
 
 //=============================================================================
 // Cross-platform structure packing macro definitions
@@ -77,7 +80,7 @@
 #define IP_Proto_Nxt_Hdr    0                      // Protocol number when UET runs directly over IP, can use experimental numbers (253-254) before official protocol number assignment
 #define UET_Data_Protect    0                      // Global data protection configuration: 0=no CRC and TSS, 1=enable CRC, 2=enable TSS, 3=reserved
 #define Limit_PSN_Range     1                      // When set, PDC closes when PSN reaches Start_PSN + 2^31 (optional security feature)
-#define Default_MPR         8                      // Default MPR value assumed when creating PDC, 0 is invalid, if set to 0 then use 1
+#define Default_MPR         8                      // Legacy local packet bound. Standard wire uses PsnRangeConfiguration.
 
 // ACK related configuration parameters
 #define Max_ACK_Data_Size   16 * 8                 // Maximum return data that can be carried in PDS ACK (bytes)
@@ -114,7 +117,9 @@ enum PDS_header_type{
     RUOD_req_header,    // RUOD request header
     RUOD_ack_header,    // RUOD acknowledgment header
     RUOD_cp_header,     // RUOD control packet header
-    nack_header         // Negative acknowledgment header
+    nack_header,        // Negative acknowledgment header
+    UUD_req_header,     // Connectionless, unreliable datagram header (§3.5.10.14)
+    RUDI_header        // Stateless idempotent request/response (§3.5.10.11)
 };
 
 /**
@@ -126,7 +131,7 @@ enum PDS_type {
     TSS,            // UET encryption header
     RUD_REQ,        // RUD request (Reliable Unordered Delivery)
     ROD_REQ,        // ROD request (Reliable Ordered Delivery)
-    RUDI_REQ,       // RUDI request (Reliable Unordered Delivery with Immediate response)
+    RUDI_REQ,       // Reliable Unordered Delivery for Idempotent operations
     RUDI_RESP,      // RUDI response
     UUD_REQ,        // UUD request (Unreliable Unordered Delivery)
     ACK,            // Acknowledgment packet
@@ -139,6 +144,13 @@ enum PDS_type {
     ROD_CC_REQ      // Congestion control ROD request
 };
 
+inline bool is_reliable_unordered_request(PDS_type type) {
+    return type==RUD_REQ || type==RUD_CC_REQ;
+}
+inline bool is_reliable_ordered_request(PDS_type type) {
+    return type==ROD_REQ || type==ROD_CC_REQ;
+}
+
 /**
  * @brief PDS next header type enumeration
  * @details Identifies encoding of UET semantic types
@@ -150,8 +162,14 @@ enum PDS_next_hdr{
     UET_HDR_RESPONSE,           // Response header
     UET_HDR_RESPONSE_DATA,      // Response header with data
     UET_HDR_RESPONSE_DATA_SMALL,// Response header with small data
-    UET_HDR_NONE                // No header
+    UET_HDR_NONE,               // No header
+    UET_HDR_CP_ACK              // Standard value 0x09; translated explicitly by the codec.
 };
+
+// Delivery modes shared by SES, PDS and runtime adapters. RUD preserves
+// exactly-once packet delivery; ROD additionally preserves packet order.
+// RUDI permits repeated idempotent execution without PDCs; UUD is unreliable.
+enum pdc_mode { RUD, ROD, RUDI, UUD };
 
 /**
  * @brief PDS control type enumeration
@@ -179,7 +197,7 @@ enum PDS_ctl_type{
 enum PDS_Nack_Codes{
     UET_TRIMMED =           0x01,   // NORMAL    - RETX - Packet was trimmed
     UET_TRIMMED_LASTHOP =   0x02,   // NORMAL    - RETX - Packet was trimmed at last hop switch
-    UET_TRIMMED_ACK =       0x03,   // NORMAL    - RETX original read request - ACK carrying read response data was trimmed
+    UET_TRIMMED_ACK =       0x03,   // Legacy name only; reserved in UE 1.1 Table 3-68, never actionable there.
     UET_NO_PDC_AVAIL=       0x04,   // NORMAL    - Retry (PDC not created) - No available PDC resources, set pds.spdcid=0
     UET_NO_CCC_AVAIL=       0x05,   // NORMAL    - Retry (PDC not created) - No available CCC resources, set pds.spdcid=0
     UET_NO_BITMAP   =       0x06,   // NORMAL    - Retry (PDC not created) - No bitmap or PSN tracking resources, set pds.spdcid=0
@@ -202,7 +220,8 @@ enum PDS_Nack_Codes{
     UET_NEW_START_PSN=      0x17,   // NORMAL    - RETX - Retransmit all packets using new Start_PSN
     UET_RCVD_SES_PROCG=     0x18,   // NORMAL    - RETX (ACK may arrive before RETX) - May occur when delayed packet and retransmitted packet arrive at target around same time
     UET_UNEXP_EVENT=        0x19,   // PDC_FATAL - Close PDC (retry) - Unexpected event, processing requires unsupported functionality, PDC cannot recover
-    UET_RCVR_INFER_LOSS=    0x1A    // NORMAL    - RETX - Receiver infers PSN loss and requests retransmission, application specific
+    UET_RCVR_INFER_LOSS=    0x1A,   // NORMAL    - RETX - Receiver infers PSN loss and requests retransmission, application specific
+    UET_NO_SES_SYNC_AVAIL=  0x1B    // NORMAL    - RETX - No SES synchronization tracking state available.
 };
 
 //=============================================================================
@@ -234,13 +253,23 @@ struct PDS_RUOD_req_header
         uint8_t syn  : 1;           // PDC establishment request flag: 1 indicates PDC establishment request
         uint8_t rsvd1: 2;           // Reserved bits
     } PACKED flags;
-    uint16_t clear_psn_off;         // 16 bits, CLEAR_PSN offset encoding relative to PSN
+    int16_t clear_psn_off;          // §3.5.11.4.3: CLEAR_PSN = PSN + signed offset.
     uint32_t psn;                   // 32 bits, packet sequence number assigned to PDS request
     uint16_t spdcid;                // 16 bits, source PDCID, allocated by packet source
     uint16_t dpdcid;                // 16 bits, destination PDCID, allocated by packet destination
     uint8_t pdc_info : 4;           // 4 bits, PDC information: Bit0=whether to use reserved PDC pool, Bit3:1 reserved
     uint16_t psn_off : 12;          // 12 bits, numerical difference between this packet's PSN and PDC's Start_PSN
 }PACKED;
+
+// Figure3-74: the wire header is8 bytes: prologue16, reserved16, pkt_id32.
+// This local metadata is deliberately NOT a serialized C++ structure. pkt_id
+// is a source-local response association, not a PSN or a PDC identifier.
+struct PDS_RUDI_header {
+    PDS_type type;
+    PDS_next_hdr next_hdr;
+    struct { uint8_t m,retx; } flags; // m echoes request ECN only in responses.
+    uint32_t pkt_id;
+};
 
 /**
  * @brief PDS RUOD acknowledgment header structure
@@ -276,10 +305,9 @@ struct PDS_RUOD_cp_header
 {
     PDS_type type : 5;              // 5 bits, packet type = CP
     uint8_t ctl_type : 4;           // 4 bits, identifies CP type
-    struct                          // pds.flags[6:0] = [rsvd, rsvd/isrod, retx, ar, syn, rsvd]
+    struct                          // §3.5.11.8.1: pdc_type is meaningful in NOOP/Negotiation.
     {
-        uint8_t rsvd  : 1;          // Reserved bit
-        uint8_t isrod : 1;          // PDC type: 1=ROD PDC, 0=RUD PDC, only valid in NOOP and Negotiation
+        uint8_t pdc_type : 2;       // 00=RUD, 01=ROD, 10=RODL, 11=reserved; ignored in other CPs.
         uint8_t retx  : 1;          // Retransmission flag: 1 indicates this CP is a retransmission
         uint8_t ar    : 1;          // ACK request flag
         uint8_t syn   : 1;          // PDC establishment request flag
@@ -332,7 +360,9 @@ enum SES_BTH_header_type{
 
 enum SES_EXH_header_type{
     Rendezvous_Extension_Header,
-    Atomic_Operation_Extension_Header
+    Atomic_Operation_Extension_Header,
+    Synchronized_Operation_Extension_Header,
+    Synchronized_Atomic_Extension_Headers
 };
 
 //header
@@ -375,46 +405,31 @@ struct SES_Standard_Header
     uint32_t    request_length  : 32;       //Length of the payload to be transferred (in bytes). 0 is a legal transfer size (0 byte write/read).
 }PACKED;
 
+// §3.4.3.2 / Figures3-15/16: local fields, never a serialized C++ ABI.
+// Both optimized requests replace MID with a14-bit request_length. Their
+// responses are correlated using the original PDS packet identity instead.
 struct SES_Optimized_Header
 {
-    uint8_t     rsvd            : 2;        //The operation being performed for this packet.
-    uint8_t     opcode          : 6;        //Semantic protocol version – set to 0 in the initial version.
-    uint8_t     version         : 2;        //Defer the semantic response for this until the packet has been made globally observable
-    uint8_t     ie              : 1;        //Indicates this packet encountered an error at the initiator. Initiator Error prevents the packet from being written at the target.
-    uint8_t     rel             : 1;        //This packet uses relative addressing.
-    uint8_t     hd              : 1;        //Header data was provided for this message.
-    uint8_t     eom             : 1;        //Indicates the last packet of the message. ses.eom MUST be set on the last packet of a message.
-    uint8_t     som             : 1;        //Indicates this is the first packet of a message. Impacts the interpretation of header data.
-    uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
-    uint8_t     ri_generation   : 8;        //Resource Index Generation
-    uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4;
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
-    uint8_t     rsvd0           : 4;
-    uint16_t    resource_index  : 12;       //Resource Index field.
-    uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
+    uint8_t opcode,version,dc,ie,rel,hd,eom,som; // hd is reserved for SMALL.
+    uint16_t request_length;
+    uint8_t ri_generation;
+    uint32_t job_id;
+    uint16_t PIDonFEP,resource_index;
+    uint64_t buffer_offset;
 }PACKED;
 
 struct SES_Small_Message_RMA_Header
 {
-    uint8_t     rsvd            : 2;        //The operation being performed for this packet.
-    uint8_t     opcode          : 6;        //Semantic protocol version – set to 0 in the initial version.
-    uint8_t     version         : 2;        //Defer the semantic response for this until the packet has been made globally observable
-    uint8_t     ie              : 1;        //Indicates this packet encountered an error at the initiator. Initiator Error prevents the packet from being written at the target.
-    uint8_t     rel             : 1;        //This packet uses relative addressing.
-    uint8_t     hd              : 1;        //Header data was provided for this message.
-    uint8_t     eom             : 1;        //Indicates the last packet of the message. ses.eom MUST be set on the last packet of a message.
-    uint8_t     som             : 1;        //Indicates this is the first packet of a message. Impacts the interpretation of header data.
-    uint16_t    msg_id          : 16;       //Message identifier – assists in associating different packets to one message at the target.
-    uint8_t     ri_generation   : 8;        //Resource Index Generation
-    uint32_t    jod_id          : 24;       //JobID used for relative addressing and for buffer access authorization.
-    uint8_t     rsvd1           : 4;
-    uint16_t    PIDonFEP        : 12;       // The PIDonFEP value to be used at the target.
-    uint8_t     rsvd0           : 4;
-    uint16_t    resource_index  : 12;       //Resource Index field.
-    uint64_t    buffer_offset   : 64;       //Offset within the target buffer used for 0 based addressing.
-    uint32_t    initiator       : 32;       //Initiator ID used as part of matching criteria.
-    uint64_t    match_bits      : 64;       //Used for tagged matching or as a memory key, depending on the opcode being used.
+    uint8_t opcode,version,dc,ie,rel,hd,eom,som;
+    uint16_t request_length;
+    uint8_t ri_generation;
+    uint32_t job_id;
+    uint16_t PIDonFEP,resource_index;
+    // Figure3-16 shares one64-bit slot. Its interpretation depends on the
+    // operation; MEDIUM is32 bytes, not SMALL plus a second header-data word.
+    union { uint64_t buffer_offset; uint64_t header_data; };
+    uint32_t initiator;
+    uint64_t match_bits;
 }PACKED;
 
 struct SES_Rendezvous_Extension_Header
@@ -434,6 +449,19 @@ struct SES_Atomic_Operation_Extension_Header
     uint8_t     semantic_contol     : 8;
     uint8_t     rsvd                : 8;
 }PACKED;
+
+// §3.4.3.6/Figure3-24: both fields are network-order16-bit values on
+// the wire. These host values are encoded explicitly, never memcpy'd.
+struct SES_Synchronized_Operation_Extension_Header {
+    uint16_t sync_group;
+    uint16_t sync_count;
+};
+// Table3-20: SYNC_ATOMIC carries the synchronized extension FIRST, then
+// the ordinary atomic extension. Neither extension is its payload.
+struct SES_Synchronized_Atomic_Extension_Headers {
+    SES_Synchronized_Operation_Extension_Header synchronization;
+    SES_Atomic_Operation_Extension_Header atomic;
+};
 
 struct SES_Semantic_Response_Header
 {
@@ -497,6 +525,8 @@ struct SEStoPDS_pkt //Add any additional SES outputs here
     {
         SES_Atomic_Operation_Extension_Header Atomic_Operation_Extension_Header;
         SES_Rendezvous_Extension_Header Rendezvous_Extension_Header;
+        SES_Synchronized_Operation_Extension_Header Synchronized_Operation_Extension_Header;
+        SES_Synchronized_Atomic_Extension_Headers Synchronized_Atomic_Extension_Headers;
     }eth_header;
 
 
@@ -529,8 +559,49 @@ struct PDStoNET_pkt
         PDS_RUOD_ack_header RUOD_ack_header;    // RUOD acknowledgment header
         PDS_RUOD_cp_header RUOD_cp_header;      // RUOD control packet header
         PDS_nack_header nack_header;            // NACK header
+        struct {
+            ::PDS_type type;
+            PDS_next_hdr next_hdr;
+        } UUD_req_header; // Standard wire encoding is four bytes; no C++ serialization.
+        PDS_RUDI_header RUDI_header;
     } PDS_header;
     SEStoPDS_pkt SESpkt;          // SES layer to PDS layer data packet
+    uint16_t local_tx_handle = 0; // Local completion cookie; never encoded on wire.
+    uint8_t outgoing_data_traffic_class=0; // Local NIC queue/DSCP selection; never a new PDS wire field.
+    // Bytes following the CP's first four payload bytes. Negotiation has a
+    // variable payload (§3.5.16.7); these bytes are not an SES payload.
+    std::vector<uint8_t> control_extension;
+    struct {
+        uint8_t cp_ack_type=0,cp_ack_length=2,start_psn_method=0,reserved=0;
+        uint32_t expected_psn=0;
+    } control_ack; // §3.5.16.4.1: local representation, never memcpy'd to wire.
+    struct {
+        uint8_t ccc_id=0;
+        uint32_t credit_target_units=0; // 24 bits, one unit = 256 bytes.
+    } credit_request; // §§3.5.10.6/3.6.9.1: RUD_CC_REQ / ROD_CC_REQ extension.
+    struct {
+        uint8_t type=0,mpr=0;
+        int16_t sack_psn_offset=0;
+        uint64_t sack_bitmap=0;
+        uint16_t service_time=0;
+        bool restore_window=false;
+        uint8_t receiver_window_penalty=0;
+        uint32_t received_byte_units=0;
+        uint32_t credit_units=0; // CC_CREDIT only; distinct from NSCC telemetry.
+        uint16_t out_of_order_count=0xffff;
+    } congestion_ack; // §3.5.10.8 / §3.6.9.2, encoded explicitly by UetWireCodec.
+    uint16_t wire_entropy=0;
+    uint8_t network_ecn=0;
+    uint32_t nominal_packet_size=0;
+    uint64_t receive_time_ns=0; // Local timing metadata; never serialized.
+    bool has_receive_timestamp=false;
+    std::optional<uint64_t> acknowledgment_trigger_arrival_ns;
+    std::optional<UET::Runtime::TransmitIdentity> transmit_identity;
+    // Local PDS-to-network classification, never serialized. A numbered
+    // ROD control must stay behind earlier requests on their traffic class
+    // even when its wire pdc_type bits are reserved (§3.5.16).
+    bool control_uses_request_traffic_class=false;
+    bool trimmed=false,trimmed_last_hop=false; // DSCP classification, never an SES payload promise.
 };
 
 
@@ -570,13 +641,23 @@ struct NackPayload {
  */
 struct PDC_SES_req
 {
+    SES_BTH_header_type request_wire_format=Standard_Header; // Before the local SES field projection.
     uint16_t PDCID;          /**< SPDC identifier */
-    uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, never encoded. */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
     PDS_next_hdr next_hdr;        /**< Next header type */
     uint16_t orig_pdcid;     /**< DPDCID */
     uint32_t orig_psn;       /**< Original packet sequence number */
+    uint32_t source_fep = 0; /**< Peer identity from the PDC, not a SES field */
+    uint8_t delivery_mode = ROD; /**< UUD has no PDC and must never generate ACKs. */
+    uint32_t connection_start_psn = 0; /**< Local context generation, not an SES wire field. */
+    uint8_t local_data_traffic_class=0; /**< Receiving PDC's local outgoing TC, for exact CMS ownership. */
+    uint32_t rudi_packet_id=0; /**< RUDI response correlation; never a PDC PSN. */
+    bool rudi_retransmission=false,rudi_congestion_marked=false;
+    // DATA_SMALL return packets carry a READ's forward PSN separately from
+    // orig_psn, which identifies this packet in the reverse sequence space.
+    std::optional<uint32_t> original_read_psn;
 };
 /**
  * @struct PDC_SES_rsp
@@ -586,10 +667,18 @@ struct PDC_SES_req
  */
 struct PDC_SES_rsp
 {
+    SES_BTH_header_type original_request_format=Standard_Header;
+    uint16_t local_submission_id=0; // Trusted PDS TX handle; never a received or encoded MID.
+    uint8_t delivery_mode=ROD;
+    uint32_t rudi_packet_id=0,rudi_request_offset=0;
+    uint16_t rudi_message_id=0; // Trusted initiator association, including local timeout upcalls.
+    bool rudi_timed_out=false;
+    uint32_t original_sequence=0,connection_start_psn=0; // Local response association, never wire fields.
     uint16_t PDCID;          /**< SPDC identifier */
-    uint16_t rx_pkt_handle;  /**< Receive packet handle, used to identify request corresponding to response */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, never encoded. */
     SEStoPDS_pkt pkt;        /**< Actual SES to PDS packet data */
     uint16_t pkt_len;        /**< Packet length */
+    uint32_t source_fep = 0; /**< Peer identity from the PDC */
 };
 
 /**
@@ -601,7 +690,7 @@ struct PDC_SES_rsp
 //
 struct SES_PDC_rsp
 {
-    uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, corresponding to original request. */
     bool gtd_del;           /**< Guaranteed delivery flag */
     bool ses_nack;          /**< SES layer NACK flag */
     NackPayload nack_payload; /**< NACK information payload */
@@ -617,6 +706,7 @@ struct SES_PDC_rsp
  */
 struct PDS_PDC_req
 {
+    pdc_mode delivery_mode = ROD; /**< Context mode; carried locally, never serialized. */
     PDS_next_hdr next_hdr;  /**< Next header type */
     uint16_t tx_pkt_handle; /**< Transmit packet handle */
     SEStoPDS_pkt pkt;       /**< Request packet data */
@@ -706,6 +796,13 @@ struct SES_PDS_req {
     uint32_t tss_context;   // TSS context, used to limit packets on same PDC to same public SDI
     uint16_t rsv_pdc_context; // Used to reserve packets in same reserved PDC
     uint16_t rsv_ccc_context; // Used to reserve packets in same reserved CCC
+    // Local source process identity for PDC selection (§3.5.8.1). This is
+    // distinct from ses.initiator, which is a Job-relative matching rank.
+    uint16_t source_pid=1;
+    // Local SES scheduling metadata, never serialized. A message that holds
+    // all semantic responses may need a numbered NOOP to establish its PDC
+    // before its first data fragment can wait at the target (§3.5.8.2).
+    bool establish_with_control=false;
 };
 
 /**
@@ -719,7 +816,7 @@ struct SES_PDS_rsp
     uint16_t PDCID;         /**< SPDC identifier */
     uint32_t src_fep;       // Source FEP
     uint32_t dst_fep;       // Destination FEP
-    uint16_t rx_pkt_handle; /**< Receive packet handle, corresponding to original request */
+    UET::Runtime::ReceivePacketHandle rx_pkt_handle; /**< Local receive execution identity, corresponding to original request. */
     bool gtd_del;           /**< Guaranteed delivery flag */
     bool ses_nack;          /**< SES layer NACK flag */
     SEStoPDS_pkt rsp;       /**< Response packet data */
@@ -780,7 +877,7 @@ enum PDS_SES_Error_Type{
  */
 struct PDS_SES_error{
     PDS_SES_Error_Type pds_error;  // Error type
-    uint16_t pkt_handle;             // Error packet handle
+    UET::Runtime::ReceivePacketHandle pkt_handle; // Local RX or TX handle, never a wire field.
 };
 
 // MSVC needs to restore default packing settings at end of file

@@ -29,6 +29,9 @@
 #define PDSMANAGER_HPP
 
 #include "../../Transport_Layer.hpp"
+#include "../TrimmedPacket.hpp"
+#include "../ReceiveAdmission.hpp"
+#include "../RudiInitiator.hpp"
 #include "../../logger/Logger.hpp"
 #include "../PDC/process/TPDCProcessManager.hpp"
 #include "../PDC/process/IPDCProcessManager.hpp"
@@ -38,6 +41,10 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <tuple>
+#include <limits>
+#include <deque>
+#include <set>
 
 class PDS_Manager
 {
@@ -45,6 +52,91 @@ class PDS_Manager
 private:
 
 public:
+
+    bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        return original.PDCID>=MAX_PDC && original.PDCID<MAX_PDC*2 && PDCOpen(original.PDCID) &&
+            TPDC_Processmanager.pushReturnData(original,data);
+    }
+
+    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
+                             UET::PDS::PdcMappingIdentity identity={},uint8_t data_traffic_class=0) {
+        if (!local_node || !peer || (mode!=ROD && mode!=RUD)) return UINT16_MAX;
+        uint16_t local_pdc=UINT16_MAX;
+        if (!identity.valid() || data_traffic_class>=8 ||
+            !assignPDC(job,peer,data_traffic_class,mode,0,&local_pdc,local_node,identity)) return UINT16_MAX;
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,peer,local_node,mode,data_traffic_class)) return UINT16_MAX;
+        return IPDC_Processmanager.openWithControl(local_pdc,mode,negotiation)?local_pdc:UINT16_MAX;
+    }
+
+    // Remove unsent fragments after the owning PDC terminates. They must not
+    // accidentally establish a replacement context under a retired message ID.
+    void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
+        if (rudi_initiator_) rudi_initiator_->cancel_message(peer,job,message_id);
+        const auto matches=[&](const SES_PDS_req& request) {
+            const auto fields=UET::SES::semantic_request_fields(request.pkt);
+            return fields && request.dst_fep==peer && fields->header.job_id==job &&
+                UET::SES::local_submission_message(request)==message_id;
+        };
+        std::queue<SES_PDS_req> remaining;
+        while (!SES_tx_req_q.empty()) {
+            auto request=std::move(SES_tx_req_q.front()); SES_tx_req_q.pop();
+            if (!matches(request)) remaining.push(std::move(request));
+        }
+        SES_tx_req_q=std::move(remaining);
+        std::queue<pend_node> retained;
+        while (!pend_q.empty()) {
+            auto node=std::move(pend_q.front()); pend_q.pop();
+            if (!matches(node.tx_req)) retained.push(std::move(node));
+        }
+        pend_q=std::move(retained); pend_cnt=static_cast<int>(pend_q.size()); pause_ses=pendQFull();
+        for (auto& deferred:deferred_close_requests_)
+            deferred.second.erase(std::remove_if(deferred.second.begin(),deferred.second.end(),matches),deferred.second.end());
+        for (auto entry=quiesced_messages_.begin();entry!=quiesced_messages_.end();)
+            if (std::get<0>(*entry)==job && std::get<1>(*entry)==peer && std::get<4>(*entry)==message_id)
+                entry=quiesced_messages_.erase(entry); else ++entry;
+        armPendingDeadline();
+    }
+    explicit PDS_Manager(UET::Runtime::Services* runtime = nullptr)
+        : TPDC_Processmanager(runtime), IPDC_Processmanager(runtime), runtime_(runtime) {
+        if (runtime_) rudi_initiator_=std::make_unique<UET::PDS::RudiInitiator>(*runtime_,
+            [this](const PDStoNET_pkt& packet) { return PDStoNet.push(packet); },
+            [this](UET::PDS::RudiInitiator::Result result) {
+                PDC_SES_rsp response{}; response.PDCID=UINT16_MAX; response.delivery_mode=RUDI;
+                response.source_fep=result.peer; response.rudi_packet_id=result.packet_id;
+                response.rudi_request_offset=result.request_offset; response.rudi_message_id=result.message_id;
+                response.rudi_timed_out=result.timed_out; response.pkt=std::move(result.semantic_response);
+                // At most the initiator packet budget can complete at once.
+                // SES response delivery must not silently lose a terminal fact.
+                rudi_results_.push_back(std::move(response));
+            });
+    }
+    std::optional<uint32_t> submitRudi(const SES_PDS_req& request) {
+        if (runtime_ && rudi_initiator_ && rudi_results_.size()+rudi_initiator_->outstanding_packets()>=runtime_->rudi_packet_limit) return {};
+        return rudi_initiator_?rudi_initiator_->submit(request):std::optional<uint32_t>{};
+    }
+    bool notifyRudiTransmit(const UET::Runtime::TransmitNotification& notification) {
+        return rudi_initiator_ && rudi_initiator_->notify_transmit(notification);
+    }
+    bool activeRudiAttempt(const UET::Runtime::TransmitIdentity& identity) const {
+        return rudi_initiator_ && rudi_initiator_->active_attempt(identity);
+    }
+    bool popRudiResult(PDC_SES_rsp& response) {
+        if (rudi_results_.empty()) return false;
+        response=std::move(rudi_results_.front()); rudi_results_.pop_front(); return true;
+    }
+    bool respondRudi(const PDC_SES_req& request,uint32_t local_fep,const SEStoPDS_pkt& semantic_response) {
+        if (request.delivery_mode!=RUDI) return false;
+        PDStoNET_pkt response{}; response.src_fep=local_fep; response.dst_fep=request.source_fep;
+        response.PDS_type=RUDI_header; response.SESpkt=semantic_response;
+        response.PDS_header.RUDI_header={RUDI_RESP,
+            semantic_response.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
+            {static_cast<uint8_t>(request.rudi_congestion_marked),static_cast<uint8_t>(request.rudi_retransmission)},request.rudi_packet_id};
+        return PDStoNet.push(response); // No retained response; source recovers a lost reply.
+    }
+    ~PDS_Manager() {
+        lifetime_.reset();
+        if (runtime_ && pending_deadline_timer_) runtime_->timers.cancel(pending_deadline_timer_);
+    }
     TPDCProcessManager TPDC_Processmanager;
     IPDCProcessManager IPDC_Processmanager;
     pdc pdc_list[MAX_PDC * 2];             // PDC list
@@ -67,7 +159,7 @@ public:
     int event_cnt = 0;                         // Event counter
     // PDC queue depth tracking
     int8_t pdc_qdepth[NUM_BANKS][PDCs_PER_BANK] = {0}; // Queue depth counter for each PDC
-    uint8_t BitMap[MAX_PDC] = {0};           // PDC bitmap, each variable represents the number of tasks stored in that PDC
+    uint64_t BitMap[MAX_PDC * 2] = {0}; // Task counters cover both initiator and target ID spaces.
     std::map<uint16_t, uint16_t> msg_map;                     // msgid mapping table
     std::queue<pend_node> pend_q;                             // Pending task queue
 
@@ -128,7 +220,7 @@ public:
         IPDC_Processmanager.setPublicQueues(&PDStoNet, &PDCtoSES_req, &PDCtoSES_rsp, &PDC_close_q);
         LOG_INFO(__FUNCTION__, "Public queue references passed to process managers");
         // Wait 50ms
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!runtime_) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         open_cnt = 0;
         pend_cnt = 0;
@@ -142,41 +234,102 @@ public:
     }
 
 private:
+    UET::Runtime::Services* runtime_ = nullptr;
+    std::unique_ptr<UET::PDS::RudiInitiator> rudi_initiator_;
+    std::deque<PDC_SES_rsp> rudi_results_;
+    // A PDC ID is meaningful only within its peer endpoint tuple (§3.5.8).
+    // IDs can collide across peers; validating just dpdcid would deliver a
+    // forged or delayed packet into an unrelated connection.
+    struct ConnectionIdentity {
+        uint32_t local_endpoint = 0;
+        uint32_t remote_endpoint = 0;
+        uint16_t remote_pdc_id = 0;
+        bool remote_pdc_known = false;
+    };
+    ConnectionIdentity connection_identities_[MAX_PDC * 2];
+    std::map<UET::PDS::InitiatorPdcKey,uint16_t> tx_contexts_;
+    std::map<std::tuple<uint32_t,uint32_t,uint16_t>,uint16_t> rx_contexts_;
+    using OutgoingMessage=std::tuple<uint32_t,uint32_t,uint8_t,uint8_t,uint16_t>;
+    std::set<OutgoingMessage> quiesced_messages_;
+    std::map<uint16_t,std::deque<SES_PDS_req>> deferred_close_requests_;
     std::unique_ptr<UET::NetworkLayer::PdsQueueTransport> network_transport_;
+    std::shared_ptr<int> lifetime_=std::make_shared<int>(0);
+    UET::Runtime::TimerId pending_deadline_timer_=0;
+    bool resource_check_due_=false, checking_resources_=false;
+
+    uint16_t initiatorCapacity() const {
+        return runtime_?std::min<uint16_t>(runtime_->initiator_context_limit,MAX_PDC-1):MAX_PDC-1;
+    }
+    uint16_t targetCapacity() const {
+        return runtime_?std::min<uint16_t>(runtime_->target_context_limit,MAX_PDC):MAX_PDC;
+    }
+    void armPendingDeadline() {
+        if (!runtime_) return;
+        if (pending_deadline_timer_) runtime_->timers.cancel(pending_deadline_timer_);
+        pending_deadline_timer_=0;
+        if (pend_q.empty()) return;
+        std::weak_ptr<int> life=lifetime_;
+        pending_deadline_timer_=runtime_->timers.at(pend_q.front().deadline_ns,[this,life] {
+            if (life.expired()) return;
+            pending_deadline_timer_=0;
+            resource_check_due_=true;
+            if (runtime_->wake) runtime_->wake();
+        });
+    }
+    void rejectPendingMessage(const SES_PDS_req& request) {
+        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+        if (!fields) return;
+        const auto& header=fields->header;
+        const auto message=UET::SES::local_submission_message(request);
+        if (runtime_ && runtime_->pdc_event)
+            runtime_->pdc_event({UET::Runtime::PdcEventKind::RequestRejected,UINT16_MAX,
+                request.dst_fep,0,0,header.job_id,message,UET::Runtime::PdcFailureReason::ResourcesUnavailable});
+        // A fragmented operation is one application request. Remove all of its
+        // unsent fragments before SES is allowed to release its message ID.
+        const auto same_message=[&](const SES_PDS_req& queued) {
+            const auto other=UET::SES::semantic_request_fields(queued.pkt);
+            return other && queued.dst_fep==request.dst_fep && other->header.job_id==header.job_id &&
+                UET::SES::local_submission_message(queued)==message;
+        };
+        std::queue<pend_node> retained;
+        while (!pend_q.empty()) {
+            auto node=std::move(pend_q.front()); pend_q.pop();
+            if (!same_message(node.tx_req)) retained.push(std::move(node));
+        }
+        pend_q=std::move(retained); pend_cnt=static_cast<int>(pend_q.size());
+        std::queue<SES_PDS_req> retained_requests;
+        while (!SES_tx_req_q.empty()) {
+            auto queued=std::move(SES_tx_req_q.front()); SES_tx_req_q.pop();
+            if (!same_message(queued)) retained_requests.push(std::move(queued));
+        }
+        SES_tx_req_q=std::move(retained_requests);
+    }
 
 public:
+
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        const bool queued = !SES_tx_rsp_q.empty() || !Net_rx_pkt_q.empty() ||
+                            !SES_tx_req_q.empty() || !PDC_close_q.empty() || resource_check_due_;
+        if (queued) mainChk();
+        const bool initiator = IPDC_Processmanager.progressOne();
+        const bool target = TPDC_Processmanager.progressOne();
+        const bool rudi=rudi_initiator_ && rudi_initiator_->progress();
+        return queued || initiator || target || rudi;
+    }
 
     // IDLE, TX_READY, TX_PROCESSING, PDC and ERROR -> idle
     void mainChk()
     {
-        if (!SES_eager_req_q.empty())
-        {
-            // State machine not written, leave it for now
-        }
-        else if (!SES_tx_rsp_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing SES load response");
-            sesTxRsp();
-        }
-        else if (!Net_rx_pkt_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing network layer packet reception");
-            rxPkt();
-        }
-        else if (!SES_tx_req_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing SES load request");
-            SESTxReq();
-        }
-        else if (!PDC_close_q.empty())
-        {
-            LOG_INFO(__FUNCTION__, "Processing PDC close request");
-            PDCClose();
-        } /* I feel this part is not needed
-         else if(!PDS_error_q.empty()){
-             LOG_INFO(__FUNCTION__,"PDS error event processing");
-             pdsError();
-         }*/
+        resource_check_due_=false;
+        if (!SES_tx_rsp_q.empty()) sesTxRsp();
+        // A terminated instance must be retired before another queued message
+        // can select its ID. Otherwise CLOSED could be mistaken for a fresh SYN
+        // on an instance whose generation has not yet been advanced.
+        else if (!PDC_close_q.empty()) PDCClose();
+        else if (!Net_rx_pkt_q.empty()) rxPkt();
+        else if (!SES_tx_req_q.empty()) SESTxReq();
+        resourceCheck();
     }
 
     void sesTxRsp()
@@ -207,89 +360,221 @@ public:
 
     void rxPkt()
     {
-        LOG_INFO("rx_pkt", "=====================Processing Network Layer Packet=====================");
-        bool is_fwd_pkt = false; // Default: cannot forward
-        uint16_t pdc_id = 0;
-        // Process receive request logic
-        PDStoNET_pkt packet{};
-        if (!Net_rx_pkt_q.pop(packet)) return;
-        PDStoNET_pkt *rx = &packet;
+        PDStoNET_pkt received_packet{};
+        if (!Net_rx_pkt_q.pop(received_packet)) return;
+        // Optimized fetching results use DATA_SMALL in their exact PDS ACK.
+        // DATA_SMALL requests are allowed only on an existing reverse PDC;
+        // non-RUD/ROD uses remain fenced;
+        // no caller may cast an optimized union as STD.
+        const bool optimized_request=received_packet.SESpkt.bth_type==Optimized_Header ||
+            received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
+        // Table3-21 also permits MEDIUM DATAGRAM_SEND. It retains UUD's
+        // stateless transport path; SMALL and optimized data responses do not.
+        const bool medium_datagram=received_packet.PDS_type==UUD_req_header &&
+            received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
+        if (!received_packet.trimmed && ((received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header &&
+            received_packet.PDS_type!=RUOD_ack_header && received_packet.PDS_type!=RUOD_req_header) ||
+            (optimized_request && received_packet.PDS_type!=RUOD_req_header && !medium_datagram))) { ++event_cnt; return; }
 
-        if (checkRxPkt(rx))
-        {
-            LOG_INFO("rx_pkt", "RX packet valid, starting processing...");
-            if (rx->PDS_type == RUOD_req_header || rx->PDS_type == RUOD_cp_header)
-            { // If request
-                if (rx->PDS_type == RUOD_req_header)
-                    pdc_id = rx->PDS_header.RUOD_req_header.dpdcid;
-                else if (rx->PDS_type == RUOD_cp_header)
-                    pdc_id = rx->PDS_header.RUOD_cp_header.dpdcid;
-
-                if ((rx->PDS_type == RUOD_req_header && rx->PDS_header.RUOD_req_header.flags.syn == 0) ||
-                    (rx->PDS_type == RUOD_cp_header && rx->PDS_header.RUOD_cp_header.flags.syn == 0))
-                {
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(pdc_id));
-                }
-                else
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD establishment request ");
-
-                if (rx->PDS_header.RUOD_req_header.flags.syn == 0 && pdc_list[pdc_id].is_open)
-                { // If PDC is already open
-                    LOG_INFO("rx_pkt", "RX packet target PDC is open");
-                    is_fwd_pkt = true; // If packet is valid, can forward
-                }
-                else // if(rx->PDS_header.RUOD_req_header.flags.syn == 1)
-                {    // PDC not open
-                    LOG_INFO("rx_pkt", "RX packet target PDC is not open");
-                    if (rx->PDS_header.RUOD_req_header.flags.syn == 1)
-                    { // Connection initiation packet
-                        if (isOOR())
-                        {
-                            is_fwd_pkt = false; // PDC full, cannot establish new PDC
-                            LOG_WARN("rx_pkt", "PDC full, cannot establish new connection, dropping");
-                        }
-                        else
-                        {
-                            uint16_t new_pdcid = muxRx2PDCID(rx->src_fep, rx->dst_fep, rx->PDS_header.RUOD_req_header.spdcid);
-                            allocPDC(new_pdcid, rx->src_fep, rx->dst_fep); // Allocate PDC
-                            pdc_id = new_pdcid;
-                            LOG_INFO("rx_pkt", "Allocate PDC, ID: " + std::to_string(pdc_id));
-                            is_fwd_pkt = true;
-                        }
-                    }
-                    else
-                    {
-                        LOG_INFO("rx_pkt", "Non-connection initiation packet, illegal, dropping");
-                    }
+        if (received_packet.PDS_type==RUDI_header) {
+            const auto& transport=received_packet.PDS_header.RUDI_header;
+            if (transport.type==RUDI_RESP) {
+                if (rudi_initiator_) rudi_initiator_->receive(received_packet);
+            } else if (transport.type==RUDI_REQ) {
+                if (received_packet.trimmed) { sendRudiNack(received_packet,
+                    received_packet.trimmed_last_hop?UET_TRIMMED_LASTHOP:UET_TRIMMED); return; }
+                PDC_SES_req request{}; request.PDCID=UINT16_MAX; request.delivery_mode=RUDI;
+                request.source_fep=received_packet.src_fep; request.next_hdr=transport.next_hdr;
+                request.rudi_packet_id=transport.pkt_id; request.rudi_retransmission=transport.flags.retx;
+                request.rudi_congestion_marked=received_packet.network_ecn==3;
+                request.pkt=std::move(received_packet.SESpkt);
+                if (!PDCtoSES_req.push(request)) sendRudiNack(received_packet,UET_NO_PKT_BUFFER);
+            }
+            return; // Never allocate a PDC, even for duplicates or malformed SES.
+        }
+        if (received_packet.PDS_type==nack_header && received_packet.PDS_header.nack_header.flags.nt) {
+            if (rudi_initiator_) rudi_initiator_->receive(received_packet);
+            return; // RUDI NACK IDs are not PDC sequence numbers.
+        }
+        if (!received_packet.trimmed && received_packet.PDS_type==RUOD_cp_header &&
+            received_packet.PDS_header.RUOD_cp_header.ctl_type>=10) {
+            // Protect direct protocol-queue adapters as well as wire ingress.
+            // Unknown CPs may have PSN=0; sending a NACK or learning a peer
+            // from them would violate §3.5.11.3 and corrupt connection state.
+            if (runtime_) runtime_->pds_error_counters.record_invalid_control_type();
+            ++event_cnt; return;
+        }
+        if (received_packet.trimmed) {
+            // Trimmed headers are not authenticated by the missing CRC. Resolve
+            // only an already-bound tuple for NACK generation; never allocate
+            // a PDC or learn a new peer ID from this packet (§3.5.15.1).
+            if (received_packet.PDS_type!=RUOD_req_header) { ++event_cnt; return; }
+            const auto& request=received_packet.PDS_header.RUOD_req_header;
+            uint16_t existing=UINT16_MAX;
+            if (request.flags.syn) {
+                const auto found=rx_contexts_.find({received_packet.src_fep,received_packet.dst_fep,request.spdcid});
+                if (found!=rx_contexts_.end()) existing=found->second;
+            } else existing=request.dpdcid;
+            if (existing<MAX_PDC*2 && pdc_list[existing].is_open) {
+                const auto& identity=connection_identities_[existing];
+                if (identity.remote_pdc_known && identity.remote_pdc_id==request.spdcid &&
+                    identity.remote_endpoint==received_packet.src_fep && identity.local_endpoint==received_packet.dst_fep) {
+                    fwdPkt2PDC(&received_packet,existing); return;
                 }
             }
-            else if (rx->PDS_type == RUOD_ack_header)
-            { // ACK NACK
-                if (pdc_list[rx->PDS_header.RUOD_ack_header.dpdcid].is_open)
-                { // If PDC is already open
-                    LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(rx->PDS_header.RUOD_ack_header.dpdcid));
-                    pdc_id = rx->PDS_header.RUOD_ack_header.dpdcid;
-                    is_fwd_pkt = true; // If packet is valid, can forward
+            PDStoNet.push(UET::PDS::trimmed_negative_ack(received_packet));
+            return;
+        }
+        if (received_packet.PDS_type == UUD_req_header) {
+            // §3.5.7.5: datagrams bypass connection allocation, sequence
+            // tracking and acknowledgements. SES validates the operation.
+            if (received_packet.PDS_header.UUD_req_header.type != UUD_REQ) return;
+            PDC_SES_req datagram{};
+            datagram.PDCID=UINT16_MAX; datagram.delivery_mode=UUD;
+            datagram.source_fep=received_packet.src_fep;
+            datagram.next_hdr=received_packet.PDS_header.UUD_req_header.next_hdr;
+            datagram.pkt=std::move(received_packet.SESpkt);
+            datagram.request_wire_format=datagram.pkt.bth_type;
+            if (const auto fields=UET::SES::semantic_request_fields(datagram.pkt);fields && !fields->has_message_id) {
+                // Reuse the checked SES field view without casting the
+                // optimized union or inventing a wire message ID/PSN.
+                datagram.pkt.bth_type=Standard_Header;
+                datagram.pkt.bth_header.Standard_Header=fields->header;
+            }
+            PDCtoSES_req.push(datagram);
+            return;
+        }
+        if (!checkRxPkt(&received_packet)) { ++event_cnt; return; }
+
+        const bool is_request = received_packet.PDS_type == RUOD_req_header;
+        const bool is_control = received_packet.PDS_type == RUOD_cp_header;
+        const bool is_acknowledgement = received_packet.PDS_type == RUOD_ack_header;
+        const bool is_negative_acknowledgement = received_packet.PDS_type == nack_header;
+        const bool starts_connection = is_request
+            ? received_packet.PDS_header.RUOD_req_header.flags.syn
+            : is_control && received_packet.PDS_header.RUOD_cp_header.flags.syn;
+        const auto remote_pdc_id = getSPDCID(received_packet);
+        uint16_t local_pdc_id = UINT16_MAX;
+        if (is_request) local_pdc_id = received_packet.PDS_header.RUOD_req_header.dpdcid;
+        else if (is_control) local_pdc_id = received_packet.PDS_header.RUOD_cp_header.dpdcid;
+        else if (is_acknowledgement) local_pdc_id = received_packet.PDS_header.RUOD_ack_header.dpdcid;
+        else if (is_negative_acknowledgement) local_pdc_id = received_packet.PDS_header.nack_header.dpdcid;
+
+        if (is_request && starts_connection && runtime_ && runtime_->standard_wire) {
+            // §3.5.12.1: outside RODL, SES requests use only the forward
+            // direction; READ/atomic response data uses only the return
+            // direction. Drop an illegal combination before allocation or
+            // peer-ID learning (local malformed-direction policy).
+            if (!UET::SES::semantic_request_fields(received_packet.SESpkt)) {
+                ++event_cnt; return;
+            }
+        }
+
+        if (starts_connection) {
+            if (is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type!=Noop &&
+                received_packet.PDS_header.RUOD_cp_header.ctl_type!=Negotiation) {
+                sendNack(&received_packet,UET_PDC_HDR_MISMATCH); return;
+            }
+            if (!remote_pdc_id) {
+                // §3.5.8.2 reserves ID zero for replies without a valid PDC.
+                // A SYN must never create a context under that identity.
+                ++event_cnt; sendNack(&received_packet,UET_PDC_HDR_MISMATCH); return;
+            }
+            // §3.5.8.2 step 3.d.i: plaintext startup does not validate the
+            // new Start_PSN against a retired peer's sequence floor. Random
+            // local-ID reuse across other peers can cross half the space.
+            // Live-context SYN/identity/window checks still apply below;
+            // authenticated anti-replay belongs to the TSS start methods.
+            // SYN carries pdc_info/psn_off in place of dpdcid. Resolve it by
+            // {source FEP, destination FEP, source PDCID}, never by that union.
+            local_pdc_id = muxRx2PDCID(received_packet.src_fep,
+                                     received_packet.dst_fep, remote_pdc_id);
+            if (local_pdc_id >= MAX_PDC * 2) {
+                sendNack(&received_packet,UET_NO_PDC_AVAIL);
+                return;
+            }
+            if (!pdc_list[local_pdc_id].is_open) {
+                const bool ordered=is_request?is_reliable_ordered_request(received_packet.PDS_header.RUOD_req_header.type):
+                    received_packet.PDS_header.RUOD_cp_header.flags.pdc_type==1;
+                const auto initial_offset=is_request?received_packet.PDS_header.RUOD_req_header.psn_off:
+                    received_packet.PDS_header.RUOD_cp_header.psn_off;
+                const auto initial_range=runtime_ && runtime_->standard_wire?runtime_->psn_ranges.initial_range():Default_MPR;
+                // A new RUD receive window starts at Start_PSN-1. Reject a
+                // packet beyond that window before allocating a PDC: ordinary
+                // NACKs cannot create one (§3.5.8.2). ROD gaps are the explicit
+                // exception and are handled by the newly allocated T_PDC.
+                if (!ordered && initial_offset>=initial_range) {
+                    ++event_cnt; sendNack(&received_packet,UET_PSN_OOR_WINDOW); return;
+                }
+                std::optional<PDC_SES_req> reserved_message;
+                if (is_request && runtime_ && runtime_->semantic_admission) {
+                    const auto& header=received_packet.PDS_header.RUOD_req_header;
+                    const auto mode=is_reliable_unordered_request(header.type)?RUD:ROD;
+                    // A ROD gap may allocate a PDC and return ROD_OOO, but it
+                    // does not deliver a message. Reserve SES state only for
+                    // a first packet that can enter the new receive window.
+                    const bool can_deliver=mode==RUD?header.psn_off<initial_range:header.psn_off==0;
+                    if (can_deliver) {
+                        const auto request=UET::PDS::semantic_admission_request(received_packet,local_pdc_id,
+                            received_packet.src_fep,mode,header.psn-header.psn_off);
+                        const auto admission=runtime_->semantic_admission(request);
+                        if (admission==UET::Runtime::SemanticAdmission::Rejected ||
+                            admission==UET::Runtime::SemanticAdmission::NoSynchronizationState) {
+                            // §3.5.8.2 step 3.c: resource refusal does not
+                            // create a PDC, so this NACK carries SPDCID=0.
+                            const auto reason=admission==UET::Runtime::SemanticAdmission::NoSynchronizationState?UET_NO_SES_SYNC_AVAIL:UET_NO_SES_MSG_AVAIL;
+                            ++event_cnt; sendNack(&received_packet,reason); return;
+                        }
+                        if (admission==UET::Runtime::SemanticAdmission::ReservedMessage ||
+                            admission==UET::Runtime::SemanticAdmission::ReservedPacket) reserved_message=request;
+                    }
+                }
+                if (!allocPDC(local_pdc_id,received_packet.src_fep,received_packet.dst_fep)) {
+                    if (reserved_message && runtime_->cancel_semantic_reservation)
+                        runtime_->cancel_semantic_reservation(*reserved_message);
+                    sendNack(&received_packet,UET_NO_PDC_AVAIL); return;
                 }
             }
         }
-        else
-        {
-            is_fwd_pkt = false; // If packet is invalid, cannot forward
-            LOG_ERROR("rx_pkt", "RX packet invalid");
-        }
 
-        if (is_fwd_pkt)
-        {
-            LOG_INFO("rx_pkt", "RX packet type: RUOD request, PDCID: " + std::to_string(pdc_id));
-            fwdPkt2PDC(rx, pdc_id); // Send request to PDC
+        if (local_pdc_id >= MAX_PDC * 2 || !pdc_list[local_pdc_id].is_open) {
+            // Never answer an unexpected ACK/NACK with another NACK. Only
+            // requests and controls can elicit this response (§3.5.12.7).
+            const bool unbound_probe=is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type==Probe;
+            if (!unbound_probe && (is_request || is_control)) sendNack(&received_packet,UET_INV_DPDCID);
+            return;
         }
-        else
-        {
-            // Invalid packet enters UNEXPECTED RX OOR
-            LOG_WARN("rx_pkt", "Unexpected RX packet, entering RX OOR processing");
-            unexpectedOrRxOOR(rx); // Enter RX OOR queue
+        auto& identity = connection_identities_[local_pdc_id];
+        if (!identity.remote_pdc_known && local_pdc_id<MAX_PDC && (is_acknowledgement || is_negative_acknowledgement)) {
+            const uint32_t sequence=is_acknowledgement
+                ? received_packet.PDS_header.RUOD_ack_header.cack_psn+received_packet.PDS_header.RUOD_ack_header.ack_psn_off
+                : received_packet.PDS_header.nack_header.nack_psn;
+            if (!IPDC_Processmanager.hasOutstandingPacket(local_pdc_id,sequence)) return;
         }
+        const bool establishment_failure = is_negative_acknowledgement && remote_pdc_id == 0;
+        if (identity.local_endpoint != received_packet.dst_fep ||
+            identity.remote_endpoint != received_packet.src_fep ||
+            (identity.remote_pdc_known && identity.remote_pdc_id != remote_pdc_id && !establishment_failure)) {
+            const bool unbound_probe=is_control && received_packet.PDS_header.RUOD_cp_header.ctl_type==Probe;
+            if (!unbound_probe && (is_request || is_control)) sendNack(&received_packet,UET_PDC_HDR_MISMATCH);
+            return;
+        }
+        if (is_request && runtime_ && runtime_->standard_wire) {
+            // An unknown DPDCID or mismatched FA must get its mandated NACK
+            // first (§3.5.8.2). Only an existing, correctly addressed PDC tells
+            // us which local direction this request would use.
+            const bool forward=local_pdc_id>=MAX_PDC;
+            if ((forward && !UET::SES::semantic_request_fields(received_packet.SESpkt)) ||
+                (!forward && received_packet.SESpkt.bth_type!=Semantic_Response_with_Data_Header &&
+                    received_packet.SESpkt.bth_type!=Optimized_Response_with_Data_Header)) {
+                ++event_cnt; return;
+            }
+        }
+        if (!establishment_failure && !identity.remote_pdc_known) {
+            identity.remote_pdc_id = remote_pdc_id;
+            identity.remote_pdc_known = true;
+        }
+        fwdPkt2PDC(&received_packet,local_pdc_id);
     }
 
     /**
@@ -297,16 +582,30 @@ public:
      * @param rx Pointer to received PDStoNET_pkt structure, containing received packet information
      * @return true if packet is valid, false otherwise
      */
-    bool checkRxPkt(PDStoNET_pkt *rx)
+    bool checkRxPkt(PDStoNET_pkt* packet)
     {
-        // Check if received packet is valid, don't know how to handle, assume valid for now
-        if (rx != nullptr)
-        {
-            return true; // Valid packet
+        if (!packet) return false;
+        switch (packet->PDS_type) {
+        case RUOD_req_header:
+            return packet->PDS_header.RUOD_req_header.type == ROD_REQ ||
+                   packet->PDS_header.RUOD_req_header.type == RUD_REQ ||
+                   (runtime_ && runtime_->congestion_control && runtime_->congestion_control->accepts_credit_requests() &&
+                    (packet->PDS_header.RUOD_req_header.type==RUD_CC_REQ || packet->PDS_header.RUOD_req_header.type==ROD_CC_REQ));
+        case RUOD_cp_header: {
+            const auto& control=packet->PDS_header.RUOD_cp_header;
+            const bool carries_mode=control.ctl_type==Noop || control.ctl_type==Negotiation;
+            // RODL is not enabled yet. Check the full two-bit field before
+            // allocating a context; never reinterpret 10/11 as RUD or ROD.
+            return control.type==CP && (!carries_mode || control.flags.pdc_type<=1);
         }
-        else
-        {
-            return false; // Invalid packet
+        case RUOD_ack_header:
+            return (packet->PDS_header.RUOD_ack_header.type==ACK || packet->PDS_header.RUOD_ack_header.type==ACK_CC) &&
+                packet->PDS_header.RUOD_ack_header.flags.req!=3;
+        case nack_header:
+            return packet->PDS_header.nack_header.type == NACK &&
+                   !packet->PDS_header.nack_header.flags.nt &&
+                   UET::PDS::negative_acknowledgment_policy(packet->PDS_header.nack_header.nack_code).has_value();
+        default: return false;
         }
     }
 
@@ -318,7 +617,7 @@ public:
     PDS_Nack_Codes checkUnexpectEvent(PDStoNET_pkt *rx)
     {
         if (rx != nullptr)
-            return UET_TRIMMED; // This will return different NACK types based on packet content, temporarily return an example value
+            return UET_INV_DPDCID; // An unknown connection is not evidence of trimming.
         else
             return reserved;
     }
@@ -362,26 +661,39 @@ public:
     void sendNack(PDStoNET_pkt *rx, PDS_Nack_Codes nack_type)
     {
         // Send NACK packet
-        PDStoNET_pkt nack_pkt;
+        PDStoNET_pkt nack_pkt{};
         nack_pkt.src_fep = rx->dst_fep;
         nack_pkt.dst_fep = rx->src_fep;
         nack_pkt.PDS_type = PDS_header_type::nack_header;
         nack_pkt.SESpkt = {}; // NACK packet does not carry SES data
         nack_pkt.PDS_header.nack_header.type = PDS_type::NACK;
         nack_pkt.PDS_header.nack_header.next_hdr = PDS_next_hdr::UET_HDR_NONE;
-        nack_pkt.PDS_header.nack_header.flags.m = 0;
-        nack_pkt.PDS_header.nack_header.flags.retx = 0;
+        nack_pkt.wire_entropy=rx->wire_entropy;
+        nack_pkt.PDS_header.nack_header.flags.m = rx->network_ecn==3;
+        nack_pkt.PDS_header.nack_header.flags.retx = rx->PDS_type==RUOD_cp_header?
+            rx->PDS_header.RUOD_cp_header.flags.retx:rx->PDS_header.RUOD_req_header.flags.retx;
         nack_pkt.PDS_header.nack_header.flags.nt = 0;
         nack_pkt.PDS_header.nack_header.nack_code = nack_type;
         nack_pkt.PDS_header.nack_header.vendor_code = 0; // Unknown purpose
-        nack_pkt.PDS_header.nack_header.nack_psn = rx->PDS_header.RUOD_req_header.psn;
+        nack_pkt.PDS_header.nack_header.nack_psn = rx->PDS_type == RUOD_cp_header
+            ? rx->PDS_header.RUOD_cp_header.psn : rx->PDS_header.RUOD_req_header.psn;
         // TODO: If PDC establishment error, set spdcid to 0 here
-        nack_pkt.PDS_header.nack_header.spdcid = rx->PDS_header.RUOD_req_header.dpdcid;
-        nack_pkt.PDS_header.nack_header.dpdcid = rx->PDS_header.RUOD_req_header.spdcid;
+        nack_pkt.PDS_header.nack_header.spdcid = 0; // No matching local PDC exists.
+        nack_pkt.PDS_header.nack_header.dpdcid = getSPDCID(*rx);
         nack_pkt.PDS_header.nack_header.payload = 0;
         // Temporarily put in send queue like this?
         PDStoNet.push(nack_pkt);
         LOG_INFO("send_nack", "Sending NACK packet, NACK type: " + std::to_string(nack_type));
+    }
+
+    void sendRudiNack(const PDStoNET_pkt& received,PDS_Nack_Codes code) {
+        PDStoNET_pkt response{}; response.PDS_type=nack_header;
+        response.src_fep=received.dst_fep; response.dst_fep=received.src_fep;
+        auto& nack=response.PDS_header.nack_header;
+        nack.type=NACK; nack.next_hdr=UET_HDR_NONE; nack.flags.nt=1;
+        nack.flags.m=received.network_ecn==3; nack.flags.retx=received.PDS_header.RUDI_header.flags.retx;
+        nack.nack_code=code; nack.nack_pkt_id=received.PDS_header.RUDI_header.pkt_id;
+        PDStoNet.push(response); // Reserved PDC IDs/payload remain zero (Table3-49).
     }
 
     /**
@@ -395,43 +707,48 @@ public:
         // Get request from queue
         SES_PDS_req tx = SES_tx_req_q.front(); // Get queue
         SES_tx_req_q.pop();                      // Pop queue head element
-        // Select PDC based on tx to execute task, first check if PDC is available or can be allocated
-        // Try to allocate PDC based on tx
-        uint16_t pdc_id;
-        if (assignPDC(tx.pkt.bth_header.Standard_Header.job_id, tx.dst_fep, tx.tc, tx.mode, tx.pkt.bth_header.Standard_Header.msg_id, &pdc_id))
-        { // Allocate PDC
-            if (!PDCOpen(pdc_id) && !isOOR())
-            {
-                // If PDC is not open and not in OOR state
-                // Try to allocate PDC
-                if (allocPDC(pdc_id, tx.dst_fep, tx.src_fep))
-                {
-                    LOG_INFO("ses_tx_req", "PDC allocation successful, ID: " + std::to_string(pdc_id) + ", current open count: " + std::to_string(open_cnt));
-                }
-                else
-                {
-                    LOG_ERROR("ses_tx_req", "Unexpected error: PDC allocation failed");
-                }
-            }
-            if (isOOR())
-            {
-                // If in OOR state, enter wait queue
-                txOORPendEnqueue(&tx);
-            }
-            else
-            {
-                // if (tx->pkt.bth_header.Standard_Header.som == 1)
-                //     msgmap(tx->pkt.bth_header.Standard_Header.msg_id, pdc_id); // Associate each message ID with PDC of message start (som), unclear how to associate for now
-                // LOG_INFO("ses_tx_req", "PDC is open and not in OOR state, adding to PDC processing");
-                fwdPkt2PDC(&tx, pdc_id); // Send request to PDC
-            }
+        if (tx.mode==RUDI) {
+            if (!submitRudi(tx)) rejectPendingMessage(tx);
+            return; // Generic queue adapters must never allocate a RUDI PDC either.
         }
-        else
-        {
-            LOG_WARN("ses_tx_req", "PDC cannot be allocated, entering TX OOR & PEND queue");
-            // If PDC is unavailable or cannot be allocated, enter wait queue
-            txOORPendEnqueue(&tx);
+        if (tx.mode == UUD) {
+            PDStoNET_pkt datagram{};
+            datagram.src_fep=tx.src_fep; datagram.dst_fep=tx.dst_fep;
+            datagram.PDS_type=UUD_req_header;
+            datagram.PDS_header.UUD_req_header={UUD_REQ,tx.next_hdr};
+            datagram.SESpkt=std::move(tx.pkt); datagram.local_tx_handle=tx.tx_pkt_handle;
+            PDStoNet.push(datagram);
+            return;
         }
+        if (!tryForwardRequest(tx)) txOORPendEnqueue(&tx);
+    }
+
+    // Allocation and resource retry use exactly the same path. An established
+    // context remains usable even when every other ID in its pool is occupied.
+    bool tryForwardRequest(SES_PDS_req& request) {
+        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+        if (!fields) return false;
+        const auto& semantic=fields->header;
+        const auto message_id=UET::SES::local_submission_message(request);
+        uint16_t local_pdc;
+        const UET::PDS::PdcMappingIdentity identity{request.source_pid,
+            static_cast<uint16_t>(semantic.PIDonFEP),static_cast<uint16_t>(semantic.resource_index)};
+        if (!assignPDC(semantic.job_id,request.dst_fep,request.tc,request.mode,message_id,
+                       &local_pdc,request.src_fep,identity)) return false;
+        const OutgoingMessage message{semantic.job_id,request.dst_fep,request.tc,request.mode,message_id};
+        if (quiesced_messages_.count(message) ||
+            (semantic.som && IPDC_Processmanager.isConnectionClosing(local_pdc))) {
+            // §3.5.8.3: finish existing messages before starting a new context.
+            quiesced_messages_.insert(message);
+            deferred_close_requests_[local_pdc].push_back(std::move(request));
+            return true;
+        }
+        if (!PDCOpen(local_pdc) && !allocPDC(local_pdc,request.dst_fep,request.src_fep,
+            static_cast<pdc_mode>(request.mode),request.tc)) return false;
+        if (semantic.som && request.establish_with_control &&
+            !IPDC_Processmanager.openWithControl(local_pdc,static_cast<pdc_mode>(request.mode),false)) return false;
+        fwdPkt2PDC(&request,local_pdc);
+        return true;
     }
 
     /**
@@ -451,12 +768,17 @@ public:
      * @param pdc_id PDC ID to apply for
      * @return true if application successful, false otherwise
      */
-    bool allocPDC(uint16_t pdc_id, uint32_t dst_fep, uint32_t src_fep)
+    bool allocPDC(uint16_t pdc_id, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD,
+                  uint8_t data_traffic_class=0)
     {
         // PDC application logic
         // Simple simulation here, actual logic needs implementation based on specific requirements
+        if (!pdc_id || pdc_id >= MAX_PDC * 2) return false;
+        if (pdc_id<MAX_PDC && IPDC_Processmanager.getActiveProcessCount()>=initiatorCapacity()) return false;
+        if (pdc_id>=MAX_PDC && TPDC_Processmanager.getActiveProcessCount()>=targetCapacity()) return false;
         if (!pdc_list[pdc_id].is_open)
         {
+            connection_identities_[pdc_id] = {src_fep,dst_fep,0,false};
             if (pdc_id >= MAX_PDC)
             { // TPDC
                 if (TPDC_Processmanager.createTPDCProcess(pdc_id, dst_fep, src_fep))
@@ -472,7 +794,7 @@ public:
             }
             else
             {
-                if (IPDC_Processmanager.createIPDCProcess(pdc_id, dst_fep, src_fep))
+                if (IPDC_Processmanager.createIPDCProcess(pdc_id,dst_fep,src_fep,delivery_mode,data_traffic_class))
                 {
                     pdc_list[pdc_id].is_open = true;
                     open_cnt++;
@@ -509,7 +831,9 @@ public:
     {
         // Check if PDC is open, i.e., already in use
         // Simple simulation here, actual logic needs implementation based on specific requirements
-        if (pdc_id < 0 || pdc_id >= MAX_PDC)
+        // Both ID pools belong to this host: initiators occupy [0,MAX_PDC),
+        // targets [MAX_PDC,2*MAX_PDC). Return data uses the latter pool.
+        if (pdc_id < 0 || pdc_id >= MAX_PDC*2)
         {
             LOG_ERROR("pdc_open", "PDC ID " + std::to_string(pdc_id) + " out of range");
             return false; // PDC not available
@@ -528,19 +852,16 @@ public:
      */
     void txOORPendEnqueue(SES_PDS_req *tx)
     {
-        // Enter wait queue
-        LOG_INFO("tx_oor_pend_enqueue", "=====================TX OOR & PEND Request Enqueue=====================");
-        // Calculate maximum wait end_time
-        pend_node node = createPendNode(*tx); // Create pend_node
-        pend_q.push(node);
-        pend_cnt++; // Pending counter increment by 1
-        if (pendQFull())
-        {
-            pause_ses = true; // If pending queue is full, pause SES, haven't figured out how to notify SES yet
-            LOG_WARN("tx_oor_pend_enqueue", "Wait queue is full, SES paused");
+        const size_t limit=runtime_?runtime_->pending_request_limit:MAX_PEND;
+        if (pend_q.size()>=limit) {
+            rejectPendingMessage(*tx);
+            armPendingDeadline();
+            return;
         }
-        // Enter resource checking
-        resourceCheck(); // Check if resources are available, whether need to close some PDCs to release pending data packets
+        pend_q.push(createPendNode(*tx));
+        pend_cnt=static_cast<int>(pend_q.size());
+        pause_ses=pendQFull();
+        resourceCheck();
     }
 
     /**
@@ -549,7 +870,7 @@ public:
      */
     bool pendQFull()
     {
-        return pend_cnt >= MAX_PEND; // If pending queue is full, return true
+        return pend_q.size() >= (runtime_?runtime_->pending_request_limit:MAX_PEND); // If pending queue is full, return true
     }
 
     /**
@@ -561,14 +882,17 @@ public:
     {
         // Create pend_node
         LOG_INFO("create_pend_node", "=====================Creating Wait Node=====================");
-        auto pend_start = std::chrono::steady_clock::now();
+        auto pend_start = runtime_
+            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(runtime_->clock.now()))
+            : std::chrono::steady_clock::now();
         uint32_t pend_start_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_start.time_since_epoch()).count());
         uint32_t pend_time = Pend_Time;
         auto pend_end = pend_start + std::chrono::milliseconds(pend_time);
         uint32_t pend_end_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_end.time_since_epoch()).count());
         LOG_INFO("create_pend_node", "Wait start time: " + std::to_string(pend_start_ms));
         LOG_INFO("create_pend_node", "Wait end time: " + std::to_string(pend_end_ms));
-        pend_node node = {tx, pend_time, pend_start_ms, pend_end_ms}; // Create pend_node
+        pend_node node = {tx, pend_time, pend_start_ms, pend_end_ms};
+        if (runtime_) node.deadline_ns=UET::Runtime::add_time(runtime_->clock.now(),runtime_->pending_request_timeout); // Create pend_node
         return node;                                                  // Return pend_node
     }
 
@@ -586,12 +910,14 @@ public:
         LOG_INFO("fwd_pkt_to_pdc", "Forwarding packet to PDC ID: " + std::to_string(pdc_id));
         // Package as PDS_PDC_req
         PDS_PDC_req req = {}; // value-initialize to ensure nack_payload is default-initialized
+        req.delivery_mode=static_cast<pdc_mode>(pkt->mode);
         req.next_hdr = pkt->next_hdr;
         req.tx_pkt_handle = pkt->tx_pkt_handle;
         req.pkt = pkt->pkt;
         req.pkt_len = pkt->pkt_len;
-        req.som = (pkt->pkt.bth_header.Standard_Header.som != 0);
-        req.eom = (pkt->pkt.bth_header.Standard_Header.eom != 0);
+        const auto fields=UET::SES::semantic_request_fields(pkt->pkt);
+        req.som=fields?bool(fields->header.som):true;
+        req.eom=fields?bool(fields->header.eom):true;
         // Send request to PDC
         if (pdc_id < MAX_PDC)
         {
@@ -604,7 +930,7 @@ public:
             TPDC_Processmanager.pushTxRequest(pdc_id, req);
         }
         // External transmission here, need to interface with actual PDC below
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!runtime_) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         resourceCheck();
         return;
     }
@@ -618,8 +944,8 @@ public:
         // Package as PDS_PDC_rsp
         SES_PDC_rsp rsp = {}; // value-initialize to ensure nack_payload is default-initialized
         rsp.rx_pkt_handle = pkt->rx_pkt_handle;
-        rsp.gtd_del = true;   // Response with payload, guarantee delivery;
-        rsp.ses_nack = false; // Not NACK
+        rsp.gtd_del = pkt->gtd_del;
+        rsp.ses_nack = pkt->ses_nack;
         rsp.pkt = pkt->rsp;
         rsp.rep_len = pkt->rsp_len;
         // TODO: nack_payload
@@ -670,42 +996,30 @@ public:
        */
     void resourceCheck()
     {
-        // Check if resources are available
-        LOG_INFO("resource_check", "=====================Resource Check=====================");
-
-        if (pend_cnt > 0 || (open_cnt - closing_cnt > Close_Thresh))
-        {
-            // Add timeout check logic, first confirm if queued tasks have timed out, drop them if timed out
-            while (!pend_q.empty())
-            {
-                if (isPendNodeOverTime(pend_q.front()))
-                {
-                    // Directly pop if timed out, drop it
-                    LOG_WARN("resource_check", "First wait node timed out, removed, remaining wait count: " + std::to_string(pend_cnt));
-                    pend_node node = pend_q.front();
-                    pend_q.pop();
-                    pendTimeOut(node);
-                }
-            }
-            uint16_t sPDCID = selectPDC2Close(); // Select PDC to close
-            if (sPDCID == -1)
-            {
-                LOG_WARN("resource_check", "No PDC available to close, not closing for now");
-            }
-            else
-            {
-                IPDC_Processmanager.sendCloseReq(sPDCID); // Send close request to IPDC
-                // Enter main request processing
-                closing_cnt++; // Counter increment by 1
-
-                LOG_INFO("resource_check", "Resource check: closing PDC, closing count: " + std::to_string(closing_cnt));
-            }
+        if (checking_resources_) return;
+        checking_resources_=true;
+        while (!pend_q.empty() && isPendNodeOverTime(pend_q.front())) {
+            const auto expired=pend_q.front(); pend_q.pop();
+            ++event_cnt;
+            rejectPendingMessage(expired.tx_req);
         }
-        else
-        {
-            // If no PDC needs to be closed, do nothing
-            LOG_INFO("resource_check", "Resource check: no need to close PDC");
+        while (!pend_q.empty()) {
+            // Copy until accepted: a failed allocation leaves the original
+            // deadline and queue order intact instead of restarting the timer.
+            auto request=pend_q.front().tx_req;
+            if (!tryForwardRequest(request)) break;
+            pend_q.pop();
         }
+        pend_cnt=static_cast<int>(pend_q.size());
+        pause_ses=pendQFull();
+        if (!pend_q.empty()) {
+            // Simulator policy: reclaim one idle initiator context under
+            // pressure. Targets are reclaimed only by their owning initiator.
+            const int candidate=selectPDC2Close();
+            if (candidate>=0 && IPDC_Processmanager.sendCloseReq(static_cast<uint16_t>(candidate))) ++closing_cnt;
+        }
+        armPendingDeadline();
+        checking_resources_=false;
     }
 
     /**
@@ -714,47 +1028,20 @@ public:
      */
     void pendTimeOut(pend_node node)
     {
-        // Process timed out pend_node
-        LOG_WARN("pend_timeout", "Processing timed out wait node");
-        pend_cnt--;
-        event_cnt++;
-        // dropPkt(); // Placeholder, temporarily empty
-        dropPkt(node);
-
-        // ses -> pkt fail event
-        sendError2SES(); // Send error report to SES, this function is empty for now
+        ++event_cnt;
+        rejectPendingMessage(node.tx_req);
+        armPendingDeadline();
     }
 
-    /**
-     * @brief Send error report to SES
-     */
-    void sendError2SES()
-    {
-        // Send error to SES, will be improved based on actual requirements later
-        LOG_INFO("send_error_to_ses", "Sending error message to SES");
-    }
-
-    /**
-     * @brief Drop error packet
-     * @return Send error packet
-     */
-    void dropPkt(pend_node node)
-    {
-        // Placeholder, temporarily empty
-        LOG_DEBUG("drop_packet", "node :" + std::to_string(node.tx_req.pkt.bth_header.Standard_Header.msg_id) + " dropped");
-        // Note: Do not call free on stack objects, nodes will be automatically destroyed when scope ends
-    }
-
-    /**
-     * @brief Check if timeout occurred
-     * @return true or false
-     */
+    // Runtime nanoseconds avoid the legacy millisecond counter's wraparound.
     bool isPendNodeOverTime(pend_node node)
     {
-        // Check if exceeds expected time limit
-        auto pend_end = std::chrono::steady_clock::now();
+        if (runtime_) return runtime_->clock.now()>=node.deadline_ns;
+        auto pend_end = runtime_
+            ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(runtime_->clock.now()))
+            : std::chrono::steady_clock::now();
         uint32_t time_now_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(pend_end.time_since_epoch()).count());
-        return time_now_ms > node.end_time; // Correct logic: current time exceeds end time to be considered timeout
+        return static_cast<int32_t>(time_now_ms - node.end_time) >= 0;
     }
 
     /**
@@ -763,6 +1050,7 @@ public:
      */
     bool assignPDC(uint16_t msgid, uint16_t pdc_id)
     {
+        if (pdc_id >= MAX_PDC * 2) return false;
         // if (msg_map.find(msgid) == msg_map.end() || msg_map[msgid] != pdc_id) // First is to check existence, second is to check equality
         // {
         //     LOG_ERROR("assign_pdc", "Message ID " + std::to_string(msgid) + " not mapped to PDC");
@@ -790,12 +1078,14 @@ public:
      * @brief Allocate PDC when receiving SES request packet
      * @return true if allocation successful, false otherwise
      */
-    bool assignPDC(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode, uint16_t msgid, uint16_t *pdc_id)
+    bool assignPDC(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode,
+                   uint16_t msgid, uint16_t *pdc_id,uint32_t source_fa=0,UET::PDS::PdcMappingIdentity identity={})
     {
         // Allocate PDC algorithm
         // Simple allocation here for now
-        *pdc_id = muxTx2PDCID(job_id, dest_fa, trafficclass, deliverymode); // Calculate tx corresponding pdc_id
+        *pdc_id = muxTx2PDCID(job_id,dest_fa,trafficclass,deliverymode,source_fa,identity);
         LOG_INFO("assign_pdc", "Allocated PDC ID: " + std::to_string(*pdc_id));
+        if (*pdc_id >= MAX_PDC * 2) return false;
         if (pdc_list[*pdc_id].is_open)
         {
             // If PDC is already open
@@ -835,102 +1125,50 @@ public:
 
     // PDC queue depth tracking
 
-    // 4-tuple to PDCID mapping algorithm
-    int muxTx2PDCID(uint32_t job_id, uint32_t dest_fa, uint8_t trafficclass, uint8_t deliverymode)
+    // Mode-specific selection tuple, including mandatory FA/TC/mode fields.
+    int muxTx2PDCID(uint32_t job_id,uint32_t dest_fa,uint8_t trafficclass,uint8_t deliverymode,
+                    uint32_t source_fa=0,UET::PDS::PdcMappingIdentity identity={})
     {
-        LOG_INFO("mux_tx_to_pdc_id", "PDC allocation algorithm - input parameters: " + std::to_string(job_id) +
-                                         ", " + std::to_string(dest_fa) +
-                                         ", " + std::to_string(trafficclass) +
-                                         ", " + std::to_string(deliverymode));
-
-        // 1. Partition by destination FA (banking)
-        uint32_t bank = hash_fa(dest_fa) & BANK_MASK;
-        job_id *= 10;
-        // 2. Construct key and calculate hash once
-        uint64_t key = ((uint64_t)job_id << JOBID_SHIFT) |
-                       ((uint64_t)dest_fa << DEST_FA_SHIFT) |
-                       ((uint64_t)trafficclass << TC_SHIFT) |
-                       ((uint64_t)deliverymode << DM_SHIFT);
-
-        uint16_t h1 = crc16_hash(key, CRC16_POLY1, HASH_SEED1);
-
-        // 3. Map to bank index (use mask, ensure PDCs_PER_BANK is power of 2)
-        uint32_t pick = h1 & (PDCs_PER_BANK - 1);
-
-        // 4. Check selected PDC's queue depth
-        uint8_t q1 = pdc_qdepth[bank][pick];
-        // 5. Check if queue depth exceeds limit
-        if (q1 >= MAX_PDC_QUEUE)
-        {
-            LOG_ERROR("mux_tx_to_pdc_id", "Selected PDC queue depth exceeds limit: " + std::to_string(q1));
-            return -1; // Queue depth out of range
+        const auto fields=runtime_?runtime_->pdc_mapping.fields(deliverymode==ROD):UET::PDS::PdcMappingFields{};
+        const UET::PDS::InitiatorPdcKey key{source_fa,dest_fa,trafficclass,deliverymode,
+            fields.include_job_id?job_id:0,fields.include_source_pid?identity.source_pid:uint16_t{0},
+            fields.include_target_pid?identity.target_pid:uint16_t{0},
+            fields.include_resource_index?identity.resource_index:uint16_t{0}};
+        auto found = tx_contexts_.find(key);
+        if (found != tx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint16_t capacity=initiatorCapacity();
+        if (!capacity) return -1;
+        const auto hash_key=key.allocation_hash();
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1) % capacity;
+        for (uint16_t offset=0;offset<capacity;++offset) {
+            const uint16_t id = 1+(first+offset)%capacity;
+            if (!pdc_list[id].is_open) {
+                for (auto old=tx_contexts_.begin();old!=tx_contexts_.end();)
+                    if (old->second==id) old=tx_contexts_.erase(old); else ++old;
+                tx_contexts_[key]=id; return id;
+            }
         }
-
-        // 6. Generate global PDCID
-        uint32_t pdcid = (bank << BANK_SHIFT) | pick;
-
-        // Verify PDCID range
-        if (pdcid >= MAX_PDC)
-        {
-            LOG_ERROR("mux_tx_to_pdc_id", "Generated PDCID out of range: " + std::to_string(pdcid));
-            return -1;
-        }
-
-        // Update selected PDC's queue depth counter (simplified version, should decrement after PDC processing completes)
-        pdc_qdepth[bank][pick]++;
-
-        LOG_INFO("mux_tx_to_pdc_id", "PDC allocation algorithm - Bank: " + std::to_string(bank) +
-                                         ", Selected index: " + std::to_string(pick) + "(depth:" + std::to_string(q1) + ")" +
-                                         ", Final PDCID: " + std::to_string(pdcid));
-        return static_cast<int>(pdcid);
+        return -1;
     }
 
     uint16_t muxRx2PDCID(uint32_t src_addr, uint32_t dest_addr, uint16_t spdcid)
     {
-        LOG_INFO("mux_rx_to_pdc_id", "PDC allocation algorithm - input parameters: " + std::to_string(src_addr) +
-                                         ", " + std::to_string(dest_addr) +
-                                         ", " + std::to_string(spdcid));
-
-        // 1. Partition by destination address (banking)
-        uint32_t bank = hash_fa(dest_addr) & BANK_MASK;
-        spdcid *= 10;
-        // 2. Construct key and calculate hash once
-        uint64_t key = ((uint64_t)src_addr << JOBID_SHIFT) |
-                       ((uint64_t)dest_addr << DEST_FA_SHIFT) |
-                       ((uint64_t)spdcid << TC_SHIFT) |
-                       ((uint64_t)0 << DM_SHIFT); // deliverymode fixed as 0
-
-        uint16_t h1 = crc16_hash(key, CRC16_POLY1, HASH_SEED1);
-
-        // 3. Map to bank index (use mask, ensure PDCs_PER_BANK is power of 2)
-        uint32_t pick = h1 & (PDCs_PER_BANK - 1);
-
-        // 4. Check selected PDC's queue depth
-        uint8_t q1 = pdc_qdepth[bank][pick];
-        // 5. Check if queue depth exceeds limit
-        if (q1 >= MAX_PDC_QUEUE)
-        {
-            LOG_ERROR("mux_rx_to_pdc_id", "Selected PDC queue depth exceeds limit: " + std::to_string(q1));
-            return -1; // Queue depth out of range
+        const auto key = std::make_tuple(src_addr,dest_addr,spdcid);
+        auto found = rx_contexts_.find(key);
+        if (found != rx_contexts_.end() && pdc_list[found->second].is_open) return found->second;
+        const uint16_t capacity=targetCapacity();
+        if (!capacity) return UINT16_MAX;
+        const uint64_t hash_key = (uint64_t{src_addr}<<32) ^ dest_addr ^ (uint64_t{spdcid}<<16);
+        const uint16_t first = crc16_hash(hash_key,CRC16_POLY1,HASH_SEED1)%capacity;
+        for (uint16_t offset=0;offset<capacity;++offset) {
+            const uint16_t id = MAX_PDC+(first+offset)%capacity;
+            if (!pdc_list[id].is_open) {
+                for (auto old=rx_contexts_.begin();old!=rx_contexts_.end();)
+                    if (old->second==id) old=rx_contexts_.erase(old); else ++old;
+                rx_contexts_[key]=id; return id;
+            }
         }
-
-        // 6. Generate global PDCID
-        uint32_t pdcid = (bank << BANK_SHIFT) | pick;
-
-        // Verify PDCID range
-        if (pdcid >= MAX_PDC + MAX_PDC)
-        {
-            LOG_ERROR("mux_rx_to_pdc_id", "Generated PDCID out of range: " + std::to_string(pdcid));
-            return -1;
-        }
-
-        // Update selected PDC's queue depth counter (simplified version, should decrement after PDC processing completes)
-        pdc_qdepth[bank][pick]++;
-
-        LOG_INFO("mux_rx_to_pdc_id", "PDC allocation algorithm - Bank: " + std::to_string(bank) +
-                                         ", Selected index: " + std::to_string(pick) + "(depth:" + std::to_string(q1) + ")" +
-                                         ", Final PDCID: " + std::to_string(pdcid));
-        return static_cast<int>(pdcid + MAX_PDC);
+        return UINT16_MAX;
     }
 
     int selectPDC2Close()
@@ -940,7 +1178,7 @@ public:
         for (int i = 0; i < MAX_PDC; i++)
         {
 
-            if (pdc_list[i].is_open)
+            if (pdc_list[i].is_open && !IPDC_Processmanager.isConnectionClosing(i))
             {
                 if (i < MAX_PDC)
                 { // Prioritize closing IPDC?
@@ -984,16 +1222,25 @@ public:
             case PDC_TYPE::IPDC:
                 LOG_INFO("pdc_close", "Closing IPDC ID: " + std::to_string(pdc_id));
                 IPDC_Processmanager.stopIPDCProcess(pdc_id);
+                if (auto deferred=deferred_close_requests_.find(pdc_id);deferred!=deferred_close_requests_.end()) {
+                    for (auto& request:deferred->second) {
+                        const auto fields=UET::SES::semantic_request_fields(request.pkt);
+                        if (fields) quiesced_messages_.erase({fields->header.job_id,request.dst_fep,request.tc,request.mode,
+                            UET::SES::local_submission_message(request)});
+                        SES_tx_req_q.push(std::move(request));
+                    }
+                    deferred_close_requests_.erase(deferred);
+                }
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;
-                closing_cnt--;
+                if (closing_cnt > 0) --closing_cnt;
                 break;
             case PDC_TYPE::TPDC:
                 LOG_INFO("pdc_close", "Closing TPDC ID: " + std::to_string(pdc_id));
                 TPDC_Processmanager.stopTPDCProcess(pdc_id);
                 pdc_list[pdc_id].is_open = false;
                 open_cnt--;
-                closing_cnt--;
+                if (closing_cnt > 0) --closing_cnt;
                 break;
             default:
                 LOG_ERROR("pdc_close", "Unknown PDC type: " + std::to_string(pdc_id));
@@ -1025,7 +1272,7 @@ private:
      */
     PDC_TYPE getPDCType(int pdc_id)
     {
-        if (pdc_id <= MAX_PDC)
+        if (pdc_id < MAX_PDC)
         {
             return PDC_TYPE::IPDC;
         }

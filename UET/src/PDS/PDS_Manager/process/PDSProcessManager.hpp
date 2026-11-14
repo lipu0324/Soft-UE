@@ -75,10 +75,10 @@ public:
         std::condition_variable process_cv;                  // Condition variable
         std::chrono::steady_clock::time_point last_activity; // Last activity time
 
-        PDS_ProcessInfo() : pds_instance(std::make_unique<PDS_Manager>()),
+        explicit PDS_ProcessInfo(UET::Runtime::Services* runtime) : pds_instance(std::make_unique<PDS_Manager>(runtime)),
                             state(STOPPED),
                             should_stop(false),
-                            last_activity(std::chrono::steady_clock::now()) {}
+                            last_activity(runtime ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now()) {}
     };
     // Public queue references (for inter-module communication)
     ThreadSafeQueue<PDStoNET_pkt> *pds_to_net_queue = nullptr;
@@ -128,9 +128,58 @@ public:
     /**
      * @brief Constructor
      */
-    PDSProcessManager() : manager_running(false)
+    explicit PDSProcessManager(UET::Runtime::Services* runtime = nullptr) : manager_running(false), runtime_(runtime)
     {
         LOG_DEBUG(__FUNCTION__, "PDS process manager initialized");
+    }
+
+    // The initiator owns graceful close (§3.5.8.3). A target sends a Close
+    // Request CP; it cannot unilaterally perform the successful close handshake.
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (!pds_process_info) return false;
+        if (notification.identity.kind==UET::Runtime::TransmitKind::RudiRequest)
+            return pds_process_info->pds_instance->notifyRudiTransmit(notification);
+        if (notification.identity.local_pdc>=MAX_PDC*2) return false;
+        return notification.identity.local_pdc<MAX_PDC?
+            pds_process_info->pds_instance->IPDC_Processmanager.notifyTransmit(notification):
+            pds_process_info->pds_instance->TPDC_Processmanager.notifyTransmit(notification);
+    }
+    bool requestConnectionClose(uint16_t local_pdc_id) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (!pds_process_info || local_pdc_id>=MAX_PDC*2) return false;
+        return local_pdc_id<MAX_PDC?
+            pds_process_info->pds_instance->IPDC_Processmanager.sendCloseReq(local_pdc_id):
+            pds_process_info->pds_instance->TPDC_Processmanager.requestConnectionClose(local_pdc_id);
+    }
+    bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && pds_process_info->pds_instance->pushReturnData(original,data);
+    }
+    std::optional<uint32_t> submitRudi(const SES_PDS_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info?pds_process_info->pds_instance->submitRudi(request):std::optional<uint32_t>{};
+    }
+    bool activeRudiAttempt(const UET::Runtime::TransmitIdentity& identity) const {
+        return pds_process_info && pds_process_info->pds_instance->activeRudiAttempt(identity);
+    }
+    bool respondRudi(const PDC_SES_req& request,uint32_t local_fep,const SEStoPDS_pkt& response) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && pds_process_info->pds_instance->respondRudi(request,local_fep,response);
+    }
+    bool requestConnectionProbe(uint16_t local_pdc_id,uint32_t selective_base) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info && local_pdc_id<MAX_PDC &&
+            pds_process_info->pds_instance->IPDC_Processmanager.requestConnectionProbe(local_pdc_id,selective_base);
+    }
+    void cancelQueuedMessage(uint32_t peer,uint32_t job,uint16_t message_id) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        if (pds_process_info) pds_process_info->pds_instance->cancelQueuedMessage(peer,job,message_id);
+    }
+    uint16_t openWithControl(uint32_t local_node,uint32_t peer,uint32_t job,pdc_mode mode,bool negotiation,
+                             UET::PDS::PdcMappingIdentity identity={},uint8_t data_traffic_class=0) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        return pds_process_info?pds_process_info->pds_instance->openWithControl(local_node,peer,job,mode,negotiation,identity,data_traffic_class):UINT16_MAX;
     }
 
     /**
@@ -203,7 +252,7 @@ public:
         }
 
         // Create PDS process information
-        pds_process_info = std::make_unique<PDS_ProcessInfo>();
+        pds_process_info = std::make_unique<PDS_ProcessInfo>(runtime_);
 
         // Initialize PDS instance
         if (!pds_process_info->pds_instance->initPDSM())
@@ -218,11 +267,11 @@ public:
         manager_running.store(true);
         pds_process_info->state.store(RUNNING);
         // Start processing thread
-        pds_process_info->process_thread = std::make_unique<std::thread>(
+        if (!runtime_) pds_process_info->process_thread = std::make_unique<std::thread>(
             &PDSProcessManager::pdsProcessLoop, this);
 
         // Start monitoring thread
-        monitor_thread = std::make_unique<std::thread>(&PDSProcessManager::monitorLoop, this);
+        if (!runtime_) monitor_thread = std::make_unique<std::thread>(&PDSProcessManager::monitorLoop, this);
 
         LOG_DEBUG(__FUNCTION__, "PDS process manager started");
         // Get PDS running status
@@ -260,6 +309,7 @@ public:
         }
 
         LOG_DEBUG(__FUNCTION__, "PDS process manager stopped");
+        if (runtime_) pds_process_info.reset();
     }
 
     /**
@@ -316,10 +366,17 @@ public:
 
     // ==================== 队列交互接口 ====================
 
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        return pds_process_info && pds_process_info->state == RUNNING &&
+               pds_process_info->pds_instance->progressOne();
+    }
+
     // Configure the transport before start(). It must outlive this manager.
     // The PDS process loop drives progress automatically.
     void setNetworkChannel(UET::NetworkLayer::PacketChannel& channel)
     {
+        if (runtime_) throw std::logic_error("blocking legacy channels cannot attach to the event runtime");
         std::lock_guard<std::mutex> lock(manager_mutex);
         if (manager_running.load())
             throw std::logic_error("network channel must be configured before PDS start");
@@ -356,7 +413,7 @@ public:
 
         // Thread-safely add to request queue
         pds_process_info->pds_instance->SES_tx_req_q.push(req);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -374,7 +431,7 @@ public:
 
         // Thread-safely add to response queue
         pds_process_info->pds_instance->SES_tx_rsp_q.push(rsp);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -392,7 +449,7 @@ public:
 
         // Thread-safely add to network layer receive queue
         pds_process_info->pds_instance->Net_rx_pkt_q.push(pkt);
-        pds_process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -466,7 +523,17 @@ public:
             return false;
         }
 
-        return pds_process_info->pds_instance->PDCtoSES_req.pop(req);
+        auto& manager=*pds_process_info->pds_instance;
+        while (manager.PDCtoSES_req.pop(req)) {
+            if (!runtime_ || req.delivery_mode==UUD || req.delivery_mode==RUDI) return true;
+            // The PDC may have closed since enqueuing this upcall. Validate
+            // its execution while still below SES; a replacement Endpoint
+            // must not reserve memory for an already retired RX handle.
+            const bool live=req.PDCID<MAX_PDC?manager.IPDC_Processmanager.ownsReceiveExecution(req):
+                manager.TPDC_Processmanager.ownsReceiveExecution(req);
+            if (live) return true;
+        }
+        return false;
     }
 
     /**
@@ -476,6 +543,7 @@ public:
      */
     bool popSESResponse(PDC_SES_rsp &rsp)
     {
+        if (pds_process_info && pds_process_info->pds_instance->popRudiResult(rsp)) return true;
         if (!pds_process_info || pds_process_info->pds_instance->PDCtoSES_rsp.empty())
         {
             return false;
@@ -551,6 +619,7 @@ public:
     }
 
 private:
+    UET::Runtime::Services* runtime_ = nullptr;
     UET::NetworkLayer::PacketChannel* network_channel_ = nullptr;
 
     /**
@@ -585,7 +654,7 @@ private:
                     pds_process_info->pds_instance->progressNetwork(
                         std::chrono::milliseconds(10));
                 }
-                pds_process_info->last_activity = std::chrono::steady_clock::now();
+                if (!runtime_) pds_process_info->last_activity = std::chrono::steady_clock::now();
                 pds_process_info->state.store(RUNNING);
             }
             catch (const std::exception &e)

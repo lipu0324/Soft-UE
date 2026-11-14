@@ -1,0 +1,978 @@
+{
+  "schema_version": 1,
+  "specification": "UE 1.1 (2026-10-12)",
+  "specification_sha256": "4c8436ec7daa627ad6cce0680bea66cfac496dfe4e217631064e68acafe04531",
+  "softue_baseline": "4a4e6d874909720097b1ae20302a538a97116976",
+  "reference_baseline": "5b4e0491329b8e28764bca6847e2f6a0eaa84b9b",
+  "inventory_complete": false,
+  "profile_claims": {
+    "AI_BASE": false,
+    "AI_FULL": false,
+    "HPC": false,
+    "UNIFIED_LOCAL": false
+  },
+  "notes": [
+    "Initial reviewed feature inventory, not an exhaustive normative checklist.",
+    "A verified implementation task does not establish UE profile compliance.",
+    "Optional features must satisfy their applicable requirements when enabled."
+  ],
+  "requirements": [
+    {
+      "id": "SIM-TIME",
+      "reference": "M1 design",
+      "summary": "确定性纳秒事件、取消与对象销毁",
+      "status": "verified",
+      "tests": [
+        "runtime_test",
+        "realtime_late_progress_test"
+      ],
+      "profiles": [],
+      "evidence_note": "Virtual deadline/sequence ordering, cancellation and lifetime remain deterministic. Realtime callbacks follow a live injected elapsed clock; late manual progress no longer backdates retransmission timers. Deterministic pre-fix regressions observed10 timer firings and6 PDS requests in one late progress; corrected tests also cover work within callbacks, overdue immediate scheduling and future/backward clock rejection. See REALTIME-PROGRESS.md."
+    },
+    {
+      "id": "SIM-PDS",
+      "reference": "M1 design",
+      "summary": "现有 SES/PDS/IPDC/TPDC 在虚拟时间下运行",
+      "status": "verified",
+      "tests": [
+        "pds_simulation_test"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "SIM-SES-LIFETIME",
+      "reference": "M1 design; §3.5.13 Clear lifecycle",
+      "summary": "关闭SES对象后的Host消息身份与真实传输退休",
+      "status": "partial",
+      "tests": [
+        "retired_semantic_messages_test",
+        "endpoint_replacement_test",
+        "endpoint_close_tail_test",
+        "endpoint_close_tail_fault_test",
+        "semantic_response_lease_test",
+        "target_endpoint_replacement_test",
+        "synchronized_target_close_test",
+        "synchronized_target_close_boundary_test",
+        "receive_endpoint_replacement_test",
+        "retired_semantic_receives_test",
+        "inactive_semantic_adapter_test",
+        "receive_close_boundary_test",
+        "private_memory_key_replacement_test",
+        "memory_key_allocator_test",
+        "receive_handle_lifetime_test",
+        "receive_handle_boundary_test",
+        "stale_semantic_queue_test"
+      ],
+      "profiles": [],
+      "evidence_note": "A queued old RUD request could adopt a replacement Endpoint MID and make a delivered new WRITE time out. Host-owned cursor and retired lease tracking isolate source MIDs/local optimized cookies until real Clear/Close or datagram local completion; one active native Endpoint per Host is enforced before callback replacement. Seven normal CTests pass, including prior MID reuse, resource, RUDI and synchronization lifecycles. All seven ASan/UBSan/leak CTests also pass. The expanded14-case replacement fixture passes normal and sanitizer, including forced16bit cursor wrap and fully exhausted retained-ID namespace without PDC allocation. A separate negative probe reproduced an unterminated copied prefix on close. Existing producer MSG_ERROR tails now drain without more application reads; never-started messages are not retained, and stopped Host cleanup cannot resurrect leases.26 close scenarios and four tail/error-ACK loss scenarios pass normal and sanitizer alongside five prior lifecycle/streaming regressions. Two independent target probes then reproduced lost READ RX ownership and old reverse-token ACKs retiring new reads. Held READs now receive terminal errors at target close; a separate Host response cursor/retired namespace uses only target PDC facts, and old responses count toward receive credit.20 target replacement/wrap/credit/allocation scenarios plus source/target role, Job0 and PSN boundaries pass normal and sanitizer. Held complete/partial synchronized atomic RX handles now receive terminal errors without advancing the group; a pending synchronized WRITE notification is cancelled without answering its already-consumed RX handle or undoing placement. A shared-valid-MR negative probe reproduced old receive continuations being placed by new SES. Host-owned receive tombstones now return sticky errors and retire only on matching EOM Clear or Close; retained records count toward admission credits. Accepted PDS upcalls also terminate without a replacement, fresh reliable packets await a live adapter, cancelled reverse READ data drains without placement, and orphaned local semantic results are discarded. Target close now reports one Cancelled CQ for a matched receive or WRITE notification with a placed prefix, retains its actual length/header data, and terminates an unmatched ROD SEND final handle with zero placed bytes; unmatched RUD retains immediate NO_MATCH behavior. Replacement admission tests also cover one shared receive credit blocking a new Job/PDC until old EOM Clear. A real stale-key WRITE also reproduced private registry automatic RKEY reuse after Endpoint replacement. Host-shared provider allocation history now prevents that reuse, while registrations retain separate registry authority and external domains retain their own allocator.16 STD/MEDIUM RUD/ROD/NSCC/idempotent transactions pass the initial probe; independent normal/sanitizer allocator tests cover explicit keys, Job recreation, revocation and48-bit exhaustion. Two further negative probes reproduced identical-PSN READ executions sharing a truncated RX handle and stale upcalls surviving PDC ID reuse. Host-owned64-bit local receive execution IDs now remain unique across PDC incarnations, reject exhaustion before admission, and validate exact live RX ownership before queued delivery; three initial normal CTests cover12 execution/reuse/exhaustion scenarios. These are local C++ identities, not new wire fields. Full management generations and remaining cross-object combinations remain open; see RECEIVE-HANDLES.md; no complete M1 claim. See ENDPOINT-LIFETIME.md."
+    },
+    {
+      "id": "SIM-64",
+      "reference": "M1 design",
+      "summary": "64 端点运行与确定性输出",
+      "status": "verified",
+      "tests": [
+        "simulation_scenarios"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "WIRE-IP",
+      "reference": "§3.5.25",
+      "summary": "Ethernet/IPv4/IPv6/原生 UET/UDP 封装",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test",
+        "reference_wire_comparison",
+        "ses_reserved_fields_test",
+        "pds_reserved_fields_test",
+        "udp_encapsulation_test",
+        "network_defaults_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "IPv4/IPv6 native/UDP frames, full configurable native protocol range, entropy and reserved fields tested. Portable default is UDP/4793; native mode requires an explicit protocol number, including 0 and 17. UDP destination supports the full 16-bit range, wrong-port drops, trimming and MAC service-time stamps. UFH/TSS/tunnels and provider FI_ADDR_UET remain open."
+    },
+    {
+      "id": "WIRE-CRC",
+      "reference": "§3.5.26",
+      "summary": "CRC32C、网络序、UDP checksum 掩码、错误拒绝",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test",
+        "reference_wire_comparison",
+        "packet_trimming_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Network byte order, corruption, UDP checksum masking and the explicit trimmed-packet CRC exception tested; TSS/UFH cases remain open."
+    },
+    {
+      "id": "WIRE-SES",
+      "reference": "§3.4.3",
+      "summary": "标准请求与语义响应编码",
+      "status": "partial",
+      "tests": [
+        "uet_wire_test",
+        "optimized_header_test",
+        "optimized_admission_test",
+        "reference_wire_comparison",
+        "optimized_transaction_test",
+        "optimized_fault_test",
+        "optimized_safety_test",
+        "optimized_malformed_test",
+        "optimized_atomic_test",
+        "optimized_fetching_atomic_test",
+        "optimized_fetching_concurrency_test",
+        "optimized_read_test",
+        "optimized_read_concurrency_test",
+        "optimized_read_safety_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "STD plus scale-out SMALL20/MEDIUM32/dataSmall12 explicit wire layouts have120 golden carrier/IP/CRC/operation vectors. Native SMALL WRITE/READ/NOOP/integer atomic and MEDIUM WRITE/READ/NOOP/SEND/tagged/integer atomic now use PSN-based target identity and trusted local source submission metadata, wire response MID0, checked optimized MR index resolution, real PDS retries/default/Clear. Focused88 transaction+144 fault+62 authority/boundary+28 malformed/reader scenarios cover selected RUD/ROD and NSCC combinations; six admission/fence cases retain unsupported dataSmall boundary. 800 independent integer arithmetic/boundary/rejection cases cover non-fetching atomics. Selected optimized fetching/CAS returns DATA_SMALL with joint explicit ACK/original PSN binding, one-element result sizing and guaranteed cached replay.1664 new scalar/fault/zero cases plus standard fetching regression pass normal;40 concurrent scenes and sanitizer evidence pending. Selected optimized single-packet READ now uses DATA_SMALL in ACK or existing reverse PDC, with separate original/return PSNs and target-local response token.112 transaction and72 concurrency scenes plus first eight sanitizer regressions pass; subsequent63-case safety probe found a SMALL admitted-resource-generation mismatch, corrected with all four final normal regressions passing, including63 authority/registration/generation scenarios; final sanitizer regressions pending. Native optimized tagged/float atomic/Sync, provider format selection and full Profile acceptance remain open. Pinned parser explicitly rejects all three optimized formats; no optimized reference interoperability claim. See OPTIMIZED-HEADERS.md."
+    },
+    {
+      "id": "PDS-MAPPING",
+      "reference": "§3.5.8.1",
+      "summary": "PDC基础元组及Job/PID/资源索引组合配置",
+      "status": "partial",
+      "tests": [
+        "pdc_mapping_test",
+        "pds_allocation_test",
+        "simulation_scenarios",
+        "cms_traffic_class_test",
+        "native_traffic_class_test",
+        "multi_traffic_class_trimming_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Native host configuration supports independent RUD/ROD policies, the base FA/TC/mode tuple and all combinations of JobID, source PID, target PID and resource index. Source PID is local metadata, distinct from the SES matching rank. Full traffic-class groups, reserved resources and conditional SDI mapping remain open; see PDC-MAPPING.md. Multi-dataTC follow-up c725 FULL179normal133.78s/ASan690.55s passed with provider/referenceON; nativeOperation/PDC/CMS/NIC/DSCP isolation, finiteproducerfairness andperTCtrimming. NoProfileclaim; see CMS-TRAFFIC-CLASSES.md."
+    },
+    {
+      "id": "PDS-CONFIG",
+      "reference": "§3.5.5; Tables 3-35/3-36; §3.5.11.13",
+      "summary": "PDS配置范围、MPR编码与状态管理",
+      "status": "partial",
+      "tests": [
+        "psn_range_configuration_test",
+        "peer_sequence_window_test",
+        "syn_range_test",
+        "pds_mpr_test",
+        "pds_probe_test",
+        "retry_timing_test",
+        "udp_encapsulation_test",
+        "network_defaults_test",
+        "pds_invalid_type_test",
+        "read_ack_data_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Field audit in PDS-CONFIGURATION.md separates required ranges, optional/coalescing conditions and TSS/READ dependencies. Encoded Default_MPR, initial/receive PSN windows and local transmit cache are distinct. Full management/status, reserved pools and remaining conditional fields remain open."
+    },
+    {
+      "id": "PDS-ACK",
+      "reference": "§3.5.12",
+      "summary": "选择 ACK、累计 ACK、重复 ACK 与 PSN 回绕",
+      "status": "partial",
+      "tests": [
+        "pdc_ack_test",
+        "peer_sequence_window_test",
+        "pds_mpr_test",
+        "pds_reserved_fields_test",
+        "selective_acknowledgment_test",
+        "ordered_acknowledgment_test",
+        "psn_range_configuration_test",
+        "clear_processing_safety_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Selective/cumulative ACK cleanup, strict CACK semantic inference, SACK, idle Clear, peer MPR and asynchronous first ROD ACK order tested. READ/fetch response contracts, remaining control formats and optional coalescing remain open; see PDS-SACK.md and ROD-ACK-ORDER.md. Clear processing now ignores a frontier crossing an RX handle that has not produced any SES response; valid prefix and NO_RESPONSE Clear remain supported. Direct I/T RUD/ROD tests cover response/cache retirement and32-bit wrap. A buffered synchronized atomic stays incomplete until its action produces the real response. A valid Clear for an earlier READ data ACK is deferred across a current reexecution and applied after its real RX handle is consumed; four replay/wrap cases preserve ownership without losing the cleanup fact. See CLEAR-PROCESSING.md."
+    },
+    {
+      "id": "PDS-ROD",
+      "reference": "§3.5.21",
+      "summary": "ROD 建连、数据和语义响应",
+      "status": "partial",
+      "tests": [
+        "pds_recovery_test",
+        "pds_fault_test",
+        "pdc_lifecycle_test",
+        "pds_feedback_test",
+        "pds_probe_test",
+        "negative_acknowledgment_test",
+        "pds_reserved_fields_test",
+        "ordered_acknowledgment_test",
+        "pds_traffic_class_test",
+        "initial_sequence_test",
+        "syn_range_test",
+        "receive_admission_test",
+        "pds_invalid_type_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "GoBackN, EV/CE/RETX, Probe/Close, initial PSN/SYN bounds, SES admission, first asynchronous ACK order, held-cache query barriers, historical replay and non-trimmable request-class numbered controls tested. READ response ordering, TSS and complete control/error combinations remain open."
+    },
+    {
+      "id": "PDS-RTO",
+      "reference": "§3.5.15",
+      "summary": "数据/ACK 丢失恢复与有限重试",
+      "status": "partial",
+      "tests": [
+        "pds_fault_test",
+        "selective_acknowledgment_test",
+        "retry_timing_test",
+        "mac_timing_test",
+        "pds_probe_test",
+        "negative_acknowledgment_test",
+        "retry_limit_test",
+        "receive_admission_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Nanosecond RTO, configurable common retry limit 0..15 (15 infinite), wide attempt identities, separate NACK/timeout backoff, delayed retry deduplication/cancellation and MAC timers tested. New_Start_PSN and full READ/TSS/control matrices remain open; see RETRY-TIMING.md and NACK-RECOVERY.md."
+    },
+    {
+      "id": "PDS-RUD",
+      "reference": "§3.5.20",
+      "summary": "RUD 乱序窗口、重复消除及 SACK",
+      "status": "partial",
+      "tests": [
+        "pds_recovery_test",
+        "rud_window_test",
+        "selective_acknowledgment_test",
+        "pds_feedback_test",
+        "pds_probe_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Per-packet SACK, strict CACK default inference, response queries, guaranteed-error recovery, Probe bitmap/window recovery and wrap tested; optional coalescing and full lifecycle/error combinations remain open."
+    },
+    {
+      "id": "PDS-UUD",
+      "reference": "§3.5.7.5",
+      "summary": "无连接 UUD 单包发送与本地完成",
+      "status": "partial",
+      "tests": [
+        "uud_delivery_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Single-packet local completion, loss without retry, missing receive and no PDC allocation tested."
+    },
+    {
+      "id": "PDS-CLOSE",
+      "reference": "§3.5.8; §3.5.16",
+      "summary": "完整 Clear/Close、资源复用与迟到报文",
+      "status": "partial",
+      "tests": [
+        "pdc_lifecycle_test",
+        "pds_recovery_test",
+        "context_reuse_test",
+        "resource_lifecycle_test",
+        "control_ack_test",
+        "target_close_test",
+        "initial_sequence_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Normal/lossy initiator close, target Close Request with plain ACK, same-PSN retries, idempotent requests, silent-initiator retry exhaustion, required Close Command CP_ACK and context reuse are tested for ROD/RUD. Full control/negotiation/expected-start and wrap matrix remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable. Idle Clear after default ACKs now releases state without an additional application request; queued requests piggyback instead."
+    },
+    {
+      "id": "PDS-TRIM",
+      "reference": "§3.5.15.1; §4.1",
+      "summary": "trimming 检测及 NACK 恢复",
+      "status": "partial",
+      "tests": [
+        "packet_trimming_test",
+        "multi_traffic_class_trimming_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Plain IPv4/IPv6/native/UDP switch trimming, unchanged UDP fields, bounds-only restricted parsing, no PDC creation/SES placement from a trimmed header, normal/last-hop NACK and RUD/ROD recovery tested. Additional loss/resource combinations and TSS/other modes remain open. Multi-dataTC trimming54a1e64 verified in16-scoped virtual tests normal1.81s/ASan15.89s, actualDSCP queue reconstruction, ambiguousrolesrejected, retainedTFC16byteheader. Notfull179. Completec725179/179normal133.78s andASan/UBSan/leaks690.55s confirmswholeintegration includingperTCtrimandretained16Bcreditrequest; RCCCnotincluded."
+    },
+    {
+      "id": "SES-JOB",
+      "reference": "§3.3.3; §3.4.2.4",
+      "summary": "JobID 和 MR/PID 作用域授权",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test",
+        "endpoint_test",
+        "addressing_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "SES-MR",
+      "reference": "§2.2.5.3; §3.4.2.3",
+      "summary": "内存键、访问权限、边界与撤销",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test",
+        "addressing_test",
+        "realtime_endpoint_processes",
+        "local_placement_scope_test",
+        "libfabric_local_registration_test",
+        "rendezvous_source_scope_test",
+        "private_memory_key_replacement_test",
+        "memory_key_allocator_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Local-placement-only registrations distinguish trusted postings/returned-result authority from incoming RMA key access. Both relative/absolute RMA are denied even with known key and R/W/Atomic rights; exact local identity, bounds, revocation and namespace checks remain. Native SEND/UUD, both READ carriers and cached atomic results still place correctly. Public fi_recv regression reproduced an unauthorized byte99 write with the pre-fix provider binary and now rejects it while delivering posted SEND. Full MR key classes, advanced authorization and profile acceptance remain open; see LOCAL-PLACEMENT.md. Host-scoped provider automatic key allocation now survives native private-registry replacement; external domains and explicit application keys retain independent registry authority. Initial16 native transactions and standalone normal/sanitizer allocator boundaries pass; full version evidence and management restart epochs remain separate. See ENDPOINT-LIFETIME.md."
+    },
+    {
+      "id": "SES-WRITE",
+      "reference": "Table 3-1; §3.4.4",
+      "summary": "多包 WRITE 的真实内存效果及语义完成",
+      "status": "partial",
+      "tests": [
+        "endpoint_test",
+        "streaming_payload_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native streamed WRITE of 4294967295 bytes completes through 524288 original PDS/fabric fragments with verified markers, cleared bytes and retirement; producer queue <=8, ordered receive intervals <=1, sparse pages <=3. Default CTest covers 8 MiB and loss. Full Profile and other operation size guarantees remain open."
+    },
+    {
+      "id": "SES-SEND",
+      "reference": "Table 3-1; §3.4.4",
+      "summary": "预投递缓冲区 SEND 与 NO_OP",
+      "status": "partial",
+      "tests": [
+        "endpoint_test",
+        "send_header_data_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ]
+    },
+    {
+      "id": "SES-IMM",
+      "reference": "Table 3-1; §3.4.2.9",
+      "summary": "WRITE IMM 及 SEND/DGRAM 的远端完成数据",
+      "status": "partial",
+      "tests": [
+        "native_atomic_test",
+        "send_header_data_test",
+        "libfabric_provider_processes",
+        "libfabric_datagram_processes"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "WRITE data creates a standalone RMA completion; SEND/DGRAM data retains the matching receive context and consumes one posting. Zero/max data, late posting and IE tested; complete profile/address/error combinations remain open."
+    },
+    {
+      "id": "SES-ATOMIC",
+      "reference": "Table 3-1; §3.4.2.5",
+      "summary": "线上的非取回原子操作",
+      "status": "partial",
+      "tests": [
+        "native_atomic_test",
+        "zero_atomic_test",
+        "libfabric_atomic_return_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Signed/unsigned integer widths 8/16/32/64, non-fetching arithmetic/logical/bitwise/write; zero-byte PUT passes normal authority/alignment/bounds and target completion without a memory write. Fetch/CAS now have separate SES-FETCH evidence. FP and complete semantic-control coverage remain open."
+    },
+    {
+      "id": "SES-SIZE",
+      "reference": "Table 3-1",
+      "summary": "Profile 规定的消息大小及流式接口",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "API-FABRIC",
+      "reference": "§2.2",
+      "summary": "真实 libfabric 2.0 provider",
+      "status": "partial",
+      "tests": [
+        "libfabric_provider_processes",
+        "libfabric_datagram_processes",
+        "libfabric_mode_selection_test",
+        "libfabric_unordered_recovery_processes",
+        "libfabric_inject_test",
+        "libfabric_event_queue_test",
+        "libfabric_directed_receive_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Experimental libfabric 2.0 maps FI_MSG, SEND/DGRAM CQ data, WRITE/WRITE IMM, integer atomics and recovery through the common kernel; standard UET addresses/auth and remaining flags/profile acceptance remain open. Public API tests now verify independent SEND/RW mode selection, mixed-mode FIFO, any-JobID MR registration and both explicit ROD and RUD late-receive recovery. Standard UET addressing and full authorization configuration remain incomplete. Injection API/flags use bounded owned copies and preserve success/error CQ rules through semantic retries; RDM completion thresholds use the explicitly stronger globally-observable point; DGRAM thresholds use local transmit acceptance. Basic nonblocking EQ FIFO/binding is tested; standard UET addressing, full authorization and asynchronous control production remain incomplete. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
+    },
+    {
+      "id": "CMS-NSCC",
+      "reference": "§3.3.7; §3.6.13",
+      "summary": "NSCC 准入、窗口与反馈闭环",
+      "status": "partial",
+      "tests": [
+        "nscc_test",
+        "nscc_integration_test",
+        "fabric_congestion_test",
+        "uet_wire_test",
+        "packet_trimming_test",
+        "mac_timing_test",
+        "simulation_scenarios",
+        "nscc_lifecycle_test",
+        "cms_traffic_class_test",
+        "native_traffic_class_test",
+        "multi_traffic_class_trimming_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Original PDS admission/retries, signed ACK byte clock, NSCC law, plaintext trimming, Probe feedback and MAC timestamps implemented. Deterministic incast, multiple flows, CE/trim, asymmetric ECMP and temporary-outage scenarios now export actual per-hop bytes and completion metrics. Full normative/control/fault acceptance remains open; see NSCC.md and NETWORK-EXPERIMENTS.md. Explicit CCC binding now occurs at source PDC allocation and target SYN establishment; control-only lifecycle, failed SYN, PDC capacity refusal, RUD sharing, ROD isolation and teardown tested. Complete TC/reserved-pool resource mapping remains open; see NSCC-LIFECYCLE.md. CMS-only follow-up593e721 passes standaloneCMake/CTestprobe normal0.03s ASan/UBSan/leaks0.04s (newEngine.cpp/test+unchanged6f message library; notfull177). CMS Connection and NSCC/TFC group keys now include outgoing data TC, with direct-CMS window/credit isolation tests. Host/PDC/NIC/DSCP TC propagation remains open, TFC Host stillTC0; no end-to-end multi-TC claim. See CMS-TRAFFIC-CLASSES.md. Pending original-path increment: Native Operation TC -> SES request/PDC mapping -> immutablePDC/CCC/NIC DSCP; local receive handoff retainsPDCoutgoingTC for reverseREAD. New16dual-flow+4reverseREAD+configuration boundary scenes uncompiled. NonzeroRUDI/UUD and multiTC+legacytrimming explicitlyfenced. Wait6f full176ASan before compiling; no broaderProfile claim. Multi-dataTC follow-up c725 FULL179normal133.78s/ASan690.55s passed with provider/referenceON; nativeOperation/PDC/CMS/NIC/DSCP isolation, finiteproducerfairness andperTCtrimming. NoProfileclaim; see CMS-TRAFFIC-CLASSES.md."
+    },
+    {
+      "id": "NET-BASE",
+      "reference": "§1.5; M4 design",
+      "summary": "串行化、队列、丢包、链路故障及 ECMP 行为",
+      "status": "partial",
+      "tests": [
+        "fabric_test",
+        "simulation_scenarios",
+        "fabric_congestion_test",
+        "packet_trimming_test",
+        "mac_timing_test"
+      ],
+      "profiles": [],
+      "evidence_note": "Independent TC queues, byte-deficit round robin, dequeue ECN, true trimming, first-bit timing, serialized random loss and link generations tested. YAML config, per-hop PCAP/index and incast/competition/asymmetric/outage examples implemented. Full M4/Profile acceptance remains open; see NETWORK-EXPERIMENTS.md."
+    },
+    {
+      "id": "SES-READ",
+      "reference": "Table 3-1",
+      "summary": "多包 READ 与数据响应",
+      "status": "partial",
+      "tests": [
+        "read_ack_data_test",
+        "return_data_transport_test",
+        "native_read_test",
+        "read_early_acceptance_test",
+        "read_large_ack_test",
+        "streaming_read_test",
+        "libfabric_read_test",
+        "reference_process_interop"
+      ],
+      "profiles": [
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native RUD/ROD fragmented READ up to 32-bit message length with both reverse-request and large-ACK-threshold multi-packet carriers, exact registered result authority, per-fragment reauthorization, bounded target packet credits/response tokens and coalesced placement. ACK-data re-execution and same-PDC return data tested with loss, ordering, revocation, cancellation, context-pressure rollback and token-direction isolation. Independent early-ACKing SES policy is tested with per-operation source result windows, partial READ MID retirement through graceful connection close, pre-transmit cancellation and unassigned-PDC rejection. Public fi_read/readv/readmsg with private registered local placement, RAW/WAR FIFO ordering, both result-carrier loss paths and CQ/error validation are tested, including independent provider processes. A standard ACK-data READ interoperates with the unchanged pinned reference SES/PDS. Four clean-source 4GiB-1 native READ runs (both carriers, NSCC off/on) actually placed and verified all 4294967295 bytes in 524288 fragments, with producer/result/target packet peaks8, one coverage interval and three sparse pages per end; see READ-BOUNDARY.md. Optimized headers, TSS and RODL remain open; see READ.md."
+    },
+    {
+      "id": "SES-TAG",
+      "reference": "Tables 3-1 to 3-4",
+      "summary": "精确/通配 tag 与队列匹配",
+      "status": "partial",
+      "tests": [
+        "tagged_message_test",
+        "reference_process_interop",
+        "libfabric_tagged_test",
+        "libfabric_provider_processes",
+        "libfabric_directed_receive_test"
+      ],
+      "profiles": [
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Native standard-header opcode0x09 supports full64bit exact/ignore-bit tags and optional32bit Job-level rank, one FIFO among all matching postings, independent Tagged generations and SEND/RMA isolation. RUD/ROD and NSCC tests cover late/unexpected/no-match, zero/truncation, authority snapshots/key reuse, duplicate/lost ACK/reordered SOM, tag changes, and drain. Pinned unchanged reference SES/PDS exchanges exact64bit tagged messages in both directions and checks tagged CQ fields; its API explicitly rejects wildcard tags. Public scalar/vector/msg tagged APIs, inject/data, full tag CQ/error fields and per-space generation recovery are implemented; private automatic tagged receive MRs reject known-key remote WRITE. Public two-provider processes exchange exact64bit tagged messages in both directions. Optimized headers, rendezvous, multi-receive, tagged atomics, TSS and RODL remain open. See TAGGED-MESSAGES.md. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
+    },
+    {
+      "id": "SES-DEFER",
+      "reference": "Table 3-1",
+      "summary": "deferrable send 与 restart",
+      "status": "partial",
+      "tests": [
+        "send_header_data_test",
+        "tagged_message_test",
+        "deferrable_transaction_test",
+        "deferrable_restart_test",
+        "deferrable_fault_test",
+        "deferrable_boundary_test"
+      ],
+      "profiles": [
+        "AI_FULL"
+      ],
+      "evidence_note": "Native deferrable SEND0x08/TSEND0x0b sources use FEP-scoped unique tokens, one transaction ID/deadline across fresh-MID backoff/restarts, checked RTR identity/ranges and lazy suffix slices. Optional bounded target header capture J=0 reserves exact posted registration with nonzero target token and sends real RUD RTR through original PDS. Both source zero-token re-deferral/J>0 and early/duplicate/invalid RTR are tested with an independent real-PDS SES peer. Native matrices cover zero/MTU/multifragment, NSCC, targeted packet faults, cancellation/deadline/close, revoked/reused MR, truncation, header exhaustion/FIFO, reader failure, PDC lifecycle, token exhaustion/Endpoint replacement and bounded concurrency. Default target retains as-SEND compatibility. Full Profile review, Sync Groups/cross-backoff ordering, TSS and pinned-reference actual RTR interoperability remain open. See DEFERRABLE-TRANSACTIONS.md; feature tests do not claim M5 or Profile completion."
+    },
+    {
+      "id": "SES-RNDV",
+      "reference": "Table 3-1",
+      "summary": "rendezvous 与 unexpected 消息",
+      "status": "partial",
+      "tests": [
+        "rendezvous_header_test",
+        "rendezvous_source_test",
+        "rendezvous_transaction_test",
+        "rendezvous_target_eager_test",
+        "rendezvous_fault_test",
+        "rendezvous_isolation_test",
+        "rendezvous_boundary_test",
+        "rendezvous_lifecycle_test",
+        "rendezvous_malformed_test",
+        "rendezvous_addressing_test",
+        "rendezvous_source_scope_test",
+        "rendezvous_truncation_test",
+        "libfabric_rendezvous_test",
+        "libfabric_rendezvous_disabled_test",
+        "libfabric_rendezvous_threshold_test",
+        "libfabric_rendezvous_recovery_processes",
+        "libfabric_rendezvous_unordered_recovery_processes"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native registered-buffer rendezvous SEND/TSEND now connects standard24-byte extensions, bounded eager acceptance/header capture, real RUD READ with both carriers, exact source/result MR identity and independent eager/READ completion. Source completion waits for real READ payload ACK/Clear and union coverage; target completion waits for actual placement and eager SOM/EOM/wire holes. Independent source oracle, native expected/late/NSCC matrices, packet faults, cancellation/deadlines/close, MR revoke/reuse, Job/FEP/rank/read-only alias isolation, absolute AnyJob authority, resource pressure/shared FIFO, malformed fields/results and mapped addressing/generation retries are covered. The4GiB-1 logical descriptor/last-byte test is not a full rendezvous transfer. Public RDM SEND/tagged scalar/vector/message/data forms select native rendezvous at a configurable threshold with private source-only registrations, keeping ordinary SEND recovery separately tested. Public expected/late/wildcard, CQ data, bidirectional truncation, revoked alias probes, two-process global deadline and independent RMA continuation are covered. Truncation errors retain SOM CQ data or defer one bounded CQ until delayed SOM/Close. Optimized headers, complete Sync Group/TSS/Profile acceptance and full large rendezvous experiments remain open. See RENDEZVOUS.md."
+    },
+    {
+      "id": "SES-FETCH",
+      "reference": "Table 3-1",
+      "summary": "取回原子操作、CAS、数据类型与异常",
+      "status": "partial",
+      "tests": [
+        "fetching_atomic_value_test",
+        "native_fetching_atomic_test",
+        "reference_process_interop",
+        "libfabric_atomic_return_test",
+        "libfabric_provider_processes",
+        "zero_atomic_test"
+      ],
+      "profiles": [
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native RUD/ROD one-element fetching atomics and CAS for8/16/32/64/128bit signed/unsigned integers,32B padded dual operands and up to16B returned old values. PDS caches guaranteed results until Clear independently of READ threshold; DEFAULT/CACK cannot replace result data. Tested with NSCC, loss/duplicates, remote modification/revocation after execution, local result revocation and key reuse, remote authority/bounds errors, malformed data ACK/default, and nonzero admitted resource generations. Unchanged pinned reference SES/PDS independently serves64bit fetching SUM and CAS. Public libfabric scalar/vector/message fetching and compare APIs support a single8–128bit integer element; all queries, masked-swap translation, result CQ fields, bad-generation retries with preserved nonzero generation, cached-loss recovery and independent provider processes are tested. Optimized/other datatypes, tagged atomics, RUDI, TSS and RODL remain open; see FETCHING-ATOMICS.md. Zero-byte atomic put/get (§3.4.2.12) use normal MR checks and completion; GET performs one actual zero read, with an empty guaranteed data ACK cached through loss and local snapshot revocation/key reuse checked. See ZERO-ATOMIC.md."
+    },
+    {
+      "id": "SES-SYNC",
+      "reference": "§3.4; §3.5.8.2",
+      "summary": "Sync Group 状态与完成动作",
+      "status": "partial",
+      "tests": [
+        "synchronized_header_test",
+        "synchronization_state_test",
+        "synchronization_admission_test",
+        "synchronized_transaction_test",
+        "synchronized_target_test",
+        "synchronized_fault_test",
+        "synchronized_lifecycle_test",
+        "synchronized_validation_test",
+        "reference_process_interop",
+        "clear_processing_safety_test",
+        "synchronized_target_close_test",
+        "synchronized_target_close_boundary_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native standard SYNC_WRITE/SYNC_ATOMIC groups use trusted Endpoint handles, FEP-persistent wire allocation, distinct logical IDs/MIDs, bounded source/target members and injected deadlines. WRITE payload places normally; target notifications and checked <=8B integer atomic actions wait for processed members including failed writes. Completing atomic registration is pinned and reauthorized; original PDS owns retained final handles, recovery and Clear. Native atomic transmission waits for other members to acknowledge to avoid finite-window deadlock. Tests cover RUD/ROD/NSCC, independent-PDS atomic-first/cross-context target barriers, count/job/completer/excess errors while collecting, MR revoke/key reuse, packet faults, fresh-MID generation recovery, dedicated0x1B resource NACK, lost-Clear legal reuse, cancellation/expiry/FEP ID boundaries, source limits, integer types/zero-byte and window progress. Pinned reference receives a three-member synchronized SUM group, sends a legal one-member completing WRITE, and observes expected CPU-coherent atomic rejection. Reference queued non-completing WRITE count differs from UE1.1, so no positive multi-member reference-source claim. Optimized forms, floating/complex/semantic-control/security, complete management and post-action early-extra versus legal-reuse classification remain open. Native feature flags are not Profile claims; see SYNCHRONIZED-TRANSACTIONS.md. Clear processing now ignores a frontier crossing an RX handle that has not produced any SES response; valid prefix and NO_RESPONSE Clear remain supported. Direct I/T RUD/ROD tests cover response/cache retirement and32-bit wrap. A buffered synchronized atomic stays incomplete until its action produces the real response. A valid Clear for an earlier READ data ACK is deferred across a current reexecution and applied after its real RX handle is consumed; four replay/wrap cases preserve ownership without losing the cleanup fact. See CLEAR-PROCESSING.md."
+    },
+    {
+      "id": "PDS-RUDI",
+      "reference": "§3.5.23",
+      "summary": "RUDI 无连接、逐包响应与幂等限制",
+      "status": "partial",
+      "tests": [
+        "rudi_header_test",
+        "rudi_initiator_test",
+        "rudi_transaction_test",
+        "rudi_safety_test",
+        "rudi_lifecycle_test",
+        "reference_wire_comparison",
+        "reference_process_interop"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native standard-header idempotent-safe RMA WRITE/READ uses the original PDS manager with source-only packet recovery, FEP-persistent nonwrapping32-bit IDs, NIC-boundary RTO, NACK/trim replay, bounded producer/packet/result state and one application completion. The target validates Job/PID/RI/generation/MR/span independently for each packet, retains no message/PDC/response state, creates no target CQ, and preserves private-placement/rendezvous authority. READ results pin their original registration; cancellation, deadline, retry exhaustion, backpressure, replacement and ID boundaries are tested. Table3-86 distinguishes WRITE control responses from trimmable READ data, without UET-CC credit.288 independent header vectors and48 pinned-parser fixtures remain. Pinned reference receives a multi-packet RUDI WRITE and serves two independent single-request READs; its continuation payload_length interpretation differs from the current no-payload READ policy, so no multi-packet reference READ claim. TSS, full management/configuration, public provider selection and complete HPC acceptance remain open. Native feature flags are not Profile claims; see RUDI.md."
+    },
+    {
+      "id": "CMS-RCCC",
+      "reference": "§3.6.14",
+      "summary": "RCCC 接收端信用算法",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "CMS-TFC",
+      "reference": "§3.6.15",
+      "summary": "TFC 信用与重传规则",
+      "status": "partial",
+      "tests": [
+        "tfc_credit_test",
+        "tfc_destination_credit_test",
+        "credit_header_test",
+        "credit_admission_test",
+        "tfc_context_test",
+        "tfc_integration_test",
+        "tfc_bidirectional_test",
+        "tfc_receive_pressure_test",
+        "cms_traffic_class_test",
+        "native_traffic_class_test",
+        "multi_traffic_class_trimming_test"
+      ],
+      "profiles": [],
+      "evidence_note": "Experimental TfcEngine connects original PDS posting/admission/semantic handoff, per-CCC/global buffer reservation, shared RUD/private ROD IDs, Credit ACK or CP alongside NSCC, and injected RTO credit-loss recovery. Configured reliableRUD/ROD dataTC propagates NativeOperation->PDCmapping/immutableCCC/NIC/DSCP, with reverseREAD leaseidentity, fair finiteproducerwindow, error-tailreuse and perTCtrimming. Frozen c725d0225a5047ee6a34502a2fc1725f1b464c37 FULL179/179normal133.78s and179/179ASan/UBSan/leaks690.55s pass, provider/referenceON, allcompilers/archivesstopped, sequential-j1. Prior67ae310normal178/179legacyTC1admissionfailure retained; c725limitsDSCPconfigurationguardtoUet11 andaddslegacyTC0/1/7determinism+invalid8regressions. Earlier afaca176TC0proof and54a16scopedproof retained separately. Full179 excludesindependentRCCC branch. Host sharedPayloadMTU/cell-overheadoutofband; nonzeroRUDI/UUD Unsupported. Unitshift/READYtimer contradictions andformalreview remain; no completeTFC/M5/Profileclaim. See TRANSPORT-FLOW-CONTROL.md and CMS-TRAFFIC-CLASSES.md."
+    },
+    {
+      "id": "NET-CSIG",
+      "reference": "§4.2",
+      "summary": "CSIG 编码、交换机信号与反馈",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "TSS-CORE",
+      "reference": "§3.7",
+      "summary": "安全域、KDF、AES-GCM、计数器与轮换",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "TSS-REPLAY",
+      "reference": "§3.5.8.2.1; §3.7.9–10",
+      "summary": "安全建连、重放与 epoch 拒绝",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-LLR",
+      "reference": "§5.1",
+      "summary": "LLR 协议与链路重试行为",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-CBFC",
+      "reference": "§5.2",
+      "summary": "CBFC/PFC 信用、停顿及恢复",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "LINK-NEG",
+      "reference": "§5.3",
+      "summary": "LLDP 能力协商与不匹配处理",
+      "status": "missing",
+      "tests": [],
+      "profiles": []
+    },
+    {
+      "id": "PHY-MODEL",
+      "reference": "§6; M7 design",
+      "summary": "速率/延迟、误码、FEC 延迟与统计抽象",
+      "status": "partial",
+      "tests": [
+        "fabric_test"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "MGMT-MODEL",
+      "reference": "§7; M7 design",
+      "summary": "能力、安全域、JobID 与设备统计管理",
+      "status": "partial",
+      "tests": [
+        "memory_registry_test",
+        "simulation_scenarios"
+      ],
+      "profiles": []
+    },
+    {
+      "id": "LOCAL-RODL",
+      "reference": "§3.5.22",
+      "summary": "RODL 双向 PDC、累计确认与错误模型",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "LOCAL-SES",
+      "reference": "§3.4.3.5",
+      "summary": "局部事务头、打包及直接寻址",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "LOCAL-UFH",
+      "reference": "§5.4; §3.7.11",
+      "summary": "UFH_16/32、CRC 与 TSS 路径",
+      "status": "missing",
+      "tests": [],
+      "profiles": [
+        "UNIFIED_LOCAL"
+      ]
+    },
+    {
+      "id": "UEC-INTEROP",
+      "reference": "M2 acceptance",
+      "summary": "官方实现的进程级标准报文互通",
+      "status": "partial",
+      "tests": [
+        "reference_process_interop"
+      ],
+      "profiles": [],
+      "evidence_note": "Independent processes use unchanged pinned reference SES/PDS and a test-only UDP-frame NIC adapter: WRITE/SEND, uint64 SUM and return SEND, completions and Clear retirement pass. Raw-NIC/veth tests and additional operation/encapsulation/fault combinations remain open."
+    },
+    {
+      "id": "SES-ADDRESS",
+      "reference": "§3.4.2.3.6–7; §3.4.4.2",
+      "summary": "相对/绝对 PID、独立资源索引、generation 与任意 JobID MR 授权",
+      "status": "partial",
+      "tests": [
+        "addressing_test",
+        "libfabric_directed_receive_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC",
+        "UNIFIED_LOCAL"
+      ],
+      "evidence_note": "Native address selection and scope checks pass; selected SMALL optimized index scope is checked; Unified Local formats and remaining key classes remain open. Native SEND/UUD and tagged source criteria use Job-scoped32bit ranks. Public FI_DIRECTED_RECV is opt-in through global/rx hints for RDM SEND/tagged and DGRAM UUD, with two-peer FIFO/source tests, invalid AV rejection, and ignored src_addr when capability is not requested; see DIRECTED-RECEIVE.md."
+    },
+    {
+      "id": "SES-RETIREMENT",
+      "reference": "§3.4.6; §3.5.8",
+      "summary": "消息完成、PSN 关联和协议驱动的消息 ID 退休",
+      "status": "partial",
+      "tests": [
+        "message_completion_test",
+        "message_retirement_test",
+        "context_reuse_test",
+        "receive_eom_retirement_test",
+        "receive_end_marker_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "66000 exactly-once integer operations cross the 16-bit message-ID space; EOM-scoped default responses, explicit full-length RUD completion and error-path ID leases are checked independently. A delayed RUD SOM fills the last hole after EOM; real partial Clear CPs must retain WRITE/SEND/tagged message state until the actual EOM PSN is cleared. The baseline premature-retirement failure and three-path fix are recorded in RECEIVE-EOM-RETIREMENT.md. Complete byte coverage does not generate receive success before EOM; full/zero payload followed by an independent zero EOM is covered in RUD/ROD WRITE IMM/SEND/tagged and late ROD posting. Zero markers do not form byte intervals; end_of_message_psn names the actual marker. See RECEIVE-END-MARKER.md. Successful EXPECTED results retain DEFAULT through EOM with independent required-delivery/Clear, while tracked unexpected payload retains OVERFLOW/RESPONSE and guaranteed delivery after late placement. Sixteen direct PDS cases verify consistent opcode/list and real REQ_CLEAR; error first-guarantee/best-effort repeats remain covered. See SEMANTIC-RESULTS.md."
+    },
+    {
+      "id": "SES-FIRST-ERROR",
+      "reference": "§3.4.4.3; §3.4.6.1; §3.4.6.4.1",
+      "summary": "整条消息保留首错；IE/MSG_ERROR 不访问内存，终止尾部并保留错误完成数据",
+      "status": "partial",
+      "tests": [
+        "semantic_error_test",
+        "libfabric_provider_processes",
+        "guaranteed_error_test",
+        "receive_admission_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Late fragments cannot consume new postings; bounded failure-state exhaustion, IE, MSG_ERROR before SOM in RUD, error CQ header data, local reader exceptions, no reads after error and zero-placement SEND truncation tested. Informational error precedence, complete recovery/generation handling and other header formats remain open. Tracked messages guarantee only the first encountered error; repeated explicit errors are best effort, with cached replay/response-query and next-request Clear tested. Standard requests now reserve bounded message records before PDS receipt; exhaustion produces resource NACKs, with rollback, no premature PDC/SACK and recovery tested. Retransmissions refresh Clear to release older records. Successful EXPECTED results retain DEFAULT through EOM with independent required-delivery/Clear, while tracked unexpected payload retains OVERFLOW/RESPONSE and guaranteed delivery after late placement. Sixteen direct PDS cases verify consistent opcode/list and real REQ_CLEAR; error first-guarantee/best-effort repeats remain covered. See SEMANTIC-RESULTS.md."
+    },
+    {
+      "id": "PDS-CONTROL-OPEN",
+      "reference": "§3.5.16.1; §3.5.16.2; §3.5.16.7",
+      "summary": "NOOP/NO_NEG 控制包建连、独立 PSN、ACK Request 处理状态",
+      "status": "partial",
+      "tests": [
+        "control_establishment_test",
+        "uet_wire_test",
+        "initial_sequence_test",
+        "syn_range_test",
+        "receive_admission_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "ROD/RUD control-only opening followed by checked WRITE, SYN/ACK loss and safety delay, 32-byte NO_NEG, unsupported on-off negotiation plain ACK, invalid SYN CP rejection and ACK-request processing/cache/missing/below-Clear/wrap states are exercised. Negotiated features, Probe/Credit/PCM and extended ACK variants remain open. Plaintext source Start_PSN uses an injected PRNG and >=2^16 local-ID epoch separation; target startup avoids an invalid retired-peer sequence floor (INITIAL-SEQUENCES.md). TSS start negotiation remains unavailable. Established data/control SYNs enforce the initial MP_RANGE boundary, including equality, wrap and ROD gap precedence. Initial RUD window refusal allocates no PDC; the first ROD gap retains a PDC and requests Start_PSN before established-SYN checks."
+    },
+    {
+      "id": "SES-UNEXPECTED-RECOVERY",
+      "reference": "§3.4.4.7; §3.4.6.2–3",
+      "summary": "有界 ROD unexpected 缓冲、资源代次恢复及最早消息的受限软件重试",
+      "status": "partial",
+      "tests": [
+        "unexpected_message_test",
+        "libfabric_recovery_processes"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Late/partial receive posting, ordered placement, zero-placement truncation, disabled-generation responses and re-enable, stale generation, SEND/RMA isolation, RUD no-match/manual retry, transport-retirement query and partial receive error on PDC failure are checked. Public API processes cover delayed receive, hidden intermediate errors, bounded retry failure and subsequent RMA. Full MR key classes, ordered/API acceptance and cross-peer recovery matrices remain open."
+    },
+    {
+      "id": "SES-MEMORY-KEY-FORMAT",
+      "reference": "§2.2.5.3.4.1; Table 2-13; Table 2-17",
+      "summary": "完整 48 位 RKEY、64 位元数据、含零值的命名空间与独立撤销身份",
+      "status": "partial",
+      "tests": [
+        "memory_key_test",
+        "memory_registry_test",
+        "addressing_test",
+        "libfabric_provider_processes",
+        "optimized_safety_test",
+        "private_memory_key_replacement_test",
+        "memory_key_allocator_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "AI_FULL",
+        "HPC"
+      ],
+      "evidence_note": "Native non-optimized application keys cover full 48-bit range, zero Job/PID/key/index and distinct relative Job/PID/index scopes. Absolute selection ignores Job for lookup and rejects ambiguous equal RKEYs, including differing idempotent metadata. SEND/UUD postings pin live registration identity, preventing cross-Job reselection and stale-key rebinding. Duplicate binding, permission fallback and stale/foreign revocation are rejected. Provider declares six RKEY bytes and preserves 64-bit idempotent metadata with optimized fallback. Native application OPTIMIZED keys are accepted with matching12bit RI, implicit SMALL index resolution, Job/PID scope, metadata and absolute ambiguity checks. Automatic optimized key allocation, remaining optimized operations and provider application-assigned key mode remain open. Host-scoped provider automatic key allocation now survives native private-registry replacement; external domains and explicit application keys retain independent registry authority. Initial16 native transactions and standalone normal/sanitizer allocator boundaries pass; full version evidence and management restart epochs remain separate. See ENDPOINT-LIFETIME.md."
+    },
+    {
+      "id": "SES-DEFER-FALLBACK",
+      "reference": "§3.3.5 Table 3-4; §3.4.4.6.1",
+      "summary": "接收端将非匹配 DEFERRABLE_SEND 作为 SEND 处理",
+      "status": "verified",
+      "tests": [
+        "send_header_data_test"
+      ],
+      "profiles": [
+        "AI_BASE",
+        "HPC"
+      ],
+      "evidence_note": "Narrow default receiver compatibility behavior: opcode0x08, token/address separation, posting/NoMatch in both ROD and RUD, explicit retry and header data. Optional native deferral/RTR/restart and tagged transactions are tracked separately by SES-DEFER; this verified fallback does not establish complete deferrable semantics."
+    },
+    {
+      "id": "SES-USE-ONCE-RMA",
+      "reference": "Table 3-3; §3.4.2.6.1; §3.4.4.1",
+      "summary": "原生 RMA 每缓冲区 use-once/persistent 行为与逻辑消息所有权",
+      "status": "partial",
+      "tests": [
+        "use_once_memory_test",
+        "use_once_rma_test",
+        "use_once_rma_lifetime_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native RegionOptions and shared-registry logical-message ownership cover exact target MR pins for READ/WRITE/integer atomics, uncached READ re-execution and actual EOM Clear/Close retirement. Frozen36215503334cbbd6223430a014246315730c8418 passes158/158 full normal CTests127.04s and158/158 full ASan/UBSan/leak CTests711.79s, including provider/pinned reference, clean frozen sources and sequential suites without compilers. New fixtures cover124 native transactions,16 shared-domain lifetime scenes and registry policy boundaries. Public libfabric2.0 has no standard use-once extension entry; full Profile acceptance remains open. See USE-ONCE-RMA.md."
+    },
+    {
+      "id": "SES-TAGGED-INTEGER-ATOMICS",
+      "reference": "Table 3-1; §3.4.2.5.4; Table 3-23; libfabric2.0 fi_atomic(3)",
+      "summary": "Tagged 整数原子、取回与 CAS 的投递授权和公开 API",
+      "status": "partial",
+      "tests": [
+        "tagged_atomic_header_test",
+        "tagged_atomic_test",
+        "tagged_atomic_boundary_test",
+        "libfabric_tagged_atomic_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native STD/MEDIUM tagged integer nonfetching8–64bit and single-element fetching/CAS8–128bit use exact/wildcard/rank posting authority and common atomic kernels; public FI_TAGGED MSG/query/inject maps tag/offset with private posting atomic rights while key-based RMA remains forbidden. Frozen5c30b3376768bef76c1175ef1e40e192637ce841 passes full166/166normal CTests139.75s and166/166ASan/UBSan/leak CTests751.49s with provider/pinned reference enabled, sequential suites and no compilers.80headergoldens,216native transactions,80negative+9zero+6unsupported scenes and public2-provider behavior are covered. No tagged-atomic/optimized reference interoperability or full HPC/Profile claim; see TAGGED-ATOMICS.md."
+    },
+    {
+      "id": "SES-OPTIMIZED-SYNCHRONIZATION",
+      "reference": "§3.4.3.6; Table 3-21; §3.4.4.8",
+      "summary": "SMALL/MEDIUM 单包同步组的成员与完成动作",
+      "status": "partial",
+      "tests": [
+        "optimized_synchronization_test",
+        "optimized_synchronization_target_test",
+        "optimized_synchronization_fault_test",
+        "optimized_synchronization_boundary_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic use original group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Early format rejection preserves group slots; index resolution and byte accounting include the synchronization extension. Independent probes reproduced baseline Unsupported and omitted wire-format identity in a deferred handle. Fixed and renamed deferred_receive_handle preserves original PSN ownership. Frozen5c30b3376768bef76c1175ef1e40e192637ce841 passes full166/166normal139.75s and166/166ASan/UBSan/leaks751.49s with provider/reference enabled and no compilers;176new transactions/cross-PDC/revocation/fault/boundary scenes are included. Complete maximum-group and legal reuse/extra-member acceptance remain open; see OPTIMIZED-SYNCHRONIZATION.md. No complete M5/Profile claim."
+    }
+  ]
+}

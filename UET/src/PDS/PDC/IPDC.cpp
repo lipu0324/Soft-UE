@@ -27,6 +27,7 @@
  */
 
 #include "IPDC.hpp"
+#include "../DefaultSemanticResponse.hpp"
 
 
 /**
@@ -34,7 +35,19 @@
  * @param id PDC identifier
  * @return Initialization success status
  */
-bool I_PDC::initPDC(uint16_t id){
+bool I_PDC::initPDC(uint16_t id, uint32_t initial_psn){
+    if (!beginTransmitIncarnation()) return false;
+    resetCloseSafety();
+    resetProbe();
+    clearAllPacketTimers();
+    acknowledged_tx_.clear();
+    semantic_completed_tx_.clear();
+    peer_clear_requests_.clear();
+    ordered_recovery_.acknowledged();
+    received_rx_psns_.clear();
+    completed_rx_psns_.clear();
+    uncached_read_responses_.clear();
+    resetAcknowledgmentOrdering();
     //FUNCTION_LOG_ENTRY();
 
     // Record input parameters
@@ -45,16 +58,18 @@ bool I_PDC::initPDC(uint16_t id){
     // ==================== Basic Parameter Initialization ====================
     SPDCID = id;                    // Set source PDC ID
     DPDCID = 0;                     // Initialize destination PDC ID to 0
-    MPR = Default_MPR;              // Set maximum unacknowledged packets
+    initializePsnRanges();
     mode = ROD;                     // Set to reliable ordered delivery mode
     state = CLOSED;                 // Initial state is closed
 
     // ==================== PSN Related Initialization ====================
-    start_psn = 1000;               // Set starting PSN
+    start_psn = initial_psn;         // Retained per local PDC ID across reuse (§3.5.8.2).
+    resetPeerSequenceWindow();
     tx_cur_psn = start_psn;         // Initialize transmit PSN
     clear_psn = start_psn - 1;      // Initialize clear PSN
     rx_cur_psn = start_psn - 1;     // Initialize receive PSN
     cack_psn = start_psn - 1;       // Initialize cumulative acknowledgment PSN
+    rx_clear_psn = start_psn - 1;
     close_psn = 0;                  // Initialize close PSN
 
     // ==================== Counter and Flag Initialization ====================
@@ -98,7 +113,7 @@ bool I_PDC::initPDC(uint16_t id){
     std::stringstream init_state;
     init_state << "PDC initialization complete - SPDCID: " << SPDCID
                 << ", DPDCID: " << DPDCID
-                << ", MPR: " << MPR
+                << ", local_packet_capacity: " << local_packet_capacity
                 << ", mode: " << MODE_STR(mode)
                 << ", state: " << STATE_STR(state)
                 << ", start_psn: " << start_psn
@@ -111,7 +126,7 @@ bool I_PDC::initPDC(uint16_t id){
                 << ", open_msg: " << open_msg;
     LOG_INFO(__FUNCTION__, init_state.str());
 
-    std::cout << getCurrentTimestamp() << "Establish I_PDC:" << id << " - Complete initialization" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "Establish I_PDC:" << id << " - Complete initialization" << std::endl;
 
     //FUNCTION_LOG_EXIT();
     return true;
@@ -141,29 +156,35 @@ void I_PDC::openChk(){
     //             << ", tx_pkt_q: " << tx_pkt_q.size();
     // LOG_DEBUG(__FUNCTION__, queue_state.str());
 
-    //std::cout << getCurrentTimestamp() << "I_PDC open_chk state: " << STATE_STR(state) << std::endl;
+    //diagnostics() << getCurrentTimestamp() << "I_PDC open_chk state: " << STATE_STR(state) << std::endl;
 
-    if(gen_cm != NONE) {
-        std::cout << getCurrentTimestamp() << "I_PDC tx_control processing - gen_cm: " << CM_TYPE_STR(gen_cm) << std::endl;
+    if (close_error) {
+        // §3.5.8.3: fatal errors terminate outstanding messages as well as a
+        // close handshake. Waiting for a partly transmitted message to finish
+        // after its fatal NACK would leave the event loop runnable forever.
+        close();
+    }
+    else if(gen_cm != NONE) {
+        diagnostics() << getCurrentTimestamp() << "I_PDC tx_control processing - gen_cm: " << CM_TYPE_STR(gen_cm) << std::endl;
         LOG_INFO(__FUNCTION__, "Process control message generation");
         txCtrl();
         gen_cm = NONE;  // Reset flag
         LOG_DEBUG(__FUNCTION__, "Control message flag reset");
     }
     else if((close_req || close_error) && open_msg == 0){
-        std::cout << getCurrentTimestamp() << "I_PDC start close process" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "I_PDC start close process" << std::endl;
         LOG_INFO(__FUNCTION__, "Close conditions met, start close process");
         beginClose();
     }
-    else if(closing && open_msg == 0 && unack_cnt == 0 && state != CLOSE_ACK_WAIT){
-        std::cout << getCurrentTimestamp() << "I_PDC target close" << std::endl;
+    else if(closing && open_msg == 0 && unack_cnt == 0 && state != CLOSE_ACK_WAIT && closeSafetyReady()){
+        diagnostics() << getCurrentTimestamp() << "I_PDC target close" << std::endl;
         LOG_INFO(__FUNCTION__, "Target close conditions met, execute target close");
         targetClose();
     }
     else if(!rx_pkt_q.empty()){
         PDStoNET_pkt p;
         if (!rx_pkt_q.pop(p)) return;
-        std::cout << getCurrentTimestamp() << "I_PDC process receive queue packet - Type: " << p.PDS_type << std::endl;
+        diagnostics() << getCurrentTimestamp() << "I_PDC process receive queue packet - Type: " << p.PDS_type << std::endl;
 
         if(p.PDS_type == RUOD_req_header) {
             LOG_DEBUG(__FUNCTION__, "Process request packet");
@@ -179,9 +200,18 @@ void I_PDC::openChk(){
         }
         else if(p.PDS_type == nack_header) {
         LOG_DEBUG(__FUNCTION__, "Process negative acknowledgment packet");
+        if (UET::PDS::negative_acknowledgment_policy(p.PDS_header.nack_header.nack_code) &&
+            SYN && p.PDS_header.nack_header.spdcid &&
+            tx_pkt_buffer.count(p.PDS_header.nack_header.nack_psn)) {
+            DPDCID=p.PDS_header.nack_header.spdcid;
+            SYN=false; state=ESTABLISHED;
+        }
         rxNack(&p);      // Process negative acknowledgment packet
         }
     }
+    else if(creditControlReady()) { sendCreditControl(); }
+    else if(probe_due_ || needsWindowProbe()) { progressProbe(); }
+    else if(admissionRetryReady()) { retryAdmissionDeferred(); }
     else if(!rto_pkt_q.empty()){
         uint32_t psn = rto_pkt_q.front();
         rto_pkt_q.pop();
@@ -189,13 +219,17 @@ void I_PDC::openChk(){
         txRto(psn); // Process timeout retransmission packet
     }
     else if(!tx_rsp_q.empty()){                 // Process SES layer response transmission
-        std::cout << getCurrentTimestamp() << "I_PDC process SES layer response transmission - tx_rsp_q size: " << tx_rsp_q.size() << std::endl;
+        diagnostics() << getCurrentTimestamp() << "I_PDC process SES layer response transmission - tx_rsp_q size: " << tx_rsp_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer response transmission");
         sesTxRsp(&tx_rsp_q.front());
         tx_rsp_q.pop();
     }
-    else if(!tx_req_q.empty()){                 // Process SES layer request transmission
-        std::cout << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
+    else if(!tx_rsp_q.empty()) {
+        sesTxRsp(&tx_rsp_q.front());
+        tx_rsp_q.pop();
+    }
+    else if(!tx_req_q.empty() && !pause_pdc && newDataAllowed() && peerWindowAllows(tx_cur_psn) && congestionReady()){
+        diagnostics() << getCurrentTimestamp() << "I_PDC process SES layer request transmission - tx_req_q size: " << tx_req_q.size() << std::endl;
         LOG_DEBUG(__FUNCTION__, "Process SES layer request transmission");
         sesTxReq(&tx_req_q.front());
         tx_req_q.pop();
@@ -211,10 +245,11 @@ void I_PDC::closeReq(){
 
     // Record close request
     LOG_INFO(__FUNCTION__, "Close request received, setting close flag");
-    std::cout << getCurrentTimestamp() << "I_PDC close request received, state switched to QUIESCE" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "I_PDC close request received, state switched to QUIESCE" << std::endl;
 
     close_req = true;
     state = QUIESCE;
+    updateCreditActivity(); // Retire a last-member CCC before another PDC can bind.
 
     // Record state change
     std::stringstream state_info;
@@ -237,7 +272,7 @@ void I_PDC::sesTxReq(PDS_PDC_req *req){
         SYN = 1;
         state = CREATING;
         //TODO: Establish connection
-        std::cout << "First packet sent, establishing connection" << std::endl;
+        diagnostics() << "First packet sent, establishing connection" << std::endl;
     }
     txReq(req);
 }
@@ -267,6 +302,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
         //FUNCTION_LOG_EXIT();
         return;
     }
+    if (pkt->trimmed) { rejectTrimmed(*pkt); return; }
 
     // Record packet information
     std::stringstream pkt_info;
@@ -277,9 +313,23 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
                 << ", RETX: " << (pkt->PDS_header.RUOD_req_header.flags.retx ? "1" : "0");
     LOG_INFO(__FUNCTION__, pkt_info.str());
 
-    std::cout << getCurrentTimestamp() << "I_PDC receive request packet - PSN: " << pkt->PDS_header.RUOD_req_header.psn << std::endl;
+    diagnostics() << getCurrentTimestamp() << "I_PDC receive request packet - PSN: " << pkt->PDS_header.RUOD_req_header.psn << std::endl;
 
     chkRxError(pkt);
+    observeCongestionDuplicate(*pkt);
+    if (runtime_ && runtime_->standard_wire && pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header &&
+        SYN && !DPDCID && (error_chk==OPEN || error_chk==OOO) && pkt->PDS_header.RUOD_req_header.spdcid) {
+        // Return data can overtake the forward ACK (§3.5.20.2.2). Learn where
+        // its ACK must go, while retaining SYN until a forward ACK arrives.
+        DPDCID=pkt->PDS_header.RUOD_req_header.spdcid;
+    }
+    if (!trim && error_chk==ACK_ERROR && reissueReceivedRead(pkt)) return;
+    if (error_chk==INV_SYN) {
+        const auto& header=pkt->PDS_header.RUOD_req_header;
+        sendNack(header.flags.retx,header.psn,
+            ((is_reliable_unordered_request(header.type))!=(mode==RUD))?UET_PDC_MODE_MISMATCH:UET_INVALID_SYN,0,nullptr,pkt);
+        return;
+    }
 
     // Record error check results
     std::stringstream error_info;
@@ -289,35 +339,46 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
 
     if(trim || error_chk != OPEN){
         if(trim) {
-            std::cout << getCurrentTimestamp() << "I_PDC packet trimmed, sending NACK" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "I_PDC packet trimmed, sending NACK" << std::endl;
             LOG_WARN(__FUNCTION__, "Packet trimmed, sending NACK");
-            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_TRIMMED,rx_cur_psn + 1,nullptr);
+            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_TRIMMED,rx_cur_psn + 1,nullptr,pkt);
         }
         else if(error_chk == ACK_ERROR) {
-            std::cout << getCurrentTimestamp() << "I_PDC duplicate packet received, sending ACK" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "I_PDC duplicate packet received, sending ACK" << std::endl;
             LOG_INFO(__FUNCTION__, "Duplicate packet, respond with ACK immediately");
-            sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,pkt->PDS_header.RUOD_req_header.psn,nullptr,false);//Immediately respond to duplicate packet
+            if (!replaySemanticAck(pkt->PDS_header.RUOD_req_header.psn,pkt)) {
+                const auto sequence=pkt->PDS_header.RUOD_req_header.psn;
+                const bool processing=std::any_of(rx_pkt_map.begin(),rx_pkt_map.end(),
+                    [sequence](const auto& request) { return request.second.psn==sequence; });
+                if (processing) sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,sequence,UET_RCVD_SES_PROCG,0,nullptr,pkt);
+                else if (runtime_ && runtime_->standard_wire &&
+                    (pkt->SESpkt.bth_type==Standard_Header || pkt->SESpkt.bth_type==Semantic_Response_with_Data_Header)) {
+                    auto response=UET::PDS::default_semantic_response(pkt->SESpkt);
+                    sendAck(UET_HDR_RESPONSE,pkt->PDS_header.RUOD_req_header.flags.retx,0,sequence,&response,false,pkt);
+                } else sendAck(UET_HDR_NONE,0,0,sequence,nullptr,false,pkt);
+            }
         }
         else if(error_chk == DROP) {
-            std::cout << getCurrentTimestamp() << "I_PDC drop packet" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "I_PDC drop packet" << std::endl;
             LOG_WARN(__FUNCTION__, "Drop packet");
         }//Drop packet
         else if(error_chk == OOO) {
-            std::cout << getCurrentTimestamp() << "I_PDC out-of-order packet, sending NACK" << std::endl;
+            diagnostics() << getCurrentTimestamp() << "I_PDC out-of-order packet, sending NACK" << std::endl;
             LOG_WARN(__FUNCTION__, "Out-of-order packet, sending NACK");
-            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_ROD_OOO,rx_cur_psn + 1,nullptr);
+            sendNack(pkt->PDS_header.RUOD_req_header.flags.retx,pkt->PDS_header.RUOD_req_header.psn,UET_ROD_OOO,rx_cur_psn + 1,nullptr,pkt);
         }
     }
     else{
         LOG_INFO(__FUNCTION__, "Packet normal, processing request");
-        std::cout << getCurrentTimestamp() << "I_PDC packet received normally, start processing" << std::endl;
+        if (!admitSemanticRequest(*pkt)) return;
+        diagnostics() << getCurrentTimestamp() << "I_PDC packet received normally, start processing" << std::endl;
     
-        uint16_t handle = processRxReq(pkt);
+        const auto handle=processRxReq(pkt);
         RX_pkt_meta meta = rx_pkt_map.at(handle);
         updateRxPsnTracker(&meta);
     
-        if(SYN){
-            std::cout << getCurrentTimestamp() << "I_PDC connection established,DPDCID:" << pkt->PDS_header.RUOD_req_header.spdcid << std::endl;
+        if(SYN && (!runtime_ || !runtime_->standard_wire)){
+            diagnostics() << getCurrentTimestamp() << "I_PDC connection established,DPDCID:" << pkt->PDS_header.RUOD_req_header.spdcid << std::endl;
             LOG_INFO(__FUNCTION__, "SYN packet processing, establishing connection");
 
             DPDCID = pkt->PDS_header.RUOD_req_header.spdcid; //Why is this dpdcid here? //I think this should be spdcid
@@ -329,7 +390,7 @@ void I_PDC::rxReq(PDStoNET_pkt *pkt){
             LOG_INFO(__FUNCTION__, conn_info.str());
         }
 
-        std::cout << getCurrentTimestamp() << "I_PDC forward to SES - PSN:" << pkt->PDS_header.RUOD_req_header.psn << ", handle:" << handle << std::endl;
+        diagnostics() << getCurrentTimestamp() << "I_PDC forward to SES - PSN:" << pkt->PDS_header.RUOD_req_header.psn << ", handle:" << handle << std::endl;
 
         std::stringstream forward_info;
         forward_info << "Forward to SES layer - handle: " << handle << ", PSN: " << meta.psn;
@@ -353,9 +414,26 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
         //FUNCTION_LOG_EXIT();
         return;
     }
+    // Probe ACK's opaque value is not a PSN. It cannot retire data or Close.
+    if (pkt->PDS_header.RUOD_ack_header.flags.p) { receiveProbeAcknowledgment(*pkt); return; }
+    if (runtime_ && runtime_->standard_wire && pkt->PDS_header.RUOD_ack_header.flags.req==3) return;
 
     uint32_t ack_psn = pkt->PDS_header.RUOD_ack_header.ack_psn_off + pkt->PDS_header.RUOD_ack_header.cack_psn;
     uint32_t cack_psn = pkt->PDS_header.RUOD_ack_header.cack_psn;
+    const bool matches_outstanding=tx_pkt_buffer.count(ack_psn)!=0;
+    if (runtime_ && SYN && !matches_outstanding) return;
+    if (runtime_ && runtime_->standard_wire) {
+        // §3.5.12.2: an ACK_PSN outside the source's delivery interval must
+        // not update any state, even if its CACK/MPR happen to look plausible.
+        if (tx_cur_psn==start_psn) return;
+        const uint32_t lowest=peer_sequence_window_?peer_sequence_window_->cumulative_ack():start_psn-1;
+        const uint32_t span=(tx_cur_psn-1)-lowest;
+        if (span>=0x80000000u || ack_psn-lowest>span || (tx_cur_psn-1)-cack_psn>=0x80000000u) return;
+    }
+    processPeerAcknowledgment(*pkt);
+    processCongestionAck(*pkt);
+    processDeliveryAcknowledgment(*pkt);
+    processSemanticAcknowledgment(*pkt);
 
     // Record ACK packet information
     std::stringstream ack_info;
@@ -366,17 +444,23 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
                 << ", req_flag: " << (int)pkt->PDS_header.RUOD_ack_header.flags.req;
     LOG_INFO(__FUNCTION__, ack_info.str());
 
-    std::cout << getCurrentTimestamp() << "I_PDC receive ACK packet - ack_psn: " << ack_psn
+    diagnostics() << getCurrentTimestamp() << "I_PDC receive ACK packet - ack_psn: " << ack_psn
                 << ", cack_psn: " << cack_psn << std::endl;
 
-    if(closing && ack_psn == close_psn){
+    if(state==CLOSE_ACK_WAIT && ack_psn == close_psn){
+        // §3.5.16.4.1: only the Close Command CP_ACK completes this
+        // handshake. A plain or semantic ACK with the same numeric PSN must
+        // not remove the close packet or cancel its recovery timer.
+        if (runtime_ && runtime_->standard_wire &&
+            (pkt->PDS_header.RUOD_ack_header.next_hdr!=UET_HDR_CP_ACK ||
+             pkt->control_ack.cp_ack_type!=Close_cmd)) return;
         LOG_INFO(__FUNCTION__, "Close confirmation ACK received, execute closure");
         close();
     }
     else{
         LOG_INFO(__FUNCTION__, "Close process not executed, closing status:" + std::to_string(closing) + ", ack_psn: " + std::to_string(ack_psn) + ", close_psn: " + std::to_string(close_psn));
         if(SYN){
-            std::cout << getCurrentTimestamp() << "I_PDC connection established,DPDCID:" << pkt->PDS_header.RUOD_ack_header.spdcid << std::endl;
+            diagnostics() << getCurrentTimestamp() << "I_PDC connection established,DPDCID:" << pkt->PDS_header.RUOD_ack_header.spdcid << std::endl;
             LOG_INFO(__FUNCTION__, "SYN ACK processing, establishing connection");
 
             DPDCID = pkt->PDS_header.RUOD_ack_header.spdcid;
@@ -390,17 +474,24 @@ void I_PDC::rxAck(PDStoNET_pkt *pkt){
 
         // Pass req flag from ACK packet to update_tx_psn_tracker
         LOG_DEBUG(__FUNCTION__, "Update transmit PSN tracker");
-        updateTxPsnTracker(ack_psn, pkt->PDS_header.RUOD_ack_header.flags.req, cack_psn);
+        const auto acknowledged = pkt->PDS_header.RUOD_ack_header.next_hdr == UET_HDR_NONE && awaitsSemantic(ack_psn)
+            ? clear_psn : ack_psn;
+        updateTxPsnTracker(acknowledged, pkt->PDS_header.RUOD_ack_header.flags.req, cack_psn);
 
         //update_ccc();
-        if(pkt->PDS_header.RUOD_ack_header.flags.req == 0x10){//CLOSE_REQ
-            std::cout << getCurrentTimestamp() << "I_PDC close request received - PSN: " << ack_psn << std::endl;
+        if(pkt->PDS_header.RUOD_ack_header.flags.req & 0x2u){//CLOSE_REQ
+            diagnostics() << getCurrentTimestamp() << "I_PDC close request received - PSN: " << ack_psn << std::endl;
             LOG_WARN(__FUNCTION__, "Close request flag received, trigger close process");
             closeReq();
         }
 
         LOG_DEBUG(__FUNCTION__, "Forward response to SES layer");
-        fwdRsp2SES(&pkt->SESpkt);
+        // A repeated semantic ACK can still carry a newer valid CACK. Apply
+        // that transport fact above, but do not redeliver an unmatched response.
+        if ((!runtime_ || !runtime_->standard_wire) && (!runtime_ || matches_outstanding) &&
+            (pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE ||
+             pkt->PDS_header.RUOD_ack_header.next_hdr==UET_HDR_RESPONSE_DATA))
+            fwdRsp2SES(&pkt->SESpkt,ack_psn);
     }
 
     //FUNCTION_LOG_EXIT();
@@ -424,6 +515,13 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
         case Noop:
             rxCtrlNoop(pkt);
             break;
+        case Probe:
+            receiveProbe(*pkt);
+            break;
+        case Credit:
+        case Credit_req:
+            receiveCreditControl(*pkt);
+            break;
         case ACK_req:
             rxCtrlAckReq(pkt);
             break;
@@ -432,6 +530,14 @@ void I_PDC::rxCtrl(PDStoNET_pkt *pkt){
             break;
         case Clear_req:
             rxCtrlClearReq(pkt);
+            break;
+        case Negotiation:
+            // Optional feature negotiation is not enabled; a plain ACK is the
+            // prescribed response from such an implementation (§3.5.16.7).
+            rxCtrlNoop(pkt);
+            break;
+        case Close_req:
+            if (acknowledgeNumberedControl(pkt) && !close_req && !closing && state!=CLOSE_ACK_WAIT) closeReq();
             break;
             // case
         }
@@ -446,10 +552,12 @@ void I_PDC::beginClose(){
     //FUNCTION_LOG_ENTRY();
 
     LOG_INFO(__FUNCTION__, "Start PDC closure process");
-    std::cout << getCurrentTimestamp() << "I_PDC start close process" << std::endl;
+    diagnostics() << getCurrentTimestamp() << "I_PDC start close process" << std::endl;
 
     closing = true;
     state = ACK_WAIT;
+    updateCreditActivity();
+    armCloseSafetyWake();
 
     // Record state change
     std::stringstream state_info;
@@ -472,9 +580,9 @@ void I_PDC::beginClose(){
  * @brief Target side close handling
  */
 void I_PDC::targetClose(){
-    std::cout << "Trigger close" << std::endl;
+    diagnostics() << "Trigger close" << std::endl;
     if(DPDCID==0){
-        std::cout << getCurrentTimestamp() << "I_PDC target side close with DPDCID 0, cannot send close packet" << std::endl;
+        diagnostics() << getCurrentTimestamp() << "I_PDC target side close with DPDCID 0, cannot send close packet" << std::endl;
         LOG_ERROR(__FUNCTION__, "Target side close with DPDCID 0, cannot send close packet");
         close();
         return;
@@ -489,6 +597,7 @@ void I_PDC::targetClose(){
  * @brief Complete close operation
  */
 void I_PDC::close(){
+    emitPdcEvent(UET::Runtime::PdcEventKind::ConnectionClosed,tx_cur_psn-1);
     //saveExpectedPSN();
     freePDC();
     state = CLOSED;
@@ -509,7 +618,7 @@ void I_PDC::sendClose(){
 
     LOG_INFO(__FUNCTION__, "Construct and send close control packet");
 
-    PDStoNET_pkt ctrl_pkt;
+    PDStoNET_pkt ctrl_pkt{};
     ctrl_pkt.dst_fep = dst_fep;
     ctrl_pkt.src_fep = src_fep;
 
@@ -530,7 +639,7 @@ void I_PDC::sendClose(){
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.syn = 0;
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.ar = 1;        // Request ACK
     ctrl_pkt.PDS_header.RUOD_cp_header.flags.retx = 0;      // Not retransmission
-    ctrl_pkt.PDS_header.RUOD_cp_header.flags.isrod = 0;     // rsvd
+    ctrl_pkt.PDS_header.RUOD_cp_header.flags.pdc_type = 0;     // Ignored outside NOOP/Negotiation.
     ctrl_pkt.PDS_header.RUOD_cp_header.payload = 0;  // The CP pds.payload field is set to 0x0
 
     // Record close packet information
@@ -546,13 +655,15 @@ void I_PDC::sendClose(){
 
     TX_pkt_meta meta;
     meta.tx_pkt_handle = 0;
-    meta.rto = Base_RTO;
+    meta.retransmission_timeout_ns=runtime_?runtime_->rto_ns:uint64_t{Base_RTO}*UET::Runtime::kMillisecond;
     meta.retry_cnt = 0;
     tx_pkt_map.insert(std::make_pair(tx_cur_psn, meta));
 
+    decorateControl(ctrl_pkt);
+    tagTransmission(ctrl_pkt,tx_cur_psn,UET::Runtime::TransmitKind::NumberedControl,0);
     tx_pkt_buffer.insert(std::make_pair(tx_cur_psn, ctrl_pkt));
 
-    if(USE_RTO){
+    if(rtoEnabled() && !waitsForTransmitNotification()){
         startPacketTimer(tx_cur_psn, 0); 
     }
 
@@ -572,7 +683,7 @@ void I_PDC::sendClose(){
     final_info << "Close packet send complete - close_psn: " << close_psn;
     LOG_INFO(__FUNCTION__, final_info.str());
 
-    std::cout << getCurrentTimestamp() << "I_PDC send close packet - PSN: " << ctrl_pkt.PDS_header.RUOD_cp_header.psn << std::endl;
+    diagnostics() << getCurrentTimestamp() << "I_PDC send close packet - PSN: " << ctrl_pkt.PDS_header.RUOD_cp_header.psn << std::endl;
 
     //FUNCTION_LOG_EXIT();
 }

@@ -53,6 +53,38 @@
  */
 class TPDCProcessManager {
 public:
+    // §3.5.12.1: return data belongs to this existing target PDC, never to a
+    // new initiator PDC selected from the ordinary source mapping tuple.
+    bool pushReturnData(const PDC_SES_req& original,const SEStoPDS_pkt& data) {
+        auto* process=getProcessInfo(original.PDCID);
+        if (!process || process->state.load()!=RUNNING) return false;
+        auto& context=*process->tpdc_instance;
+        if (context.state!=ESTABLISHED || context.start_psn!=original.connection_start_psn ||
+            context.dst_fep!=original.source_fep || context.mode!=original.delivery_mode) return false;
+        PDS_PDC_req request{}; request.delivery_mode=context.mode;
+        request.next_hdr=UET_HDR_RESPONSE_DATA; request.pkt=data;
+        request.tx_pkt_handle=data.bth_header.Semantic_Response_with_Data_Header.response_message_id;
+        request.pkt_len=20+data.payload.size();
+        if (original.request_wire_format==Optimized_Header || original.request_wire_format==Small_Message_RMA_Header) {
+            UET::SES::compact_data_response(request.pkt,original.orig_psn);
+            request.next_hdr=UET_HDR_RESPONSE_DATA_SMALL;
+            request.pkt_len=12+data.payload.size();
+            // The target response token stays in TX metadata. DATA_SMALL has
+            // no response MID; its ACK will carry MID0 (Table3-18).
+        }
+        // Each queued return packet owns its own response token. It does not
+        // start another application request/message in the forward direction.
+        request.som=request.eom=true;
+        context.enqueueRequest(std::move(request));
+        return true;
+    }
+    std::optional<std::pair<uint32_t,uint32_t>> receiveSequenceSnapshot(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(pdcid);
+        if (found==tpdc_processes.end()) return std::nullopt;
+        return std::make_pair(found->second->tpdc_instance->start_psn,found->second->tpdc_instance->rx_cur_psn);
+    }
+
     // Process state enumeration
     enum ProcessState {
         STOPPED,    // Stopped
@@ -99,12 +131,12 @@ private:
         uint16_t pdcid;                                // PDC identifier
         std::chrono::steady_clock::time_point last_activity; // Last activity time
         
-        TPDC_ProcessInfo(uint16_t id) : 
-            tpdc_instance(std::make_unique<T_PDC>()),
+        TPDC_ProcessInfo(uint16_t id, UET::Runtime::Services* services) :
+            tpdc_instance(std::make_unique<T_PDC>(services)),
             state(STOPPED),
             should_stop(false),
             pdcid(id),
-            last_activity(std::chrono::steady_clock::now()) {}
+            last_activity(services ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now()) {}
     };
 
     // Manager member variables
@@ -112,6 +144,7 @@ private:
     std::mutex manager_mutex;                           // Manager mutex
     std::atomic<bool> manager_running;                  // Manager running status
     std::unique_ptr<std::thread> monitor_thread;       // Monitoring thread
+    UET::Runtime::Services* runtime_ = nullptr;
     
     // Configuration parameters
     static constexpr std::chrono::milliseconds OPENCHK_INTERVAL{1};     // openchk call interval
@@ -122,7 +155,7 @@ public:
     /**
      * @brief Constructor
      */
-    TPDCProcessManager() : manager_running(false) {
+    explicit TPDCProcessManager(UET::Runtime::Services* runtime = nullptr) : manager_running(false), runtime_(runtime) {
         LOG_DEBUG(__FUNCTION__, "TPDC process manager initialized");
     }
 
@@ -151,7 +184,7 @@ public:
         manager_running.store(true);
         
         // Start monitoring thread
-        monitor_thread = std::make_unique<std::thread>(&TPDCProcessManager::monitorLoop, this);
+        if (!runtime_) monitor_thread = std::make_unique<std::thread>(&TPDCProcessManager::monitorLoop, this);
         
         LOG_DEBUG(__FUNCTION__, "TPDC process manager started");
         return true;
@@ -211,7 +244,7 @@ public:
         }
         
         // Create new process information
-        auto process_info = std::make_unique<TPDC_ProcessInfo>(pdcid);
+        auto process_info = std::make_unique<TPDC_ProcessInfo>(pdcid, runtime_);
         
         // Initialize TPDC instance
         if (!process_info->tpdc_instance->initPDC(pdcid)) {
@@ -233,7 +266,7 @@ public:
         LOG_DEBUG(__FUNCTION__, "TPDC instance FEP addresses set, PDCID: " + std::to_string(pdcid) + ", DST_FEP: " + std::to_string(dst_fep) + ", SRC_FEP: " + std::to_string(src_fep));
         
         // Start processing thread
-        process_info->process_thread = std::make_unique<std::thread>(
+        if (!runtime_) process_info->process_thread = std::make_unique<std::thread>(
             &TPDCProcessManager::tpdcProcessLoop, this, process_info.get());
         
         process_info->state.store(RUNNING);
@@ -268,6 +301,7 @@ public:
         }
         
         process_info->state.store(STOPPED);
+        tpdc_processes.erase(it);
         LOG_DEBUG(__FUNCTION__, "Successfully stopped TPDC process, PDCID: " + std::to_string(pdcid));
         return true;
     }
@@ -339,7 +373,7 @@ public:
         
         // Thread-safely add to receive queue - use instance member queue
         process_info->tpdc_instance->rx_pkt_q.push(pkt);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -356,8 +390,8 @@ public:
         }
         
         // Use instance member queue
-        process_info->tpdc_instance->tx_req_q.push(req);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        process_info->tpdc_instance->enqueueRequest(req);
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -375,7 +409,7 @@ public:
         
         // Use instance member queue
         process_info->tpdc_instance->tx_rsp_q.push(rsp);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -519,6 +553,27 @@ public:
         return it != tpdc_processes.end() && it->second->tpdc_instance &&
                it->second->tpdc_instance->state.load() == ESTABLISHED;
     }
+    bool ownsReceiveExecution(const PDC_SES_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(request.PDCID);
+        return found!=tpdc_processes.end() && found->second->tpdc_instance &&
+            found->second->tpdc_instance->ownsReceiveExecution(request);
+    }
+
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(notification.identity.local_pdc);
+        return found!=tpdc_processes.end() && found->second->tpdc_instance->notifyTransmit(notification);
+    }
+
+    bool requestConnectionClose(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=tpdc_processes.find(pdcid);
+        if (found==tpdc_processes.end() || !found->second->tpdc_instance ||
+            found->second->tpdc_instance->state.load()!=ESTABLISHED) return false;
+        found->second->tpdc_instance->reqClose();
+        return true;
+    }
 
     /**
      * @brief Check if TPDC can be closed using built-in PDC method
@@ -541,6 +596,22 @@ public:
 
     //************************** Command Interface *************************** //
 
+public:
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        std::vector<uint16_t> ids;
+        for (const auto& item : tpdc_processes) ids.push_back(item.first);
+        std::sort(ids.begin(), ids.end());
+        bool worked = false;
+        for (auto id : ids) {
+            auto& info = *tpdc_processes.at(id);
+            if (!info.should_stop && info.state != PAUSED && info.tpdc_instance->hasPendingWork()) {
+                info.tpdc_instance->openChk();
+                worked = true;
+            }
+        }
+        return worked;
+    }
 private:
     /**
      * @brief TPDC process main loop
@@ -565,7 +636,7 @@ private:
             // Execute TPDC main processing logic
             try {
                 process_info->tpdc_instance->openChk();
-                process_info->last_activity = std::chrono::steady_clock::now();
+                if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
             } catch (const std::exception& e) {
                 std::cerr << "TPDC process exception, PDCID: " << process_info->pdcid 
                         << ", Error: " << e.what() << std::endl;

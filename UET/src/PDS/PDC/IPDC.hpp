@@ -49,6 +49,8 @@
  */
 class I_PDC : public PDC
 {
+public:
+    using PDC::PDC;
 private:
     bool clr_cm;         /**< Clear control message flag */
     bool close_triger;   /**< Close trigger flag */
@@ -56,13 +58,18 @@ private:
    
 public:
     bool close_req;      /**< Close request flag */
+    bool creditQuiescing() const override { return close_req || PDC::creditQuiescing(); }
+    bool hasPendingWork() const {
+        return (close_req && open_msg==0) || PDC::hasPendingWork();
+    }
 
     /**
      * @brief Initialize PDC instance
      * @param id PDC identifier
      * @return Initialization success status
      */
-    bool initPDC(uint16_t id);
+    bool initPDC(uint16_t id) override { return initPDC(id,1000); }
+    bool initPDC(uint16_t id, uint32_t initial_psn);
     
     /**
      * @brief Main event loop, handles various events by priority: control messages, close requests, packet reception, response sending, etc.

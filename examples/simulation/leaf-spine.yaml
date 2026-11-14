@@ -1,0 +1,23 @@
+version: 1
+profile: experimental
+seed: 123
+duration_ns: 100000000
+memory_bytes: 65536
+wire:
+  ipv6: true
+  udp: true
+  crc: true
+hosts: [1, 2, 3, 4]
+switches: [100, 101, 200, 201]
+links:
+  - {from: 1, to: 100}
+  - {from: 2, to: 100}
+  - {from: 3, to: 101}
+  - {from: 4, to: 101}
+  - {from: 100, to: 200}
+  - {from: 100, to: 201}
+  - {from: 101, to: 200}
+  - {from: 101, to: 201}
+operations:
+  - {type: write, source: 1, target: 3, bytes: 4097, context: 1}
+  - {type: write, source: 2, target: 4, bytes: 257, context: 2}

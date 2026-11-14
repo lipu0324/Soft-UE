@@ -35,9 +35,17 @@
 #include "../../logger/Logger.hpp"
 #include "process/ThreadSafeQueue.hpp"
 #include "RTOTimer/RTOTimer.hpp"
+#include "../../CMS/CongestionControl.hpp"
+#include "../PeerSequenceWindow.hpp"
+#include "../NegativeAcknowledgment.hpp"
+#include "../OrderedRecovery.hpp"
+#include "../../SES/SemanticRequestFields.hpp"
+#include "../../SES/SemanticDataFields.hpp"
 #include <cstdint>
 #include <queue>
 #include <map>
+#include <set>
+#include <optional>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -45,7 +53,9 @@
 #include <iomanip>
 
 // Retransmission configuration
+#ifndef USE_RTO
 #define USE_RTO 0
+#endif
 
 /** Maximum PSN range, used to limit the valid range of sequence numbers */ 
 //#define Max_PSN_Range 500
@@ -55,13 +65,6 @@
  * @brief  PDC operation mode types
  * @details Defines the different modes of operation for PDC, including reliable unidirectional delivery, reliable ordered delivery, reliable unidirectional delivery - immediate, and unreliable unidirectional delivery  
  */
-enum pdc_mode
-{
-    RUD,   /**<  (Reliable Unidirectional Delivery) */
-    ROD,   /**<  (Reliable Ordered Delivery) */
-    RUDI,  /**< - (Reliable Unidirectional Delivery - Immediate) */
-    UUD    /**<  (Unreliable Unidirectional Delivery) */
-};
 
 /**
  * @enum pdc_state
@@ -281,6 +284,7 @@ inline std::string nackCodeToString(PDS_Nack_Codes code) {
         case UET_RCVD_SES_PROCG:    return "UET_RCVD_SES_PROCG";
         case UET_UNEXP_EVENT:       return "UET_UNEXP_EVENT";
         case UET_RCVR_INFER_LOSS:   return "UET_RCVR_INFER_LOSS";
+        case UET_NO_SES_SYNC_AVAIL: return "UET_NO_SES_SYNC_AVAIL";
         default:                    return "UNKNOWN_NACK_CODE(0x" + 
                                            std::to_string(static_cast<int>(code)) + ")";
     }
@@ -312,9 +316,18 @@ struct RX_pkt_meta;
  */
 struct TX_pkt_meta
 {
-    uint16_t tx_pkt_handle; /**< Sending packet handle */
-    uint16_t rto;           /**< Retransmission timeout time */
-    uint16_t retry_cnt;     /**< Retry count */
+    uint16_t tx_pkt_handle=0; /**< Sending packet handle */
+    UET::Runtime::Time retransmission_timeout_ns=0;
+    uint64_t retry_cnt=0; /**< All retries; also the monotonic local transmit-attempt identity. */
+    uint64_t timeout_retry_count=0; /**< Only RTO-triggered retries increase exponential backoff (§3.5.12.7). */
+    UET::Runtime::Time last_transmit_time=0; /**< Virtual time of the last actual send. */
+    bool transmit_time_valid=false,awaiting_transmission=false;
+    uint32_t congestion_nominal_bytes=0;
+    bool congestion_inflight=false; // One debit per attempt, released by ACK counter/NACK/loss.
+    bool congestion_debit_waiting_for_retry=false; // Restore if delivery wins before the replacement is sent.
+    // PDS delivery knowledge is independent of whether CMS is enabled. SACK
+    // confirms receipt, but cannot prove DEFAULT_RESPONSE (§3.5.12.4/3.5.13).
+    bool delivery_confirmed=false;
     // Add any other metadata you need to store here 
 };
 
@@ -326,6 +339,10 @@ struct TX_pkt_meta
  */
 struct RX_pkt_meta
 {
+    bool is_read=false; // Distinguishes re-executable READ results from cached fetching-atomic results.
+    uint16_t wire_entropy=0;
+    bool congestion_marked=false;
+    UET::Runtime::Time arrival_time_ns=0;
     PDS_type type;          /**< Packet type (Request/ACK/CP/NACK) */
     PDS_next_hdr next_hdr;  /**< SES header type */
     uint16_t spdcid;        /**< Receiver PDCID */
@@ -351,7 +368,7 @@ class PDC
 public:
     // Queues and mapping tables
     std::map<uint32_t, TX_pkt_meta> tx_pkt_map;       /**< Store metadata of sent packets */
-    std::map<uint16_t, RX_pkt_meta> rx_pkt_map;       /**< Store metadata of received packets */
+    std::map<UET::Runtime::ReceivePacketHandle, RX_pkt_meta> rx_pkt_map; /**< One entry per accepted SES execution. */
     std::map<uint32_t, PDStoNET_pkt> tx_pkt_buffer;   /**< Store unacknowledged request packets */
     std::map<uint32_t, PDStoNET_pkt> tx_ack_buffer;   /**< Store guaranteed delivery ACK packets */
     const unsigned int tx_ack_buffer_capa = 10;                /**< ACK buffer capacity */
@@ -368,7 +385,7 @@ public:
     bool allACK;           /**< Full acknowledgment flag / Full acknowledgment flag */
     int open_msg;          /**< Open message count / Open message count */
     bool SYN;              /**< Synchronization flag / Synchronization flag */
-    int MPR;               /**< Maximum Packet Rate / Maximum packet rate */
+    int local_packet_capacity; /**< Local transmit-cache bound in packets; never the wire MPR encoding. */
     int ACK_GEN_COUNT;     /**< ACK generation counter (determines when to send ACK) / Used for cumulative ACK to determine if ACK packet needs to be sent */
 
     uint32_t start_psn;     /**< Initial packet sequence number / Initial packet sequence number */
@@ -390,8 +407,8 @@ public:
     bool closing;          /**< Closing in progress flag / Closing in progress flag */
     int pdc_close_timer;    /**< PDC close timer / PDC close timer */
 
-    uint32_t dst_fep;       /**< Destination IP address / Destination IP address */
-    uint32_t src_fep;       /**< Source IP address / Source IP address */
+    uint32_t dst_fep;       /**< Destination fabric endpoint identity; the network adapter resolves its wire address. */
+    uint32_t src_fep;       /**< Source fabric endpoint identity, scoped to the owning host. */
 
     std::atomic<pdc_state> state; /**< Current PDC state, published atomically */
     std::queue<PDStoNET_pkt> tx_pkt_q;        /**< Transmission packet queue / Transmission packet queue */
@@ -409,7 +426,7 @@ public:
     ThreadSafeQueue<uint16_t>* public_close_queue = nullptr;
 
     // ==================== Constructors and Destructors ====================
-    PDC();
+    explicit PDC(UET::Runtime::Services* services = nullptr);
     virtual ~PDC();
 
     // ==================== Common Utility Functions ====================
@@ -429,8 +446,9 @@ public:
      * @brief Get current timestamp Get current timestamp Get current timestamp
      * @return Formatted timestamp string Formatted timestamp string
      */
-    static std::string getCurrentTimestamp()
+    std::string getCurrentTimestamp() const
     {
+        if (runtime_) return std::to_string(runtime_->clock.now()) + "ns ";
         auto now = std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -442,15 +460,286 @@ public:
         return ss.str();
     }
 
-    /**
-     * @brief Set receive handle Set receive handle Set receive handle
-     * @param psn Packet sequence number Packet sequence number
-     * @param spdcid Source PDC ID Source PDC ID
-     * @return Generated receive handle Generated receive handle
-     */
-    uint16_t setRXhandle(uint32_t psn, uint16_t spdcid)
-    {
-        return (psn & 0xFFFF) | ((spdcid & 0xFF) << 16);
+    bool hasPendingWork() const {
+        updateCreditActivity();
+        const bool queued = !rx_pkt_q.empty() || !rto_pkt_q.empty() ||
+                            (!tx_req_q.empty() && !pause_pdc && newDataAllowed() && peerWindowAllows(tx_cur_psn) && congestionReady()) ||
+                            !tx_rsp_q.empty() || admissionRetryReady() || probe_due_ || needsWindowProbe() || creditControlReady();
+        if (state == CLOSED) return queued;
+        return gen_cm != NONE || close_error ||
+            (closing && state != CLOSE_ACK_WAIT && unack_cnt == 0 && allACK && closeSafetyReady()) || queued;
+    }
+    bool rtoEnabled() const { return runtime_ != nullptr || USE_RTO; }
+    void configureDataTrafficClass(uint8_t traffic_class) {
+        if (traffic_class>=8 || data_traffic_class_bound_ || congestion_connection_)
+            throw std::logic_error("configure PDC data traffic class before binding CMS");
+        data_traffic_class_=traffic_class;
+    }
+    uint8_t dataTrafficClass() const { return data_traffic_class_; }
+    virtual bool creditQuiescing() const {
+        return closing || state==QUIESCE || state==ACK_WAIT || state==CLOSE_ACK_WAIT;
+    }
+    // Keep posted-demand accounting at the queue ownership boundary, before
+    // admission can block. Returning READ data uses this same queue and CCC.
+    void enqueueRequest(PDS_PDC_req request) {
+        const auto payload_bytes=request.pkt.payload.size();
+        tx_req_q.push(std::move(request));
+        if (runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->work_posted(congestionConnection(),payload_bytes);
+    }
+    bool requestProbe(uint32_t selective_base);
+    bool probePending() const { return outstanding_probe_.has_value(); }
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification);
+    bool awaitsSemantic(uint32_t psn) const {
+        // The explicit legacy SES path uses version 2 and omits DC. Preserve
+        // its semantic-response contract; standard wire requests use version 0.
+        const auto found = tx_pkt_buffer.find(psn);
+        if (runtime_ && runtime_->standard_wire && found!=tx_pkt_buffer.end() &&
+            found->second.PDS_type==RUOD_req_header && found->second.SESpkt.bth_type==Semantic_Response_with_Data_Header)
+            return true;
+        return runtime_ && found != tx_pkt_buffer.end() &&
+            found->second.PDS_type == RUOD_req_header &&
+            found->second.SESpkt.bth_type == Standard_Header &&
+            (found->second.SESpkt.bth_header.Standard_Header.dc ||
+             found->second.SESpkt.bth_header.Standard_Header.version!=0) &&
+            found->second.SESpkt.bth_header.Standard_Header.eom;
+    }
+    bool replaySemanticAck(uint32_t psn,const PDStoNET_pkt* trigger=nullptr) {
+        const auto found = tx_ack_buffer.find(psn);
+        if (found == tx_ack_buffer.end()) return false;
+        auto ack = found->second;
+        ack.PDS_header.RUOD_ack_header.flags.retx = 1;
+        if (runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->decorate_ack(congestionConnection(),psn,ack);
+        decorateSelectiveAcknowledgment(psn,ack);
+        decorateAcknowledgmentNetwork(psn,trigger,ack);
+        return queueAcknowledgment(psn,std::move(ack));
+    }
+
+protected:
+    // §3.5.21.1: SES may finish asynchronously, but the first ACK for each
+    // ROD PSN must leave in request order. Already emitted ACKs can still be
+    // replayed for duplicate/query recovery, independent of this frontier.
+    std::optional<uint32_t> next_ordered_ack_psn_;
+    std::map<uint32_t,PDStoNET_pkt> pending_ordered_acknowledgments_;
+    bool queueAcknowledgment(uint32_t sequence,PDStoNET_pkt acknowledgment);
+    void resetAcknowledgmentOrdering() {
+        next_ordered_ack_psn_.reset(); pending_ordered_acknowledgments_.clear();
+    }
+    bool admitSemanticRequest(const PDStoNET_pkt& packet);
+    uint64_t transmit_incarnation_=0;
+    bool beginTransmitIncarnation();
+    bool waitsForTransmitNotification() const { return runtime_ && runtime_->actual_transmit_notifications && transmit_incarnation_; }
+    void tagTransmission(PDStoNET_pkt& packet,uint32_t sequence,UET::Runtime::TransmitKind kind,uint64_t attempt,uint16_t opaque=0);
+    // Probe has an opaque identifier and its own timer. PSN zero remains
+    // available to real data at wrap; Probe never occupies a TX data slot.
+    struct ProbeAttempt { uint16_t opaque; uint32_t selective_base; UET::Runtime::Time sent_at; uint64_t retries=0; bool transmit_time_valid=false,awaiting_transmission=false; };
+    std::optional<ProbeAttempt> outstanding_probe_;
+    UET::Runtime::TimerId probe_timer_=0;
+    UET::Runtime::Time next_window_probe_time_=0;
+    bool probe_due_=false;
+    bool needsWindowProbe() const;
+    void progressProbe();
+    void sendProbeAttempt();
+    void armProbeWake(UET::Runtime::Time delay);
+    void resetProbe();
+    void receiveProbeAcknowledgment(const PDStoNET_pkt& packet);
+    void receiveProbe(const PDStoNET_pkt& packet);
+    mutable bool congestion_engaged_=false;
+    mutable std::optional<UET::CMS::Connection> congestion_connection_;
+    uint8_t data_traffic_class_=0;
+    bool data_traffic_class_bound_=false; // Applies even when CMS is disabled.
+    enum class RetryCause { Timeout, NegativeAcknowledgment };
+    std::map<uint32_t,RetryCause> admission_deferred_retries_;
+    void retryPacket(uint32_t sequence,RetryCause cause);
+    std::optional<UET::PDS::PeerSequenceWindow> peer_sequence_window_;
+    uint32_t initial_psn_range_=Default_MPR;
+    uint32_t receive_psn_range_=Default_MPR;
+    uint8_t advertised_mpr_=0;
+    uint32_t read_response_payload_mtu_=1024;
+    uint32_t read_ack_data_limit_=16;
+    void initializePsnRanges();
+    void resetPeerSequenceWindow();
+    bool receiveWindowAllows(uint32_t sequence) const {
+        if (!runtime_ || !runtime_->standard_wire) {
+            const uint32_t legacy_distance=sequence-rx_cur_psn;
+            return mode!=RUD || legacy_distance>=0x80000000u || legacy_distance<=static_cast<uint32_t>(local_packet_capacity);
+        }
+        // §3.5.12.6: CACK is the anchor, including while a guaranteed SES
+        // response pins it behind contiguous packet receipt. Older packets
+        // above Clear retain their explicit replay exception.
+        const uint32_t distance=sequence-cack_psn;
+        return distance>=0x80000000u || distance<=receive_psn_range_;
+    }
+    bool peerWindowAllows(uint32_t sequence) const {
+        // SYN carries a 12-bit offset, not a second full PSN. Wait for peer
+        // establishment rather than silently truncating an excessive offset.
+        if (SYN && sequence-start_psn<0x80000000u && sequence-start_psn>0xfff) return false;
+        return !peer_sequence_window_ || peer_sequence_window_->allows(sequence);
+    }
+    UET::CMS::Connection congestionConnection() const {
+        if (congestion_connection_) return *congestion_connection_;
+        // Before the first request is issued, its queued delivery mode has not
+        // yet been committed by txReq. Admission must use that same future CCC.
+        const auto delivery=(tx_cur_psn==start_psn && !tx_req_q.empty())?tx_req_q.front().delivery_mode:mode;
+        congestion_connection_=UET::CMS::Connection{dst_fep,SPDCID,start_psn,delivery==ROD,data_traffic_class_};
+        congestion_engaged_=true;
+        return *congestion_connection_;
+    }
+    bool congestionReady(bool retransmission=false) const {
+        if (!runtime_ || !runtime_->congestion_control) return true;
+        updateCreditActivity();
+        congestion_engaged_=true;
+        return runtime_->congestion_control->can_send_attempt(congestionConnection(),retransmission);
+    }
+    void updateCreditActivity() const;
+    bool creditControlReady() const;
+    void sendCreditControl();
+    void receiveCreditControl(const PDStoNET_pkt& packet);
+    std::optional<uint32_t> nextAdmittedRetry() const {
+        std::optional<uint32_t> selected;
+        for (const auto& deferred:admission_deferred_retries_) {
+            const auto sequence=deferred.first;
+            const auto packet=tx_pkt_buffer.find(sequence);
+            const auto metadata=tx_pkt_map.find(sequence);
+            if (packet==tx_pkt_buffer.end() || metadata==tx_pkt_map.end()) return sequence; // Discard a stale queued retry.
+            const bool data=packet->second.PDS_type==RUOD_req_header;
+            if (data && nack_traffic_paused_) continue;
+            const bool query=data && runtime_ && runtime_->standard_wire && metadata->second.delivery_confirmed;
+            // GoBackN also invalidates later attempts that were not named in
+            // the NACK. Their old inflight charge must be removed once before
+            // testing CMS admission, or dropped packets can deadlock a full
+            // window with every RTO already suspended (§3.6.13.5).
+            const bool needs_loss_accounting=data && !query && runtime_ && runtime_->congestion_control && metadata->second.congestion_inflight;
+            if (!data || query || needs_loss_accounting || (peerWindowAllows(sequence) && congestionReady(true))) {
+                if (!selected || sequence-(clear_psn+1)<*selected-(clear_psn+1)) selected=sequence;
+            }
+        }
+        if (selected && mode==ROD) {
+            // A higher PSN whose shorter NACK delay has elapsed must not
+            // overtake an earlier member of the same ordered recovery.
+            for (const auto& pending:negative_acknowledgment_timers_)
+                if (pending.first-(clear_psn+1)<*selected-(clear_psn+1)) return std::nullopt;
+        }
+        return selected;
+    }
+    bool admissionRetryReady() const { return nextAdmittedRetry().has_value(); }
+    void retryAdmissionDeferred() {
+        const auto sequence=nextAdmittedRetry();
+        if (!sequence) return;
+        const auto cause=admission_deferred_retries_.at(*sequence);
+        admission_deferred_retries_.erase(*sequence); retryPacket(*sequence,cause);
+    }
+    void processPeerAcknowledgment(const PDStoNET_pkt& packet);
+    void processCongestionAck(const PDStoNET_pkt& packet);
+    void processDeliveryAcknowledgment(const PDStoNET_pkt& packet);
+    void processSemanticAcknowledgment(const PDStoNET_pkt& packet);
+    void decorateSelectiveAcknowledgment(uint32_t trigger_sequence,PDStoNET_pkt& packet) const;
+    void decorateAcknowledgmentNetwork(uint32_t sequence,const PDStoNET_pkt* trigger,PDStoNET_pkt& response) const;
+    void decorateControl(PDStoNET_pkt& packet);
+    std::optional<PDStoNET_pkt> close_network_trigger_;
+    void releaseCongestionState();
+    void rejectTrimmed(const PDStoNET_pkt& packet);
+    void observeCongestionDuplicate(const PDStoNET_pkt& packet) {
+        if (error_chk==ACK_ERROR && runtime_ && runtime_->congestion_control)
+            runtime_->congestion_control->received(congestionConnection(),packet,true);
+    }
+    std::ostream& diagnostics() const {
+        if (!runtime_) return std::cout;
+        if (runtime_->diagnostic_output) return *runtime_->diagnostic_output;
+        class DiscardBuffer final : public std::streambuf {
+            int overflow(int value) override { return traits_type::not_eof(value); }
+        };
+        static thread_local DiscardBuffer discarded;
+        static thread_local std::ostream sink(&discarded);
+        return sink;
+    }
+    UET::Runtime::PdcFailureReason failure_reason_=UET::Runtime::PdcFailureReason::None;
+    void emitPdcEvent(UET::Runtime::PdcEventKind kind,uint32_t sequence,
+                      uint32_t job=0,uint16_t message_id=0,bool end_of_message=false) {
+        if (runtime_ && runtime_->pdc_event)
+            runtime_->pdc_event({kind,SPDCID,dst_fep,start_psn,sequence,job,message_id,failure_reason_,end_of_message});
+    }
+    UET::Runtime::Time syn_safety_deadline_=0;
+    UET::Runtime::TimerId close_safety_wake_=0;
+    std::shared_ptr<int> lifetime_guard_=std::make_shared<int>(0);
+    bool closeSafetyReady() const {
+        return !runtime_ || runtime_->clock.now()>=syn_safety_deadline_;
+    }
+    void armCloseSafetyWake();
+    void resetCloseSafety();
+    // §3.5.8.2: a zero-SPDCID NACK pauses data, including retransmits.
+    bool nack_traffic_paused_=false;
+    UET::Runtime::TimerId nack_retry_wake_=0;
+    std::map<uint32_t,RetryCause> deferred_nack_retransmits_;
+    std::map<uint32_t,UET::Runtime::TimerId> negative_acknowledgment_timers_;
+    void scheduleNegativeAcknowledgmentRetry(uint32_t sequence,UET::Runtime::Time delay_ns);
+    bool cancelNegativeAcknowledgmentRetry(uint32_t sequence);
+    void pauseForResourceNack(uint32_t sequence);
+    void resumeNackTraffic();
+    void resetNackPause();
+    std::set<uint32_t> acknowledged_tx_;
+    // Bounded by the existing local transmit window. A packet is retained
+    // until SES has a positive response, including a strictly-higher CACK's
+    // inferred DEFAULT. Keeping the cached payload is a simulator policy.
+    std::set<uint32_t> semantic_completed_tx_;
+    std::set<uint32_t> peer_clear_requests_;
+    // Suppress repeated go-back-N requests for the same missing PSN until it
+    // is acknowledged. RTO remains armed if that recovery burst is also lost.
+    UET::PDS::OrderedRecovery ordered_recovery_;
+    bool newDataAllowed() const {
+        return mode!=ROD || (!ordered_recovery_.active() && negative_acknowledgment_timers_.empty() && admission_deferred_retries_.empty());
+    }
+    // RUD's receive bitmap is represented by a bounded set in the behavioral
+    // model. Packet receipt and semantic completion are separate facts: a
+    // guaranteed response blocks CACK until the peer explicitly clears it.
+    std::set<uint32_t> received_rx_psns_;
+    std::set<uint32_t> completed_rx_psns_;
+    // §3.5.17: retain only the required-delivery PSN, never READ result bytes.
+    std::set<uint32_t> uncached_read_responses_;
+    // A Clear for an earlier READ data ACK can arrive while a duplicate READ
+    // is executing again. Preserve that valid frontier until its current RX
+    // handle is consumed; never require the source to repeat an accepted fact.
+    std::optional<uint32_t> deferred_read_clear_;
+    bool reissueReceivedRead(PDStoNET_pkt* packet);
+    bool requiresReadReissue(uint32_t sequence) const {
+        const auto request=tx_pkt_buffer.find(sequence);
+        if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
+            request->second.PDS_type!=RUOD_req_header) return false;
+        const auto fields=UET::SES::semantic_request_fields(request->second.SESpkt);
+        if (!fields) return false;
+        const auto& header=fields->header;
+        // §3.4.5.2 Figure 3-32: a large ACK threshold selects data ACKs for
+        // every fragment of a multi-packet READ, even when total>threshold.
+        return header.opcode==2 && (header.request_length<=read_ack_data_limit_ ||
+            read_ack_data_limit_>=read_response_payload_mtu_);
+    }
+    bool requiresDataAcknowledgment(uint32_t sequence) const {
+        if (requiresReadReissue(sequence)) return true;
+        const auto request=tx_pkt_buffer.find(sequence);
+        // §3.5.17: fetching atomics always return their unique result in an
+        // ACK, independent of the READ threshold. Never infer its data from
+        // DEFAULT/CACK, and never use READ's uncached re-execution policy.
+        if (!runtime_ || !runtime_->standard_wire || request==tx_pkt_buffer.end() ||
+            request->second.PDS_type!=RUOD_req_header) return false;
+        const auto fields=UET::SES::semantic_request_fields(request->second.SESpkt);
+        return fields && (fields->header.opcode==4 || fields->header.opcode==0x0e);
+    }
+    void clearReceivedPacketsThrough(uint32_t clear_through);
+    void advanceCumulativeAck();
+    UET::Runtime::Services* runtime_ = nullptr;
+    UET::Runtime::ReceiveHandleAllocator local_receive_handle_allocator_; // Legacy adapter without a Host; persists across free/init.
+public:
+
+    UET::Runtime::ReceiveHandleAllocator& receiveHandleAllocator() {
+        return runtime_?runtime_->receive_handle_allocator:local_receive_handle_allocator_;
+    }
+    bool ownsReceiveExecution(const PDC_SES_req& request) const {
+        if (state.load()==CLOSED || request.PDCID!=SPDCID || request.source_fep!=dst_fep ||
+            request.delivery_mode!=mode || request.connection_start_psn!=start_psn ||
+            request.local_data_traffic_class!=data_traffic_class_) return false;
+        const auto found=rx_pkt_map.find(request.rx_pkt_handle);
+        return found!=rx_pkt_map.end() && found->second.psn==request.orig_psn;
     }
     /**
      * @brief Get current PSN value Get current PSN value Get current PSN value
@@ -477,12 +766,13 @@ public:
      */
     static bool isClose(PDS_Nack_Codes nack_code)
     {
-        return (nack_code == UET_NO_PDC_AVAIL || 
-                nack_code == UET_NO_CCC_AVAIL || 
-                nack_code == UET_NO_BITMAP || 
-                nack_code == UET_INV_DPDCID || 
+        // §3.5.12.7: resource shortages are retriable. Fatal connection errors
+        // invalidate the PDC; confusing these classes closes healthy flows.
+        return (nack_code == UET_INV_DPDCID ||
                 nack_code == UET_PDC_HDR_MISMATCH || 
-                nack_code == UET_NO_RESOURCE);
+                nack_code == UET_CLOSING || nack_code == UET_CLOSING_IN_ERR ||
+                nack_code == UET_GTD_RESP_UNAVAIL || nack_code == UET_INVALID_SYN ||
+                nack_code == UET_PDC_MODE_MISMATCH || nack_code == UET_UNEXP_EVENT);
     }
 
     // ==================== Common implemented functions ====================
@@ -492,7 +782,7 @@ public:
      * @param pkt Received network packet Received network packet
      * @return Processing result handle Processing result handle
      */
-    uint16_t processRxReq(PDStoNET_pkt *pkt);
+    UET::Runtime::ReceivePacketHandle processRxReq(PDStoNET_pkt *pkt,bool duplicate=false);
 
     /**
      * @brief Update sending PSN tracker Update sending PSN tracker Update sending PSN tracker
@@ -551,13 +841,13 @@ public:
      * @param meta Packet metadata Packet metadata
      * @param pkt Packet data Packet data
      */
-    void fwdReq2SES(uint16_t handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt);
+    void fwdReq2SES(UET::Runtime::ReceivePacketHandle handle, RX_pkt_meta meta, SEStoPDS_pkt *pkt);
 
     /**
      * @brief Forward response to SES layer Forward response to SES layer Forward response to SES layer
      * @param pkt Response packet pointer Response packet指针
      */
-    void fwdRsp2SES(SEStoPDS_pkt *pkt);
+    void fwdRsp2SES(SEStoPDS_pkt *pkt,uint32_t original_sequence=0);
 
     /**
      * @brief Check reception error Check reception error Check reception error
@@ -569,6 +859,7 @@ public:
      * @param p Data packet to process Data packet to process
      */
     void rxCtrlNoop(PDStoNET_pkt *p);
+    bool acknowledgeNumberedControl(PDStoNET_pkt* packet);
 
     /**
      * @brief Process ACK_req control message Process ACK_req control message Process ACK_req control message
@@ -717,7 +1008,8 @@ public:
      * @param pkt Packet data Packet data
      * @param gtd_del Guaranteed delivery flag Guaranteed delivery flag
      */
-    void sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del);
+    void sendAck(PDS_next_hdr next_hdr,uint8_t retx,uint8_t req,uint32_t psn,SEStoPDS_pkt *pkt,bool gtd_del,
+                 const PDStoNET_pkt* trigger=nullptr);
     /**
      * @brief Send NACK packet Send NACK包
      * @param retx Retransmission flag Retransmission flag
@@ -726,7 +1018,8 @@ public:
      * @param payload Payload data Payload data
      * @param pkt Packet data Packet data
      */
-    void sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt);
+    void sendNack(uint8_t retx, uint32_t nack_psn, PDS_Nack_Codes nack_code, uint32_t payload,SEStoPDS_pkt *pkt,
+                  const PDStoNET_pkt* trigger=nullptr);
     /**
      * @brief Send request to network layer Send request to network layer Send request to network layer
      * @param req Request packet Request packet
@@ -762,7 +1055,7 @@ public:
      * @param psn Packet sequence number Packet sequence number
      * @param retry_count Current retry count Current retry count
      */
-    void startPacketTimer(uint32_t psn, uint16_t retry_count = 0);
+    void startPacketTimer(uint32_t psn, uint64_t retry_count = 0);
     
     /**
      * @brief Stop packet timer Stop packet timer Stop packet timer
@@ -817,11 +1110,15 @@ public:
      * @param src Source IP address Source IP address
      */
     void setFep(uint32_t dst, uint32_t src);
+    // Bind only after setFep and the starting PSN are initialized. The
+    // initiator knows its delivery mode at allocation; the target learns it
+    // from the validated SYN (§3.5.8.2 / §3.6.8.1.1).
+    void bindCongestionContext(pdc_mode delivery_mode);
 };
 
 // Default parameter definitions (using macro definitions to avoid duplicate definition errors) Default parameter definitions (using macro definitions to avoid duplicate definition errors)
 #ifndef Default_MPR
-#define Default_MPR 16               /**< Default maximum unacknowledged packet count 默认最大Number of unacknowledged packets */
+#define Default_MPR 8 // Legacy local packet bound, not the encoded wire MPR.
 #endif
 
 #ifndef Max_RTO_Retx_Cnt

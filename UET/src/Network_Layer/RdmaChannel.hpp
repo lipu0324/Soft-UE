@@ -2,6 +2,7 @@
 
 #include "PacketChannel.hpp"
 #include "PacketCodec.hpp"
+#include "RdmaConfig.hpp"
 
 #include <infiniband/verbs.h>
 
@@ -19,13 +20,7 @@ namespace UET::NetworkLayer {
 // The caller drives progress synchronously; no per-connection worker threads.
 class RdmaChannel final : public PacketChannel {
 public:
-    struct Config {
-        bool server = false;
-        std::string peer_ip = "127.0.0.1"; // TCP control channel only
-        uint16_t tcp_port = 18515;
-        std::string device = "mlx5_1";
-        uint8_t ib_port = 1;
-    };
+    using Config = RdmaConfig;
 
     explicit RdmaChannel(const Config& config);
     ~RdmaChannel() override;

@@ -1,0 +1,19 @@
+# RUD sprays two shortest-hop routes with unequal delay. One directed link
+# fails while frames are in flight, then recovers. Reverse links stay up.
+version: 1
+profile: experimental
+seed: 42
+duration_ns: 50000000
+hosts: [1, 2]
+switches: [10, 20]
+nscc: {enabled: true}
+links:
+  - {from: 1, to: 10}
+  - {from: 1, to: 20}
+  - {from: 10, to: 2}
+  - {from: 20, to: 2, extra_delay_ns: 5000}
+link_events:
+  - {at_ns: 500, from: 10, to: 2, up: false}
+  - {at_ns: 500000, from: 10, to: 2, up: true}
+operations:
+  - {type: write, delivery_mode: rud, source: 1, target: 2, bytes: 32768}

@@ -34,6 +34,7 @@
 #include "../IPDC.hpp"
 #include "../PDC.hpp"
 #include "../../PDS.hpp"
+#include "../../InitialSequenceAllocator.hpp"
 #include "ThreadSafeQueue.hpp"
 #include "../../../logger/Logger.hpp"
 
@@ -106,18 +107,24 @@ private:
         uint16_t pdcid;                                      // PDC identifier
         std::chrono::steady_clock::time_point last_activity; // Last activity time
 
-        IPDC_ProcessInfo(uint16_t id) : ipdc_instance(std::make_unique<I_PDC>()),
+        IPDC_ProcessInfo(uint16_t id, UET::Runtime::Services* services) : ipdc_instance(std::make_unique<I_PDC>(services)),
                                         state(STOPPED),
                                         should_stop(false),
                                         pdcid(id),
-                                        last_activity(std::chrono::steady_clock::now()) {}
+                                        last_activity(services ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now()) {}
     };
 
     // Manager member variables
     std::unordered_map<uint16_t, std::unique_ptr<IPDC_ProcessInfo>> ipdc_processes;
+    // §3.5.8.2: plaintext epochs are pseudorandom, separated by at least
+    // 2^16 from this local ID's previous last-used PSN, independent of peer.
+    UET::PDS::InitialSequenceAllocator initial_sequences_{42};
+    uint64_t initial_sequence_seed_=42;
+    std::unordered_map<uint16_t,uint32_t> next_legacy_start_psns_; // Explicit SUP1/SUE1 compatibility policy.
     std::mutex manager_mutex;                    // Manager mutex
     std::atomic<bool> manager_running;           // Manager running status
     std::unique_ptr<std::thread> monitor_thread; // Monitoring thread
+    UET::Runtime::Services* runtime_ = nullptr;
 
     // Configuration parameters
     static constexpr std::chrono::milliseconds OPENCHK_INTERVAL{1}; // open_chk call interval
@@ -128,7 +135,7 @@ public:
     /**
      * @brief Constructor
      */
-    IPDCProcessManager() : manager_running(false)
+    explicit IPDCProcessManager(UET::Runtime::Services* runtime = nullptr) : manager_running(false), runtime_(runtime)
     {
         LOG_DEBUG(__FUNCTION__, "IPDC process manager initialized");
     }
@@ -160,7 +167,7 @@ public:
         manager_running.store(true);
 
         // Start monitoring thread
-        monitor_thread = std::make_unique<std::thread>(&IPDCProcessManager::monitorLoop, this);
+        if (!runtime_) monitor_thread = std::make_unique<std::thread>(&IPDCProcessManager::monitorLoop, this);
 
         LOG_DEBUG(__FUNCTION__, "IPDC process manager started");
         return true;
@@ -208,7 +215,8 @@ public:
      * @param pdcid PDC identifier
      * @return Whether creation was successful
      */
-    bool createIPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep)
+    bool createIPDCProcess(uint16_t pdcid, uint32_t dst_fep, uint32_t src_fep,pdc_mode delivery_mode=ROD,
+                           uint8_t data_traffic_class=0)
     {
         std::lock_guard<std::mutex> lock(manager_mutex);
 
@@ -226,10 +234,18 @@ public:
         }
 
         // Create new process information
-        auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid);
+        auto process_info = std::make_unique<IPDC_ProcessInfo>(pdcid, runtime_);
 
         // Initialize IPDC instance
-        if (!process_info->ipdc_instance->initPDC(pdcid))
+        const bool standard_wire=runtime_ && runtime_->standard_wire;
+        if (standard_wire && initial_sequence_seed_!=runtime_->initial_sequence_seed) {
+            initial_sequences_.reseed(runtime_->initial_sequence_seed);
+            initial_sequence_seed_=runtime_->initial_sequence_seed;
+        }
+        const auto retained=next_legacy_start_psns_.find(pdcid);
+        const uint32_t initial_psn=standard_wire?initial_sequences_.reserve(pdcid):
+            retained==next_legacy_start_psns_.end()?1000:retained->second;
+        if (!process_info->ipdc_instance->initPDC(pdcid,initial_psn))
         {
             LOG_ERROR(__FUNCTION__, "Failed to initialize IPDC instance, PDCID: " + std::to_string(pdcid));
             return false;
@@ -246,10 +262,12 @@ public:
 
         // Set FEP addresses
         process_info->ipdc_instance->setFep(dst_fep, src_fep);
+        process_info->ipdc_instance->configureDataTrafficClass(data_traffic_class);
+        process_info->ipdc_instance->bindCongestionContext(delivery_mode);
         LOG_DEBUG_PARAM(__FUNCTION__, "IPDC instance FEP addresses set, PDCID: " << pdcid << ", DST_FEP: " << dst_fep << ", SRC_FEP: " << src_fep);
 
         // Start processing thread
-        process_info->process_thread = std::make_unique<std::thread>(
+        if (!runtime_) process_info->process_thread = std::make_unique<std::thread>(
             &IPDCProcessManager::ipdcProcessLoop, this, process_info.get());
 
         process_info->state.store(RUNNING);
@@ -288,6 +306,12 @@ public:
         }
 
         process_info->state.store(STOPPED);
+        // tx_cur_psn is the next unused number. Retaining its predecessor is
+        // conservative even if a numbered packet was allocated but not sent.
+        if (runtime_ && runtime_->standard_wire)
+            initial_sequences_.observe_last(pdcid,process_info->ipdc_instance->tx_cur_psn-1);
+        else next_legacy_start_psns_[pdcid]=process_info->ipdc_instance->tx_cur_psn;
+        ipdc_processes.erase(it);
         LOG_DEBUG(__FUNCTION__, "Successfully stopped IPDC process, PDCID: " + std::to_string(pdcid));
         return true;
     }
@@ -368,7 +392,7 @@ public:
 
         // Thread-safely add to receive queue - use instance member queue
         process_info->ipdc_instance->rx_pkt_q.push(pkt);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
     /**
@@ -386,8 +410,8 @@ public:
         }
 
         // Use instance member queue
-        process_info->ipdc_instance->tx_req_q.push(req);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        process_info->ipdc_instance->enqueueRequest(req);
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -407,7 +431,7 @@ public:
 
         // Use instance member queue
         process_info->ipdc_instance->tx_rsp_q.push(rsp);
-        process_info->last_activity = std::chrono::steady_clock::now();
+        if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
         return true;
     }
 
@@ -581,8 +605,52 @@ public:
         {
             return false;
         }
-        process_info->ipdc_instance->close_req = true;
+        process_info->ipdc_instance->closeReq();
         return true;
+    }
+
+    bool isConnectionClosing(uint16_t pdcid) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() &&
+            (found->second->ipdc_instance->close_req || found->second->ipdc_instance->closing ||
+             found->second->ipdc_instance->state.load()==CLOSE_ACK_WAIT);
+    }
+
+    bool openWithControl(uint16_t pdcid,pdc_mode mode,bool negotiation) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        if (found==ipdc_processes.end()) return false;
+        auto& context=*found->second->ipdc_instance;
+        if (context.state==ESTABLISHED || context.state==CREATING) return true;
+        if (context.state!=CLOSED) return false;
+        context.mode=mode; context.SYN=true; context.state=CREATING;
+        context.gen_cm=negotiation?NEGOTIATION:NOOP;
+        return true;
+    }
+
+    bool ownsReceiveExecution(const PDC_SES_req& request) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(request.PDCID);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance &&
+            found->second->ipdc_instance->ownsReceiveExecution(request);
+    }
+    bool notifyTransmit(const UET::Runtime::TransmitNotification& notification) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(notification.identity.local_pdc);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->notifyTransmit(notification);
+    }
+
+    bool requestConnectionProbe(uint16_t pdcid,uint32_t selective_base) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->requestProbe(selective_base);
+    }
+
+    bool hasOutstandingPacket(uint16_t pdcid,uint32_t sequence) {
+        std::lock_guard<std::mutex> lock(manager_mutex);
+        const auto found=ipdc_processes.find(pdcid);
+        return found!=ipdc_processes.end() && found->second->ipdc_instance->tx_pkt_buffer.count(sequence);
     }
 
     /**
@@ -604,6 +672,22 @@ public:
         return ipdc->canSafelyClose();
     }
 
+public:
+    bool progressOne() {
+        if (!runtime_) throw std::logic_error("manual progress requires injected runtime");
+        std::vector<uint16_t> ids;
+        for (const auto& item : ipdc_processes) ids.push_back(item.first);
+        std::sort(ids.begin(), ids.end());
+        bool worked = false;
+        for (auto id : ids) {
+            auto& info = *ipdc_processes.at(id);
+            if (!info.should_stop && info.state != PAUSED && info.ipdc_instance->hasPendingWork()) {
+                info.ipdc_instance->openChk();
+                worked = true;
+            }
+        }
+        return worked;
+    }
 private:
     /**
      * @brief IPDC process main loop
@@ -631,7 +715,7 @@ private:
             try
             {
                 process_info->ipdc_instance->openChk();
-                process_info->last_activity = std::chrono::steady_clock::now();
+                if (!runtime_) process_info->last_activity = std::chrono::steady_clock::now();
             }
             catch (const std::exception &e)
             {
