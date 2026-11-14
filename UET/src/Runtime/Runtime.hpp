@@ -6,6 +6,7 @@
 #include "../PDS/ReceiveDiagnostics.hpp"
 #include "../PDS/PsnRangeConfiguration.hpp"
 #include "../PDS/PdcMapping.hpp"
+#include "../SES/MemoryKeyAllocator.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -119,6 +120,9 @@ struct Services {
     uint16_t semantic_response_cursor=0;
     RetiredSemanticMessages retired_semantic_responses;
     RetiredSemanticReceives retired_semantic_receives;
+    // Native private registries share only allocation history across SES
+    // replacement. Registrations and their local authority remain separate.
+    std::shared_ptr<SES::MemoryKeyAllocator> semantic_memory_keys=std::make_shared<SES::MemoryKeyAllocator>();
 
 };
 

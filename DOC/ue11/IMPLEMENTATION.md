@@ -438,4 +438,5 @@ This protects late queued PDS upcalls across object replacement; incomplete sour
 reads. Target READ replacement now retires response tokens separately and terminates held RX handles.
 Target synchronization close also terminates held atomic handles and cancels pending WRITE notifications without progressing the barrier.
 Host-owned receive tombstones reject continuations belonging to closed SES until EOM Clear/Close, with aggregate receive credits.
-Accepted upcalls drain during an SES gap; new reliable requests wait for a live adapter. Receive-close boundaries and stale-PDC queues still need further checks. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).
+Accepted upcalls drain during an SES gap; new reliable requests wait for a live adapter. Partial receive CQs and unmatched ROD final handles also terminate on close.
+Private MR automatic allocation history survives Endpoint replacement while registrations keep independent local authority. Stale-PDC queues and full management generations remain open. See [Endpoint lifetime](ENDPOINT-LIFETIME.md).

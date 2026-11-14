@@ -2,6 +2,7 @@
 #include "IntegerAtomics.hpp"
 #include "FetchingAtomics.hpp"
 #include "MemoryKey.hpp"
+#include "MemoryKeyAllocator.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -144,7 +145,8 @@ enum class Atomic64 { Add, Swap, CompareSwap, And, Or, Xor, Min, Max };
 
 class MemoryRegistry {
 public:
-    MemoryRegistry()=default;
+    explicit MemoryRegistry(std::shared_ptr<MemoryKeyAllocator> provider_keys={})
+        : key_allocator_(provider_keys?std::move(provider_keys):std::make_shared<MemoryKeyAllocator>()) {}
     MemoryRegistry(const MemoryRegistry&)=delete;
     MemoryRegistry& operator=(const MemoryRegistry&)=delete;
     static constexpr uint64_t kIdempotentSafe = MemoryKeyFormat::IdempotentSafe;
@@ -195,8 +197,7 @@ public:
                 resource_index=index; // Table2-14: this field is the MR index for optimized RMA.
             } else if (!resource_index) resource_index=1; // Default native RMA resource, not a wildcard.
         } else {
-            if (next_key_>kRkeyMask) throw std::overflow_error("memory keys exhausted");
-            key=kProviderSpace | next_key_++ | (options.idempotent_safe?kIdempotentSafe:0);
+            key=kProviderSpace | key_allocator_->allocate() | (options.idempotent_safe?kIdempotentSafe:0);
         }
         Region region{key,job,pid,permissions,bool(key&kIdempotentSafe),std::move(storage)};
         region.allow_any_job=options.allow_any_job; region.resource_index=resource_index;
@@ -442,7 +443,8 @@ private:
             throw MemoryAccessError(MemoryError::Bounds);
         return region;
     }
-    uint64_t next_key_ = 1,next_registration_=0;
+    std::shared_ptr<MemoryKeyAllocator> key_allocator_;
+    uint64_t next_registration_=0;
     std::set<uint32_t> jobs_;
     std::shared_ptr<const int> authority_=std::make_shared<const int>(0);
     std::map<uint64_t,std::list<Region>> regions_; // Appending a scope preserves other region references.
