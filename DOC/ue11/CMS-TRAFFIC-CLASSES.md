@@ -1,42 +1,7 @@
-# CMS 的数据流量类身份
+# CMS 数据流量类与包裁剪
 
-§3.6.6 要求不同数据 TC 使用不同 CCC：一个 TC 的拥塞或信用不足不能阻止另一个
-TC 的合法发送。源 RUD 的共享查询因此至少需要 peer+outgoing data TC；ROD 仍按
-各自 PDC 实例独立分配。ACK/control 使用的反向流量类不作为该源数据 CCC 的 TC。
-
-`CMS::Connection::traffic_class` 是本地源数据 TC，默认0，加入连接身份以及 NSCC/TFC
-的源上下文 group key。TFC 的8位 CCC_ID 仍在一个 peer 的所有活动源 CCC 中唯一，
-不会为不同 TC 各自复用相同标识符；目的继续按 source peer+CCC_ID 关联共享预算。
-
-`cms_traffic_class_test` 直接在 CMS 接口上验证：
-
-- 同 TC 的两个 RUD PDC 共享窗口/信用，不同 TC 独立。
-- TC 0 用满 NSCC 窗口后，TC 1 仍能发送。
-- TC 1 的累计 TFC 授权不能补充 TC 0；同 TC 另一成员收到的授权可共同使用。
-- 关闭一个成员不会清除仍活动的其他 TC 或共享成员状态。
-
-固定源 `593e72199b2050585d0f246c76d5ea8813f94ab5` 的独立 CMS CMake/CTest 探针
-已通过：普通0.03秒，ASan/UBSan/leak 0.04秒。探针直接编译本版本的 TfcEngine.cpp
-与 CmsTrafficClassTest.cpp，并链接固定6f4115d版本未改动的 softue_message（普通/
-Sanitizer 分别匹配）。日志为 `/tmp/softue-cms-tc-probe-{normal,asan}-tests.log`，
-探针 CMake 定义为 `/tmp/softue-cms-tc-probe/CMakeLists.txt`。这不是仓库完整177项构建。
-
-它只处理 CMS 分组身份，**尚未**把 Native Operation、
-PDC 创建、NIC 排队和 DSCP/TC 配置贯穿连接。`PdsHost::enable_tfc` 仍显式限制 TC 0，
-原有 Host 构造的 Connection 也默认 TC 0。因此不能凭这个单元宣布多 TC 端到端支持，
-也不能把 CMS 直接调用测试称作网络隔离回归；后续还需统一配置与原 PDS/NIC 场景。
-
-完整176项整合验证在另一份固定源 `6f4115d818d65eb75213ba1364df5a359ab76fde`
-上进行，位于 `/workspace/Soft-UE-tfc-runtime`。该版本没有本文件所述 TC 字段增量；
-即使176项通过，也不能作为这里新增第177项或多 TC 功能的证据。
-
-## 正在接入的原生数据路径
-
-后续增量增加 `Operation::traffic_class`，默认0，在任何同步成员、消息 ID 或 MR
-预约之前检查合法性。非零类必须先通过
-`PdsHost::configure_data_traffic_class(traffic_class, dscp)` 配置。当前本地 NIC 有8个
-队列类，DSCP 必须为0～63、不能与另一个数据类重复，也不能使用模拟器控制 DSCP48。
-这是一套显式仿真配置，不是协议新增字段或固定的标准 DSCP 分配。
+§3.6.6 要求不同数据 TC 使用不同 CCC。原生 `Operation::traffic_class`（默认0）
+现贯穿 SES 请求、PDC 映射、不可变 PDC 身份、NSCC/TFC 分组和 NIC/IP DSCP：
 
 ```mermaid
 flowchart LR
@@ -48,67 +13,68 @@ flowchart LR
   NIC --> Wire[Configured IP DSCP]
 ```
 
-PDC 创建时先设置数据类，再绑定 CMS；缓存重传保留同一类。编号 ROD NOOP/Close
-沿该数据类排队，避免通过控制队列越过早先数据。ACK 和 Credit 等反向控制仍使用
-控制类1。`open_connection` 的最后一个可选参数也允许选择已配置的数据类。
+提交在预约 Sync Group、消息 ID、MR 和 PDC 之前检查类号。可靠 RUD/ROD 的非零类
+须经 `PdsHost::configure_data_traffic_class` 或该类的 `configure_trimming` 配置。
+本地有8个队列类，DSCP 为0～63；不与其他数据类或保留的包角色冲突。
+默认控制 DSCP48，注册裁剪策略时可统一配置其他控制 DSCP。这些数值是显式
+仿真配置，不是规范固定的 DSCP 数值。非零 RUDI/UUD 暂时显式拒绝。
+
+`CMS::Connection::traffic_class` 加入连接身份和源端分组查询。同一 peer+TC 的
+RUD 可共享 CCC，ROD 各自独立。TFC 的8位 CCC_ID 在一个 peer 的所有活动源 CCC
+中唯一，不按 TC 重复使用；目的按 source peer+CCC_ID 关联预算。ACK/Credit 等
+反向控制使用控制类1。编号 ROD NOOP/Close 保留自己的数据类，避免越过先前数据。
 
 接收 upcall 的 `local_data_traffic_class` 是接收 PDC 本地的发送类，用于精确 CMS
-buffer lease 身份；它不从对端 DSCP 推导。比如本机 TC3 发起 READ，对端可在其
-默认 TC0 返回数据，本机的 upcall 仍必须匹配本机 PDC 的 TC3 上下文以释放缓冲。
+buffer lease 身份，不从对端 DSCP 推导。例如本机 TC3 发起 READ，对端可由 TC0
+返回数据，而本机释放缓冲时仍需匹配 TC3 的 PDC/CCC。
 
-`native_traffic_class_test` 新增16个真实双流 NIC 场景、4个反向 READ 场景及配置/提交
-边界。它检查实际 DSCP/Frame queue、不同 CCC_ID、受阻 TC0 不阻止 TC3 完成、
-编号 ROD NOOP 的队列，以及无效/未配置类在分配 PDC 之前拒绝。此接入尚未编译；
-正在等待固定6f版本的176项全量 Sanitizer 回归结束，期间不启动其他编译。
+## 有限发送副本预算
 
-这一版接入先支持可靠 RUD/ROD 的最佳努力网络。非零 RUDI/UUD 类仍明确拒绝；多
-数据 TC 与旧单一 trimming 配置的组合也在配置时拒绝，下一步需要统一每个 TC 的
-data/NO_TRIM/trimmed DSCP 分类与交换机配置。不能据此宣告完整多 TC Profile。
+原 FIFO producer 在首条消息超过8个副本槽时可能让后续 TC 尚未进入 PDS/NIC。
+独立负向探针用1024字节 TC0（16个64字节包）和512字节 TC3 重现：丢失首包后，
+`requests0=8`、`requests3=0`、`queued=8`，两条操作均未完成。
+日志 `/tmp/softue-native-tc-long-flow-probe-tests.log` 保留这一失败。
 
-## 发送副本窗口的跨 TC 调度
+新的仿真策略按活动 TC 分享有限副本预算，优先生产占用较少的类，平局轮换；
+不撤销已有副本。只选择每类第一条待生产消息，保持类内提交顺序。单 TC 保留原
+FIFO 路径；deferrable、rendezvous 或 READ 结果窗口受阻只阻止该类的首条消息。
+这是 §3.6.8 允许的显式调度策略，不是规范指定算法。容量过小或预算已被占用时
+仍可能有正常本地资源背压，不承诺无限资源或零等待。
 
-首次接入版本 `d3fc55cbd30229751be7a61d4e0aafd77a758b19` 的 CMS 单元通过，原生
-夹具的一个早期假设失败：未启用 CC 时，丢包可经快速 NACK 恢复，不能要求它在
-1毫秒时仍未完成。现仅对真正窗口/信用受阻的情况检查这一状态。
+`native_traffic_class_test` 覆盖16个1024/512字节双流场景、4个反向 READ 场景、
+4个错误清理/同 Endpoint 复用场景及配置边界。大 WRITE 的错误 key 不阻止另一类
+成功；MSG_ERROR 尾清理后，两个类再次合法 WRITE，逐类副本数及 producer 数归零。
+只读诊断接口对非法类索引抛出 `out_of_range`，不将其用于数组访问。
 
-进一步扩大 TC0 消息到1024字节（16个64字节包，大于8个本地副本槽），独立探针
-重现另一问题：丢失首包后，`requests0=8`、`requests3=0`、`queued=8`、两条操作
-都未完成。TC3 尚未进入 PDS/NIC；原 `submission_order_` 的首条大消息占满副本
-预算。日志为 `/tmp/softue-native-tc-long-flow-probe-tests.log`。这与 CCC 是否独立
-是不同边界，不能只用 CMS 模型测试宣布端到端独立。
+## 每个数据类的裁剪策略
 
-新的仿真调度策略按活动 TC 共享同一个有限副本预算，优先生产占用较少的类，平局
-轮换；已有副本不撤销。每次只移动该 TC 的第一条待生产消息，保持同 TC 的提交
-顺序。单 TC 保留原 FIFO 路径；关闭错误尾的原清理路径也保留。deferrable、rendezvous
-或 READ 结果窗口暂不可继续时，只阻止该 TC 的首条消息，不跳过同 TC 的早先消息。
-这是 §3.6.8 允许的显式调度策略，不是规范指定的队列算法。容量过小或副本已经由
-其他类持有时，仍然可能出现正常的本地资源背压；不承诺无限副本或零等待。
+`TrimmingOptions::data_traffic_class` 标识 DATA 和 NO_TRIM 的本地队列。Host 按类
+注册策略；`LinkConfig::additional_trimming` 补充原有单策略入口，保留默认 TC0。
+整个候选配置校验成功后才更新映射，失败不改变现有规则。各类 DATA、NO_TRIM、
+TRIMMED、LASTHOP DSCP 含义必须无歧义，各类共用一个控制 DSCP。
 
-回归现使用1024字节 TC0 与512字节 TC3，并继续检查目标完整字节和唯一完成。
-固定源 `b1c24bc28e82edb9f91f4630ba49131324f9818f` 的13项范围回归已通过：
-普通1.22秒、ASan/UBSan/leak 12.34秒；日志为
-`/tmp/softue-native-tc-fair-{normal,asan}-tests.log`。原负向证据不会被更名为通过，
-这也不是配置的178项完整回归。
+交换机每跳从实际 IP DSCP 重建队列；Host 从裁剪 DSCP 选择解码策略。TFC 类型
+13/14 的裁剪请求保留16字节 PDS 头，包括 CCC_ID/credit_target，不解码 SES，
+不将残留字节视为有效语义数据或新接收信用。
 
-后续新增4个同 Endpoint 错误清理/复用场景：TC0的大 WRITE 被有效格式的错误 key
-拒绝，TC3继续成功；等待 MSG_ERROR 尾清理后，在同一 Endpoint 再次提交两个类的
-合法 WRITE。检查每个 TC 的副本数、producer 消息数和全局计数均归零，防止计数
-下溢或遗留预约影响后续操作。这项增量尚待固定版本编译。只读诊断接口
-`queued_fragments_for_traffic_class` / `producer_messages_for_traffic_class` 对非法索引
-抛出 out_of_range，不把错误类号用于数组访问。
+`multi_traffic_class_trimming_test` 包含16组 RUD/ROD、NSCC/TFC 开关及
+IPv4/UDP、IPv6/native 场景。两条数据流经过真实有限队列，TC3 溢出并产生
+LASTHOP 裁剪通知，原 PDS NACK/重传恢复后检查两个目标区域的完整字节和唯一完成。
+适配器主动清除 Frame 队列类，验证实际 DSCP 分类；另有16组信用扩展头保留/
+截短边界及配置冲突回归。
 
-## 每个数据 TC 的包裁剪配置（待编译验证）
+## 证据边界
 
-`TrimmingOptions::data_traffic_class` 标识 DATA 和 NO_TRIM 的本地队列。Host 可按类
-注册策略，`LinkConfig::additional_trimming` 补充原有单策略入口；默认 TC0 行为保留。
-整个候选配置校验成功后才更新 Host 映射：不同类的 DATA、NO_TRIM、TRIMMED、
-LASTHOP DSCP 含义不能冲突，所有类共用一个控制 DSCP。数值是显式仿真配置。
+- `593e72199b2050585d0f246c76d5ea8813f94ab5`：独立 CMS 模型探针，普通0.03秒、
+  Sanitizer 0.04秒；仅分组查询，不是端到端多 TC。
+- `b1c24bc28e82edb9f91f4630ba49131324f9818f`：原生公平 producer 的13项范围，
+  普通1.22秒、ASan/UBSan/leak 12.34秒；不包含之后的错误复用及裁剪增量。
+- `54a1e64a56adfb6b883f8577875f5fe67850b446`：上述多 TC、错误复用和裁剪的16项
+  范围全部通过，普通1.81秒、ASan/UBSan/leak 15.89秒。日志为
+  `/tmp/softue-multi-tc-trim-{normal,asan}-tests.log`，报告为
+  `/tmp/softue-multi-tc-trim-scoped-report.json`。均为虚拟时间场景；与独立 RCCC
+  编译可重叠，墙钟时间不作为性能结果。
+- `afaca88f68928f7ec105d9d022fe136c0f043fa9` 的完整176项证据包含真实 TFC，
+  不包含这里的多 TC 增量。当前整合版准备179项完整回归，尚无该范围通过声明。
 
-交换机每跳从实际 IP DSCP 重建队列类；Host 从裁剪 DSCP 选择解码策略。TFC 类型
-13/14 的裁剪请求保留16字节 PDS 头，包括 CCC_ID/credit_target；不解码 SES，
-不把残留字节视为有效语义数据或新接收信用。
-
-`multi_traffic_class_trimming_test` 规划验证16组 RUD/ROD、NSCC/TFC 开关与
-IPv4/UDP、IPv6/native 的真实队列溢出恢复；适配器主动清除本地 Frame TC，
-检查 DSCP 能恢复分类。另含16组信用扩展头保留/截短边界和配置冲突回归。
-本增量尚未编译，不属于已通过的 b1c24bc 13项范围或 afaca88 176项完整证据。
+非零 RUDI/UUD、完整队列/管理配置及 Profile 审核仍开放，四种 Profile 均未宣布完成。

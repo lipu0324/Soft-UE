@@ -2,7 +2,7 @@
 
 `CMS/TfcCredit.hpp`、目的预算、信用线格式和 PDS 发送准入桥已有分范围验证。
 `TfcEngine` 已接入真实 PDS 信用反馈、缓冲池、定时器和 CCC 生命周期，并通过
-固定源的完整176项整合回归。Host 仍是显式实验配置，限 TC0、共用 Payload MTU；
+固定源的完整176项整合回归。Host 仍是显式实验配置，共用 Payload MTU；多 TC 后续证据见 CMS-TRAFFIC-CLASSES.md；
 没有 Endpoint 宣告 TFC/Profile 支持，正式规范歧义与其他配置仍需复核。
 
 ## 显式的单位
@@ -108,7 +108,7 @@ PDS 发送准入桥新增 `can_send_attempt` / `transmitted_attempt`，显式传
 `PdsHost::enable_tfc` 在创建连接前启用；可先启用 NSCC，再将 TFC 与其组合。
 配置区分 outgoing（对端目的缓冲几何）和 incoming（本机目的缓冲几何），允许
 双向 cell/overhead 不同。Host 当前共用一个 Payload MTU，实验适配器仅支持数据
-TC 0，其他 TC 的提交显式拒绝。RUDI/UUD 继续走不受 UET CCC 控制的路径。
+TC 0（该固定验证版本）；后续配置的可靠数据 TC 见 CMS-TRAFFIC-CLASSES.md。RUDI/UUD 继续走不受 UET CCC 控制的路径。
 
 原 PDS 队列登记累计需求，原 TX cache 提供可信重传身份，原 receive admission
 在 SES 资源预约前检查目的 CCC 预算。成功接受后取得 transport buffer lease；
