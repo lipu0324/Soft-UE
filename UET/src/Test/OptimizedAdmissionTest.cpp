@@ -22,8 +22,8 @@ int main() {
                 PDS_Manager manager(&services); CHECK(manager.initPDSM());
                 PDStoNET_pkt packet{}; packet.src_fep=1; packet.dst_fep=2; packet.SESpkt.bth_type=format;
                 if (format==Optimized_Response_with_Data_Header) {
-                    packet.PDS_type=RUOD_ack_header; packet.PDS_header.RUOD_ack_header.type=ACK;
-                    packet.PDS_header.RUOD_ack_header.next_hdr=UET_HDR_RESPONSE_DATA_SMALL;
+                    packet.PDS_type=RUDI_header; packet.PDS_header.RUDI_header.type=RUDI_RESP;
+                    packet.PDS_header.RUDI_header.next_hdr=UET_HDR_RESPONSE_DATA_SMALL;
                 } else {
                     packet.PDS_type=RUOD_req_header; auto& header=packet.PDS_header.RUOD_req_header;
                     header.type=ordered?ROD_REQ:RUD_REQ; header.flags.syn=1; header.spdcid=17;

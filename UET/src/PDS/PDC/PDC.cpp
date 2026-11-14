@@ -302,9 +302,26 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
     // This preserves a guaranteed error when the same ACK advances CACK.
     const auto explicit_request=tx_pkt_buffer.find(explicit_sequence);
     if (!acknowledgment.flags.p && explicit_request!=tx_pkt_buffer.end() && requiresDataAcknowledgment(explicit_sequence) &&
-        acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA && packet.SESpkt.bth_type==Semantic_Response_with_Data_Header) {
-        const auto& request=explicit_request->second.SESpkt.bth_header.Standard_Header;
-        const auto& result=packet.SESpkt.bth_header.Semantic_Response_with_Data_Header;
+        ((acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA && packet.SESpkt.bth_type==Semantic_Response_with_Data_Header) ||
+         (acknowledgment.next_hdr==UET_HDR_RESPONSE_DATA_SMALL && packet.SESpkt.bth_type==Optimized_Response_with_Data_Header))) {
+        const auto fields=UET::SES::semantic_request_fields(explicit_request->second.SESpkt);
+        if (!fields) return;
+        const auto& request=fields->header;
+        const bool compact=packet.SESpkt.bth_type==Optimized_Response_with_Data_Header;
+        // SMALL data results MUST use DATA_SMALL (Table3-21). Match its
+        // original PSN as well as the ACK's explicit PSN before projecting
+        // omitted fields from that exact cached request. No wire MID exists.
+        auto response=packet.SESpkt;
+        if (compact) {
+            const auto result=packet.SESpkt.bth_header.Optimized_Response_with_Data_Header;
+            if (fields->has_message_id || result.original_request_psn!=explicit_sequence) return;
+            response.bth_type=Semantic_Response_with_Data_Header;
+            auto& full=response.bth_header.Semantic_Response_with_Data_Header;
+            full={}; full.opcode=result.opcode; full.version=result.version; full.return_code=result.return_code;
+            full.list=result.list; full.job_id=result.job_id; full.payload_length=result.payload_length;
+            full.modified_length=request.request_length;
+        } else if (fields->wire_format==Optimized_Header) return;
+        const auto& result=response.bth_header.Semantic_Response_with_Data_Header;
         const bool fetching_atomic=request.opcode==4;
         const uint32_t offset=fetching_atomic || request.som?0:request.diff.som_false.message_offset;
         const bool valid_offset=offset<=request.request_length;
@@ -318,7 +335,6 @@ void PDC::processSemanticAcknowledgment(const PDStoNET_pkt& packet) {
         if (!result.version && result.opcode==2 && result.return_code==1 && result.job_id==request.job_id &&
             result.read_request_msg_id==request.msg_id && valid_offset && (!fetching_atomic || (datatype<=9 && (count || zero_atomic))) && result.message_offset==offset &&
             result.modified_length==request.request_length && result.payload_length==count && packet.SESpkt.payload.size()==count) {
-            auto response=packet.SESpkt;
             if (!semantic_completed_tx_.count(explicit_sequence)) fwdRsp2SES(&response,explicit_sequence);
             semantic_completed_tx_.insert(explicit_sequence);
         }
@@ -1855,7 +1871,8 @@ void PDC::txRsp(SES_PDC_rsp *rsp){
         LOG_DEBUG(__FUNCTION__, formatLogMessage("响应不包含SES层数据"));
         sendAck(PDS_next_hdr::UET_HDR_NONE,0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
     }
-    else sendAck(rsp->pkt.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
+    else sendAck(rsp->pkt.bth_type==Optimized_Response_with_Data_Header?UET_HDR_RESPONSE_DATA_SMALL:
+        rsp->pkt.bth_type==Semantic_Response_with_Data_Header?UET_HDR_RESPONSE_DATA:UET_HDR_RESPONSE,
         0,0,meta.psn,&rsp->pkt,rsp->gtd_del);
     rx_pkt_map.erase(rsp->rx_pkt_handle);//Delete metadata //删除元数据
     if (deferred_read_clear_) {

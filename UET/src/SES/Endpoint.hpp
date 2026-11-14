@@ -107,6 +107,7 @@ struct EndpointCapabilities {
     bool noop=true, send=true, write=true;
     bool optimized_small_write=true,optimized_medium_write=true,optimized_medium_send=true;
     bool optimized_small_atomic=true,optimized_medium_atomic=true;
+    bool optimized_small_fetching_atomic=true,optimized_medium_fetching_atomic=true;
     bool datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
@@ -149,6 +150,7 @@ public:
             throw std::invalid_argument("invalid SES configuration");
         capabilities_.optimized_small_write=capabilities_.optimized_medium_write=capabilities_.optimized_medium_send=host_.services().standard_wire;
         capabilities_.optimized_small_atomic=capabilities_.optimized_medium_atomic=host_.services().standard_wire;
+        capabilities_.optimized_small_fetching_atomic=capabilities_.optimized_medium_fetching_atomic=host_.services().standard_wire;
         capabilities_.rudi_write=capabilities_.rudi_read=host_.services().standard_wire;
         host_.configure_semantic_payload_mtu(static_cast<uint32_t>(mtu_));
         host_.set_receive_admission(
@@ -265,7 +267,7 @@ private:
             const bool small=operation.header_format==RequestHeaderFormat::Small;
             const bool medium=operation.header_format==RequestHeaderFormat::Medium;
             const bool write=operation.type==OperationType::Write;
-            const bool atomic=operation.type==OperationType::Atomic;
+            const bool atomic=operation.type==OperationType::Atomic || is_fetching_atomic;
             const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
             if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
                 (operation.type!=OperationType::Noop && !write && !atomic && !(medium && send)) || (write && operation.immediate_data)) {
@@ -1786,7 +1788,8 @@ private:
                     optimized_header.initiator=standard.initiator; optimized_header.match_bits=standard.match_bits;
                 } else {
                     auto& optimized_header=request.pkt.bth_header.Optimized_Header; fill(optimized_header);
-                    if (standard.opcode==1 || standard.opcode==3) optimized_header.resource_index=operation.remote_key&0xfff;
+                    if (standard.opcode==1 || standard.opcode==3 || standard.opcode==4)
+                        optimized_header.resource_index=operation.remote_key&0xfff;
                 }
                 // pkt_len includes the operation extension as well as the
                 // optimized base header. PDS/CMS must account the actual SES
@@ -2216,10 +2219,15 @@ private:
         if (response.delivery_mode==RUDI) { respond_rudi(response); return; }
         if (response.original_request_format==Optimized_Header || response.original_request_format==Small_Message_RMA_Header) {
             const auto pending=pending_.find(response.local_submission_id);
-            if (pending==pending_.end() || pending->second.wire_semantic_format!=response.original_request_format ||
-                response.pkt.bth_type!=Semantic_Response_Header || response.pkt.bth_header.Semantic_Response_Header.message_id) return;
+            if (pending==pending_.end() || pending->second.wire_semantic_format!=response.original_request_format) return;
             auto projected=response; projected.original_request_format=Standard_Header;
-            projected.pkt.bth_header.Semantic_Response_Header.message_id=response.local_submission_id;
+            if (response.pkt.bth_type==Semantic_Response_Header) {
+                if (response.pkt.bth_header.Semantic_Response_Header.message_id) return;
+                projected.pkt.bth_header.Semantic_Response_Header.message_id=response.local_submission_id;
+            } else if (response.pkt.bth_type==Semantic_Response_with_Data_Header) {
+                if (response.pkt.bth_header.Semantic_Response_with_Data_Header.read_request_msg_id) return;
+                projected.pkt.bth_header.Semantic_Response_with_Data_Header.read_request_msg_id=response.local_submission_id;
+            } else return;
             // This projection never reaches the encoder. The ordinary engine
             // still verifies FEP, PDC incarnation, Job and outstanding PSN.
             respond(projected); return;
@@ -3000,6 +3008,18 @@ private:
             result.opcode=2; result.return_code=1; result.job_id=header.job_id;
             result.read_request_msg_id=header.msg_id; result.payload_length=previous.size();
             result.modified_length=header.request_length; response.rsp.payload=std::move(previous);
+            if (request.request_wire_format==Optimized_Header || request.request_wire_format==Small_Message_RMA_Header) {
+                // Table3-21 mandates DATA_SMALL for SMALL fetching atomics.
+                // It carries the original PSN and one returned datatype, not
+                // an invented MID or the dual-operand request's32B length.
+                const auto full=result;
+                response.rsp.bth_type=Optimized_Response_with_Data_Header;
+                auto& compact=response.rsp.bth_header.Optimized_Response_with_Data_Header;
+                compact={}; compact.opcode=full.opcode; compact.return_code=full.return_code;
+                compact.job_id=full.job_id; compact.payload_length=full.payload_length;
+                compact.original_request_psn=request.orig_psn;
+                response.rsp_len=12+response.rsp.payload.size();
+            }
             message.pid=selected.absolute_pid; message.resource_index=selected.resource_index;
             message.initialized=true; message.completed=true; message.completion_reported=true;
             message.received=header.request_length; message.segments.emplace(0,header.request_length);
@@ -3078,9 +3098,9 @@ private:
         };
         const auto& header=request.pkt.bth_header.Standard_Header;
         if (!header.som || !header.eom || header.request_length>mtu_) { reject(SemanticReturnCode::UnsupportedSize); return; }
-        if ((header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && !(medium && (header.opcode==5 || header.opcode==9))) ||
+        if ((header.opcode!=0 && header.opcode!=1 && header.opcode!=3 && header.opcode!=4 && !(medium && (header.opcode==5 || header.opcode==9))) ||
             (header.opcode==1 && header.hd)) { reject(SemanticReturnCode::UnsupportedOperation); return; }
-        if (!small || (header.opcode!=1 && header.opcode!=3)) { receive_standard(request); return; }
+        if (!small || (header.opcode!=1 && header.opcode!=3 && header.opcode!=4)) { receive_standard(request); return; }
         if (header.rel && !memory_.has_job(header.job_id)) { reject(SemanticReturnCode::BadJob); return; }
         try {
             const auto selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,

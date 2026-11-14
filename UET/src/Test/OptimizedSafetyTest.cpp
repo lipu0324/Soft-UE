@@ -90,7 +90,7 @@ static void source_rejections() {
         case 3: operation.type=OperationType::Read; break;
         case 4: operation.type=OperationType::Atomic;
             operation.atomic_datatype=static_cast<IntegerAtomicDatatype>(99); break;
-        case 5: operation.type=OperationType::FetchingAtomic; break;
+        case 5: operation.type=OperationType::FetchingAtomic; operation.atomic_datatype=static_cast<IntegerAtomicDatatype>(99); break;
         case 6: operation.payload.resize(129); break;
         case 7: operation.header_format=static_cast<RequestHeaderFormat>(123); break;
         case 8: operation.remote_key|=uint64_t{1}<<56; break;
@@ -107,7 +107,8 @@ static void legacy_capabilities() {
     source.memory().add_job(1);
     CHECK(!source.capabilities().optimized_small_write && !source.capabilities().optimized_medium_write &&
         !source.capabilities().optimized_medium_send && !source.capabilities().optimized_small_atomic &&
-        !source.capabilities().optimized_medium_atomic && !source.capabilities().rudi_write && !source.capabilities().rudi_read);
+        !source.capabilities().optimized_medium_atomic && !source.capabilities().optimized_small_fetching_atomic &&
+        !source.capabilities().optimized_medium_fetching_atomic && !source.capabilities().rudi_write && !source.capabilities().rudi_read);
     Operation operation; operation.type=OperationType::Write; operation.peer=2;
     operation.remote_key=MemoryKeyFormat::Optimized|MemoryKeyFormat::IdempotentSafe|1;
     operation.header_format=RequestHeaderFormat::Small;

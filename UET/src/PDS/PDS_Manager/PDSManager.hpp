@@ -361,12 +361,13 @@ public:
     {
         PDStoNET_pkt received_packet{};
         if (!Net_rx_pkt_q.pop(received_packet)) return;
-        // Request-only optimized formats now have an explicit SES projection.
-        // Optimized data responses and non-RUD/ROD uses remain unsupported;
-        // reject them before any PDC mutation, never cast their union as STD.
+        // Optimized fetching results use DATA_SMALL in their exact PDS ACK.
+        // Reverse-direction DATA_SMALL and non-RUD/ROD uses remain fenced;
+        // no caller may cast an optimized union as STD.
         const bool optimized_request=received_packet.SESpkt.bth_type==Optimized_Header ||
             received_packet.SESpkt.bth_type==Small_Message_RMA_Header;
-        if (!received_packet.trimmed && (received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header ||
+        if (!received_packet.trimmed && ((received_packet.SESpkt.bth_type==Optimized_Response_with_Data_Header &&
+            received_packet.PDS_type!=RUOD_ack_header) ||
             (optimized_request && received_packet.PDS_type!=RUOD_req_header))) { ++event_cnt; return; }
 
         if (received_packet.PDS_type==RUDI_header) {

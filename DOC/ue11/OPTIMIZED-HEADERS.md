@@ -29,11 +29,11 @@ MEDIUM的union只表达同一个槽的两种名字，不授权任何内存访问
 
 | 原生格式 | 已接通操作 | 约束 |
 |---|---|---|
-| SMALL | NOOP、WRITE、整数非取回 atomic | RMA key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
-| MEDIUM | NOOP、WRITE、整数非取回 atomic、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
+| SMALL | NOOP、WRITE、整数 atomic/fetching atomic | RMA key 必须是 OPTIMIZED 类，低12位索引置于线上 RI |
+| MEDIUM | NOOP、WRITE、整数 atomic/fetching atomic、SEND、tagged SEND | 保留完整 key/match_bits；SEND 可携带立即数 |
 | 两者 | RUD、ROD；NSCC 开或关 | SOM=EOM=1，消息不超过配置的 Payload MTU（最大8192） |
 
-RMA 立即数、READ、fetching/tagged/浮点 atomic、Sync Group、RUDI/UUD 优化请求及优化数据响应尚未接通。
+RMA 立即数、READ、tagged/浮点 atomic、Sync Group、RUDI/UUD 优化请求及反向通道的优化 READ 数据响应尚未接通；fetching atomic 已在 ACK 中使用 DATA_SMALL。
 源端拒绝不支持的组合；接收端独立验证格式和操作，不能依赖可信源端的 API 检查。
 Table2-14/15 的 RMA 选择条件排除 FI_REMOTE_CQ_DATA，而 §3.4.3.2 正文还讨论立即数；
 当前保守关闭该组合，MEDIUM SEND 的 header data 共用槽则实际验证。
@@ -52,6 +52,12 @@ Legacy SUP1 端点不公布这些标准格式能力，也不公布标准 RUDI �
 源端完成适配只在本地补回提交句柄，再由现有逻辑检查 FEP、PDC incarnation、Job、未完成 PSN。
 DEFAULT 推断、重传、恰好一次放置和 Clear 回收继续由现有 PDS 负责。
 
+fetching atomic 的成功结果使用 DATA_SMALL12B。PDS 同时核对 ACK 指向的 PSN 和
+`original_request_psn`，然后从该确切请求恢复本地省略字段；双操作数请求为32B，返回
+`payload_length` 仍是一个数据类型的宽度（最大16B），不能把32B当作返回值或目标 MR 访问宽度。
+SMALL 请求的全尺寸 DATA 响应被拒绝（Table3-21）。所有取回结果保留在原有 PDS 保证交付缓存
+直到 Clear，不能因 DEFAULT/CACK 到来而假定数据已交付，重传也不能重新执行非幂等原子。
+
 SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 Job/PID/index
 作用域查找实际注册 key，再用原有 WRITE/atomic 授权路径检查权限、存活注册、资源代次及区间。
 索引解析不授予访问权限；绝对寻址不能借 Job 在多个相同索引间任意选一个。
@@ -69,6 +75,10 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
   计数实际 MR 写入，核对数据与每次唯一完成，包括不能重复执行的 SUM。乱序延迟发生在实际 MAC 发出之后。
 - `optimized_atomic_test`：800组固定算术向量，8种整数类型×12种操作×两种格式/模式/NSCC；
   加上 MTU、零字节 WRITE 与独立接收端权限/对齐/范围/操作控制拒绝。期望结果不调用实现的算术 helper。
+- `optimized_fetching_atomic_test`：1664组双格式、RUD/ROD、NSCC、10种整数类型和20种操作，
+  另含零字节操作、丢失/重复结果、缓存旧值、目标撤销、源端旧 MR 身份及错误 PSN/Job/DEFAULT。
+- `optimized_fetching_concurrency_test`：40组同连接8个独立返回缓冲区；注入结果丢失、重复、
+  延迟及不相符原请求 PSN，按实际原子写入次数检查恰好一次执行。
 - `optimized_safety_test`：62组 Job/PID/索引、代次、权限、私有注册、撤销、绝对歧义，
   Job/PID/index零及index4095、UINT64_MAX区域末端、8192B与源端拒绝、legacy能力。
 - `optimized_malformed_test`：28组绕过 Endpoint 的缺 SOM/EOM、超 MTU、未支持 READ、
@@ -102,3 +112,7 @@ SMALL 省略 key 的 IDEMPOTENT_SAFE 等元数据。目标先按 Table2-47 的 J
 RSP_DATA_SMALL直接送到err_exit；未修改它的源码或shared library来扩大对照范围。
 现有48项独立parser/CRC比较仍通过，用于保护其他已实现格式。这不构成优化头正向
 参考解析或事务互通证据，也不构成任何Profile验收声明。
+
+优化 fetching 的首轮四项普通回归通过（5.52s），包括1664个新场景及标准头 fetching 回归，
+见 `/tmp/softue-optimized-fetch-tests.log`。并发与 sanitizer 证据待其执行完成后补记；
+期间存在其他构建，因此上述耗时只记录测试运行，不作为性能结果。
