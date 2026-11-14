@@ -921,6 +921,38 @@
         "HPC"
       ],
       "evidence_note": "Native RegionOptions and shared-registry logical-message ownership implemented; exact registration pins cover READ/WRITE and integer atomics, including READ re-execution and actual Clear/Close retirement. Public libfabric2.0 has no standard use-once extension entry. Final commit-specific validation pending; see USE-ONCE-RMA.md. No Profile conformance claim."
+    },
+    {
+      "id": "SES-TAGGED-INTEGER-ATOMICS",
+      "reference": "Table 3-1; §3.4.2.5.4; Table 3-23; libfabric2.0 fi_atomic(3)",
+      "summary": "Tagged 整数原子、取回与 CAS 的投递授权和公开 API",
+      "status": "partial",
+      "tests": [
+        "tagged_atomic_header_test",
+        "tagged_atomic_test",
+        "tagged_atomic_boundary_test",
+        "libfabric_tagged_atomic_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native exact/wildcard/rank posting authority and shared integer kernels cover STD/MEDIUM,8–64bit nonfetching and8–128bit single-element fetching/CAS. Frozen4737e52 passes13 normal CTests6.12s and13ASan/UBSan/leak CTests39.64s, including prior standard/optimized atomics and use-once. Frozena363e23 passes9 public provider normal regressions5.42s with no compilers, including new2-provider FI_TAGGED MSG/query/inject/private-key rejection checks. Final consolidated source still requires sanitizer/public/full validation. See TAGGED-ATOMICS.md; no HPC conformance claim."
+    },
+    {
+      "id": "SES-OPTIMIZED-SYNCHRONIZATION",
+      "reference": "§3.4.3.6; Table 3-21; §3.4.4.8",
+      "summary": "SMALL/MEDIUM 单包同步组的成员与完成动作",
+      "status": "partial",
+      "tests": [
+        "optimized_synchronization_test",
+        "optimized_synchronization_target_test",
+        "optimized_synchronization_fault_test",
+        "optimized_synchronization_boundary_test"
+      ],
+      "profiles": [
+        "HPC"
+      ],
+      "evidence_note": "Native single-packet SMALL/MEDIUM WRITE and completing integer atomic now connect to existing group/registration/PDS lifecycle; MEDIUM completing WRITE uses HD with offset0. Source validation precedes member consumption, index selection and PDS/CMS length include the synchronization extension. An independent baseline producer reproduced Unsupported.48 transaction,32 cross-PDC/revocation,84 fault and12 boundary scenes are added but not yet compiled or validated. See OPTIMIZED-SYNCHRONIZATION.md; no complete M5/Profile claim."
     }
   ]
 }

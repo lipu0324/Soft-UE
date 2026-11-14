@@ -37,7 +37,18 @@ static void group(RequestHeaderFormat format,pdc_mode mode,bool congestion,bool 
         CHECK(packet.SESpkt.eth_type==Synchronized_Operation_Extension_Header || packet.SESpkt.eth_type==Synchronized_Atomic_Extension_Headers);
         ++requests;
     });
-    if (completing_first) source.submit(completing);
+    if (completing_first) {
+        source.submit(completing); loop.run_until(kMillisecond);
+        Completion completion{}; CHECK(!target.poll_completion(completion));
+        if (completing_atomic) {
+            CHECK(!source.poll_completion(completion));
+            CHECK(target.memory().read(1,1,region.key,0,8,3)==std::vector<uint8_t>(8));
+        } else {
+            // RUD WRITE placement cannot wait for other group members;
+            // only the aggregate notification waits (§3.4.4.8/§3.4.9.6).
+            CHECK(target.memory().read(1,1,region.key,0,8,3)==completing.payload);
+        }
+    }
     const auto first_identifier=source.submit(first); source.submit(second);
     if (!completing_first) source.submit(completing);
     loop.run_until(90*kMillisecond);

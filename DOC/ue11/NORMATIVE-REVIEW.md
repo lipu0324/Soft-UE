@@ -274,12 +274,12 @@ Sync Group 与 MULTI_RECV 在这些 Profile 表中的格也为空；它们仍属
 | UE11-p0232-001 | §3.4.3.5，原子扩展/错误长度 | 每包带原子扩展，不与 rendezvous 扩展组合；元素数按长度/类型宽度；不整倍数长度执行零字节。 | native 对 request_length/packet count/offset 的整倍数检查在原子访问前执行；完整实际线端 malformed-message 与多包错误联合验收仍需补全。 |
 | UE11-p0232-002 | §3.4.3.5，fetch 单单位 | fetching 不操作多于一个所选类型元素，并保留旧值用于响应。 | fetching 未实现；非取回 bulk 不受此单单位限制。 |
 | UE11-p0233-001 | §3.4.3.6，同步完成类型 | completing SYNC_WRITE 设置 hd；SYNC_ATOMIC 长度至多8、hd=0，只用允许的非取回操作/至多8字节类型，排除 READ/MSWAP/CSWAP。 | 原生 SYNC_WRITE/SYNC_ATOMIC 已逐项检查 hd、类型、操作和总长≤8，源端组事务与目标计数/延迟动作有回归；组完成后额外成员/合法复用分类仍部分，见 SYNCHRONIZED-TRANSACTIONS.md。 |
-| UE11-p0233-002 | §3.4.3.6，同步 scope/count | 目标按源 IP+sync_group 查状态；完成操作携包括自身的总消息数，非完成 write 为0。 | M5 缺失；正文“所有 sync write 为0”的宽泛用语需与表 3-15 completing 分支一起解释，不能让 completing write 丢失计数。 |
-| UE11-p0233-003 | 表 3-15，字段编码续文 | group/count 各16位；非 completing count=0，completing count=整组消息数。 | 已阅读下一页续表；M5 缺失，还需零/最大计数与重复完成消息回归。 |
+| UE11-p0233-002 | §3.4.3.6，同步 scope/count | 目标按源 IP+sync_group 查状态；完成操作携包括自身的总消息数，非完成 write 为0。 | 原生 STD 已支持源 FEP/group scope 及 count；优化头增量正在验证。正文“所有 sync write 为0”需与表 3-15 completing 分支解释，completing write 保留整组计数。 |
+| UE11-p0233-003 | 表 3-15，字段编码续文 | group/count 各16位；非 completing count=0，completing count=整组消息数。 | 原生 STD 状态模型和回归已检查计数及重复 completing；优化头扩展新增边界/故障测试待固定版本验证。完整最大组端到端验收仍需复核。 |
 | UE11-p0235-001 | §3.4.3.7，带数据响应选择 | 请求长度大于 Payload MTU 时使用完整带数据响应；optimized request 不用此完整格式。 | 完整数据响应头已用于原生多包 READ、ACK/反向请求两种 carrier，响应关联经真实 PDS 测试；optimized 请求/响应仍缺失。 |
 | UE11-p0237-001 | §3.4.3.8，packed 非 DEFAULT | 一组请求中任意响应不是 DEFAULT 时，PDS ACK 中每个请求都有对应响应。 | M8 缺失；需整组默认/混合错误/含数据响应的组合测试。 |
 | UE11-p0238-001 | 表 3-19，local response | reserved 发送0；mm/opcode/version/code/ehl/payload_length 按本地格式解释。 | M8 缺失；不能由标准 SES reserved 接收测试推广到本地头。 |
-| UE11-p0239-001 | 表 3-21，small 合法集跨页 | optimized non-matching 单包，NO_OP payload0，其他允许请求不超过一 Payload MTU。 | M5 格式未实现；需结合下一页完整 opcode 列表与响应头要求。 |
+| UE11-p0239-001 | 表 3-21，small 合法集跨页 | optimized non-matching 单包，NO_OP payload0，其他允许请求不超过一 Payload MTU。 | SMALL/MEDIUM 基础头、选定 RMA/消息/整数原子/READ 路径已有实现，tagged integer atomic 增量已通过 scoped 回归；优化同步组新增代码待验证。仍需逐项复核完整合法 opcode 集。 |
 | UE11-p0240-001 | 表 3-21 续，格式/opcode 限制 | 分别校验 small/medium/std/local 的合法 opcode、NO_OP0、单包、offset 和长度约束；local ac0 至多16383、ac1 至多4095且仍受 MTU约束；响应格式与请求匹配。 | 标准头与零长 NO_OP 子集有测试，其余紧凑/packed 与完整响应关联缺失；本候选含多组独立义务，不能整体通过。 |
 | UE11-p0241-001 | §3.4.4.1，buffer 集/行为 | relative tuple 和 absolute pair 唯一选择 buffer 集；每个 buffer 可配置 use-once/persistent；direct 按 Job。 | native posted receive/tagged 与每 MR use-once/persistent 选择已有实现；原生 RMA 固定精确注册和共享域消息所有权。直接本地地址仍缺失；见 USE-ONCE-RMA.md。 |
 | UE11-p0241-002 | §3.4.4.1.1，untagged 消耗 | ROD 消耗队首，同消息所有包命中同一 buffer；RUD 可按到达次序；无 buffer 时采用规范 unexpected 流程。 | native posting/pinned registration、分片/FIFO、late receive 与 RUD/ROD provider 恢复已有回归；全部 unexpected 扩展行为仍待 M5。 |
@@ -352,8 +352,8 @@ error 后可提前 MSG_ERROR 的续文已连读；示例不能替代完整 opcod
 | 候选 ID | 章节与分类 | 拆分后的义务及适用条件 | 当前证据与后续处理 |
 |---|---|---|---|
 | UE11-p0253-003 | §3.4.4.7.3.2，代次不匹配 | 重发并使用响应给出的新 generation，允许立即重发。 | provider 已采用返回代次重试；native 低层完成合同仍需补全。 |
-| UE11-p0253-004 | §3.4.4.8，同步组完成 | 每组恰好一个 completing；收到全部 ACK 后才复用 group ID。 | M5 缺失；最多65534个 write 与 completing 的关联及失败释放需测试。 |
-| UE11-p0253-005 | §3.4.4.8，目标同步状态跨页 | 跟踪未完成组并遵守排序；RUD 不得为了排在其他 SYNC_WRITE 后而延迟 payload。 | M5 缺失；Job 关联/校验为 SHOULD，不能误作所有实现 MUST。 |
+| UE11-p0253-004 | §3.4.4.8，同步组完成 | 每组恰好一个 completing；收到全部 ACK 后才复用 group ID。 | 原生 STD 以一个 completing 关联组消息，成功后等待所有 ACK；失败组编号隔离。优化头同路径增量待验证，完整65535消息组及合法复用/额外消息分类仍需复核。 |
+| UE11-p0253-005 | §3.4.4.8，目标同步状态跨页 | 跟踪未完成组并遵守排序；RUD 不得为了排在其他 SYNC_WRITE 后而延迟 payload。 | 原生 STD 的 WRITE 放置与聚合动作分离，独立 PDS 屏障和 RUD 首先放置有回归；优化头新增同类检查待验证。Job 关联/校验为 SHOULD，不能误作所有实现 MUST。 |
 | UE11-p0255-001 | §3.4.5.1.1，单包请求 | 无 ID 的紧凑头以 PSN 关联；SES 处理完成后才响应，DC 等到 GO。 | 标准头子集有覆盖；紧凑头和 tagged 扩展缺失。DEFAULT 是 SHOULD，显式 RESPONSE 允许。 |
 | UE11-p0257-001 | §3.4.5.2，标准 READ 序列 | 对数据响应再提供语义响应，可总用 DEFAULT；目标接受错误结果并 Clear 保证响应。 | M5 缺失；请求、反向数据 PDC 和结果缓存生命周期都需验收。 |
 | UE11-p0258-001 | §3.4.5.2，READ 接收能力 | 两种 READ 序列均须保证不依靠再次上线交互就可接受所有响应数据。 | M5 缺失；发 READ 前预留接收容量，不能靠收到数据再发信用解决。 |
