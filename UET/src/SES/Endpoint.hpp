@@ -110,6 +110,7 @@ struct EndpointCapabilities {
     bool optimized_small_fetching_atomic=true,optimized_medium_fetching_atomic=true;
     bool optimized_small_read=true,optimized_medium_read=true;
     bool datagram_send=true;
+    bool optimized_medium_datagram_send=true;
     bool rudi_write=true,rudi_read=true; // Idempotent-safe registered memory; no target CQ or PDC.
     bool relative_addressing=true, absolute_addressing=true;
     bool use_once_rma=true; // Native RegionOptions; not a public libfabric extension claim.

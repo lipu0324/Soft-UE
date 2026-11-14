@@ -149,8 +149,8 @@ auto Endpoint::submit_message(Operation operation,uint64_t application_operation
         const bool medium=operation.header_format==RequestHeaderFormat::Medium;
         const bool write=operation.type==OperationType::Write || is_synchronized_write;
         const bool atomic=operation.type==OperationType::Atomic || operation.type==OperationType::SynchronizedAtomic || operation.type==OperationType::TaggedAtomic || is_fetching_atomic;
-        const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend;
-        if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || is_datagram || payload_length>mtu_ ||
+        const bool send=operation.type==OperationType::Send || operation.type==OperationType::TaggedSend || is_datagram;
+        if (!host_.services().standard_wire || (!small && !medium) || operation.delivery_mode==RUDI || (is_datagram && !medium) || payload_length>mtu_ ||
             (is_read && operation.read_length>mtu_) || (is_tagged_atomic && (!medium || operation.remote_offset)) ||
             (operation.type!=OperationType::Noop && !write && !atomic && !is_read && !(medium && send)) ||
             (write && operation.immediate_data && !(is_synchronized_write && medium && !operation.remote_offset))) {
@@ -3032,6 +3032,14 @@ auto Endpoint::receive_rudi(const PDC_SES_req& request) -> void {
 }
 
 auto Endpoint::receive(const PDC_SES_req& request) -> void {
+    if (request.delivery_mode==UUD) {
+        // UUD never reserves an Incoming message. MEDIUM has a local STD
+        // field projection from PDS, while its wire-format provenance stays
+        // explicit; do not enter the reliable PSN/message-owner lookup.
+        if (request.request_wire_format==Standard_Header || request.request_wire_format==Small_Message_RMA_Header)
+            receive_datagram(request);
+        return;
+    }
     const bool small=request.request_wire_format==Optimized_Header;
     const bool medium=request.request_wire_format==Small_Message_RMA_Header;
     if (!small && !medium) { receive_standard(request); return; }
@@ -3347,6 +3355,11 @@ auto Endpoint::receive_datagram(const PDC_SES_req& request) -> void {
     if (header.opcode!=7 || header.version || header.msg_id || header.dc ||
         !header.som || !header.eom || header.ie ||
         header.request_length!=request.pkt.payload.size() || (header.rel && !memory_.has_job(header.job_id))) return;
+    if (request.pkt.payload.size()>mtu_) {
+        // §3.4.2.11: even the final/only packet fits the configured Payload
+        // MTU. UUD discards this violation without a semantic ACK or posting.
+        trace_.record(node_,"datagram_drop_mtu",request.pkt.payload.size()); return;
+    }
     ResourceSelection selected{};
     try {
         selected=resources_.resolve(header.job_id,header.rel,header.PIDonFEP,header.resource_index,
@@ -3362,6 +3375,7 @@ auto Endpoint::receive_datagram(const PDC_SES_req& request) -> void {
         completions_.push_back({0,posted->context,CompletionStatus::Success,
             static_cast<uint32_t>(request.pkt.payload.size()),0,true,
             header.hd?std::optional<uint64_t>{header.diff.som_true.header_data}:std::nullopt});
+        trace_.record(node_,"datagram_delivered",request.pkt.payload.size());
         posted_.erase(posted);
     } catch (const MemoryAccessError&) {
         // Unreliable receive errors are local drops, never ACK/NACKs.
