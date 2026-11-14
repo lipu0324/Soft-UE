@@ -4,6 +4,7 @@
 #include "../Network_Layer/PdsPacketCodec.hpp"
 #include "../Network_Layer/UetWireCodec.hpp"
 #include "../CMS/NsccEngine.hpp"
+#include "../SES/SemanticReturnCode.hpp"
 #include "../PDS/PDS_Manager/process/PDSProcessManager.hpp"
 #include <deque>
 
@@ -27,6 +28,7 @@ public:
         services_.actual_transmit_notifications=port_.provides_transmit_timing();
         services_.pdc_event=[this](const PdcEvent& event) { context_events_.push_back(event); };
         if (!manager_.start()) throw std::runtime_error("PDS initialization failed");
+        set_receive_admission({},{});
         std::weak_ptr<int> life = lifetime_;
         port_.set_writable_handler([this, life] { if (!life.expired()) wake(); });
         port_.set_receiver([this, life](Frame frame) {
@@ -76,6 +78,12 @@ public:
 
     PDSProcessManager& manager() { return manager_; }
     bool closed() const { return stopped_; }
+    static RetiredSemanticReceives::Key semantic_receive_identity(const PDC_SES_req& request) {
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const bool no_mid=request.request_wire_format==Optimized_Header || request.request_wire_format==Small_Message_RMA_Header;
+        const uint64_t identity=no_mid?RetiredSemanticReceives::packet_identity|request.orig_psn:header.msg_id;
+        return {request.source_fep,request.PDCID,header.job_id,header.initiator,identity,request.connection_start_psn};
+    }
     // Configure before submitting work. The owning runtime remains responsible
     // for progress; changing resource policy does not create background work.
     Services& services() { return services_; }
@@ -150,10 +158,24 @@ public:
         if (stopped_ || !manager_.requestConnectionProbe(local_pdc_id,selective_base)) return false;
         wake(); return true;
     }
-    void set_request_handler(std::function<void(const PDC_SES_req&)> callback) { request_handler_ = std::move(callback); }
+    void set_request_handler(std::function<void(const PDC_SES_req&)> callback) {
+        request_handler_ = std::move(callback); wake();
+    }
     void set_receive_admission(std::function<SemanticAdmission(const PDC_SES_req&)> reserve,
                                std::function<void(const PDC_SES_req&)> cancel) {
-        services_.semantic_admission=std::move(reserve);
+        services_.semantic_admission=[this,reserve=std::move(reserve)](const PDC_SES_req& request) {
+            // Reverse READ data does not allocate a target message. Even a
+            // closed source must be able to discard and acknowledge it.
+            if (request.pkt.bth_type!=Standard_Header) return SemanticAdmission::ExistingMessage;
+            if (request.pkt.bth_type==Standard_Header &&
+                services_.retired_semantic_receives.contains(semantic_receive_identity(request)))
+                return SemanticAdmission::ExistingMessage;
+            // A live custom PDS/SES adapter may omit native message credits.
+            // With no adapter, new reliable PSNs must stay unaccepted so the
+            // peer can retry after binding rather than orphan an RX handle.
+            if (!request_handler_) return SemanticAdmission::Rejected;
+            return reserve?reserve(request):SemanticAdmission::ExistingMessage;
+        };
         services_.cancel_semantic_reservation=std::move(cancel);
     }
     // Establish the transport without inventing an SES NO_OP message. The
@@ -227,9 +249,60 @@ public:
         transmit_notifications_.clear();
         services_.retired_semantic_messages.clear();
         services_.retired_semantic_responses.clear();
+        services_.retired_semantic_receives.clear();
         trace_.record(node_, "host_closed");
     }
 private:
+    void answer_inactive_receive(const PDC_SES_req& request) {
+        if (request.delivery_mode==UUD) {
+            trace_.record(node_,"inactive_ses_datagram",request.source_fep); return;
+        }
+        if (request.delivery_mode==RUDI) {
+            SEStoPDS_pkt response{}; response.bth_type=Semantic_Response_Header;
+            auto& result=response.bth_header.Semantic_Response_Header;
+            result.opcode=1; result.return_code=static_cast<uint8_t>(SES::SemanticReturnCode::Undeliverable);
+            const auto& header=request.pkt.bth_header.Standard_Header;
+            result.job_id=header.job_id; result.message_id=header.msg_id; result.ri_generation=header.ri_generation;
+            if (!respond_rudi(request,response)) throw std::runtime_error("PDS rejected inactive RUDI result");
+            return;
+        }
+        if (request.pkt.bth_type==Semantic_Response_with_Data_Header) {
+            // §3.4.5.2: cancelled/late READ data still drains its reliable
+            // reverse direction, without writing an application result MR.
+            SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
+            response.rsp_len=12; response.rsp=UET::PDS::default_semantic_response(request.pkt);
+            if (!manager_.pushSESResponse(response)) throw std::runtime_error("PDS rejected inactive READ data result");
+            wake(); return;
+        }
+        if (request.pkt.bth_type==Standard_Header) {
+            // A custom adapter can disappear after acceptance without owning
+            // native Incoming state. Give that accepted message the same
+            // bounded, Clear/Close-retired error ownership as native SES.
+            const auto& header=request.pkt.bth_header.Standard_Header;
+            services_.retired_semantic_receives.retain(semantic_receive_identity(request),
+                {0,0,false,false,static_cast<uint8_t>(SES::SemanticReturnCode::Undeliverable),
+                    static_cast<uint8_t>(header.ri_generation),0});
+            answer_retired_receive(request);
+        }
+    }
+    bool answer_retired_receive(const PDC_SES_req& request) {
+        if ((request.delivery_mode!=RUD && request.delivery_mode!=ROD) || request.pkt.bth_type!=Standard_Header) return false;
+        const auto& header=request.pkt.bth_header.Standard_Header;
+        const auto result=services_.retired_semantic_receives.answer(semantic_receive_identity(request),request.orig_psn,header.eom);
+        if (!result) return false;
+        // Table3-25 / §3.4.4.3: repeat the closed message's sticky error.
+        // Its first error has a delivery guarantee; later fragments still
+        // consume their RX handles, without allocating another guarantee.
+        SES_PDS_rsp response{}; response.PDCID=request.PDCID; response.rx_pkt_handle=request.rx_pkt_handle;
+        response.rsp_len=12; response.gtd_del=result->guaranteed; response.rsp.bth_type=Semantic_Response_Header;
+        auto& semantic=response.rsp.bth_header.Semantic_Response_Header;
+        semantic.opcode=1; semantic.return_code=result->return_code;
+        semantic.job_id=header.job_id; semantic.message_id=header.msg_id;
+        semantic.modified_length=result->modified_length; semantic.ri_generation=result->generation;
+        semantic.list=result->response_list;
+        if (!manager_.pushSESResponse(response)) throw std::runtime_error("PDS rejected retired receive response");
+        trace_.record(node_,"retired_ses_request",request.orig_psn); wake(); return true;
+    }
     static uint64_t sequence_seed_for_host(uint64_t scenario_seed,uint32_t host) {
         // Independent deterministic streams for equal-seed simulated hosts.
         return scenario_seed^(uint64_t{host}<<32)^host;
@@ -289,6 +362,7 @@ private:
                 const auto event=context_events_.front(); context_events_.pop_front();
                 services_.retired_semantic_messages.observe(event,MAX_PDC);
                 services_.retired_semantic_responses.observe(event,MAX_PDC*2,MAX_PDC);
+                services_.retired_semantic_receives.observe(event);
                 services_.retired_semantic_messages.request_read_retirement(
                     [this](uint16_t local_pdc) { return request_connection_close(local_pdc); });
                 if (context_event_handler_) context_event_handler_(event);
@@ -389,20 +463,24 @@ private:
                 }
                 if (stopped_) return;
             }
-            if (request_handler_) {
+            {
                 PDC_SES_req request{};
                 while (manager_.popSESRequest(request)) {
                     trace_.record(node_, "ses_request", request.orig_psn);
-                    request_handler_(request);
+                    if (!answer_retired_receive(request)) {
+                        if (request_handler_) request_handler_(request);
+                        else answer_inactive_receive(request);
+                    }
                     if (stopped_) return;
                     worked = true;
                 }
             }
-            if (response_handler_) {
+            {
                 PDC_SES_rsp response{};
                 while (manager_.popSESResponse(response)) {
                     trace_.record(node_, "ses_response",response.original_sequence);
-                    response_handler_(response);
+                    if (response_handler_) response_handler_(response);
+                    else trace_.record(node_,"inactive_ses_result",response.original_sequence);
                     if (stopped_) return;
                     worked = true;
                 }

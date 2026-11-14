@@ -161,3 +161,36 @@ GitHub Actions 对 `fc4fd85bd9d8fe4291eafa7ba53f209b6b85d399` 的 run186
 （ID43553700539）三项作业均已成功：simulation OFF、simulation ON（sanitizer）
 及 reference-wire。该提交包含源端分片收尾和目标 READ 替换，但不包含随后
 `9b41d7f` 的同步目标关闭改动；不能把这次 CI 结果标记为后续源码的完整验证。
+
+## 旧接收消息与 SES 空档
+
+`/tmp/softue-receive-replacement-before-tests.log` 复现了一个与 MR 撤销无关的错误：
+域和合法 MR 保持不变，旧消息只放置前4字节便替换目标 Endpoint，其后续片段被新
+Endpoint 当作自己的消息并写入同一 MR。修复按原有 FEP/PDC/Job/initiator/MID/连接
+代次保存 Host 退休记录；优化请求使用标记后的完整 PSN，与 STD MID 分开。
+
+记录只保留已修改长度、首错、generation、response list、EOM 与保证响应事实，不保留
+旧缓冲区、MR 或回调。后续片段由 Host 重复错误、消费真实 RX handle，不进入新 SES。
+只有同连接的 EOM Clear 或 Close 可回收；已确认前缀、反向 TransmitClear、错误 peer/
+PDC/epoch 均不能释放它。活跃 Incoming 与退休记录共同占用消息准入预算。
+`receive_endpoint_replacement_test` 覆盖4个 RUD/ROD、NSCC 场景，包含 EOM Clear 后
+复用相同 MID 的新消息成功；`retired_semantic_receives_test` 独立覆盖 Job0、PSN 回绕、
+错误连接、只有前缀的 Clear、source/target 方向及优化身份分离。
+
+另一负向日志 `/tmp/softue-inactive-ses-original-tests.log` 记录 PDS 已接受请求、但 Host
+尚未交给 SES 就关闭对象时，队列和 RX handle 永久遗留。测试在真实报文入站后单步
+同一个 PDS，准确停在准入与 Host dispatch 之间，不替换协议栈。
+Host 现在在没有 SES 时也处理旧请求的终止响应；新可靠请求先收到无 SES 消息状态的
+资源 NACK，保留未接受的 PSN，待新适配器绑定后按原重传路径准入。
+迟到 READ 数据沿用 §3.4.5.2 的丢弃并确认策略；UUD 不生成响应，RUDI 返回不可交付。
+没有本地消费者的语义结果被丢弃，不积累到后续对象。
+`inactive_semantic_adapter_test` 覆盖8个关闭/队列/新绑定重试场景。
+
+九项普通定向 CTest 全部通过（0.45s），日志
+`/tmp/softue-receive-lifetime-normal-tests.log`，包含上述三项及源/目标替换、关闭收尾、
+同步目标关闭、READ 提前接受。部分放置接收的取消 CQ、未匹配 SEND 的最终句柄、
+失效 PDC 的队列与其他跨对象组合仍需后续验收，不宣告 M1 完成。
+
+同一源码 `5b497b1` 的九项 ASan/UBSan/泄漏回归全部通过（3.55s），日志
+`/tmp/softue-receive-lifetime-asan-tests.log`。构建目录启用 libfabric 与参考实现，
+本轮仅运行上述九项定向用例；不把配置启用写成完整 provider/参考互通验收。
